@@ -1,0 +1,280 @@
+# Quy chuẩn giới hạn tài nguyên tối thiểu cho toàn bộ dự án (Benchmarking Low-Resource Cap)
+# Mỗi container bị khóa cứng ở tầng Linux cgroup: Tối đa 250MB RAM (không cho phép swap) và 0.25 CPU core.
+x-low-resource-limits: &low-resource-limits
+  cpus: 0.25
+  mem_limit: 250m
+  memswap_limit: 250m
+  deploy:
+    resources:
+      limits:
+        cpus: '0.25'
+        memory: 250M
+      reservations:
+        cpus: '0.05'
+        memory: 32M
+
+services:
+  # ============================================================================
+  # 1. TẦNG INFRASTRUCTURE (Mỗi container <= 250MB RAM & <= 0.25 CPU)
+  # ============================================================================
+  postgres:
+    <<: *low-resource-limits
+    image: postgres:16-alpine
+    container_name: commerce-lab-postgres
+    restart: unless-stopped
+    # Tinh chỉnh bộ nhớ nội bộ của PostgreSQL để chạy mượt trong trần 250MB RAM mà không bị OOM-killer
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=64MB"
+      - "-c"
+      - "effective_cache_size=128MB"
+      - "-c"
+      - "work_mem=2MB"
+      - "-c"
+      - "maintenance_work_mem=16MB"
+      - "-c"
+      - "max_connections=60"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_password
+      POSTGRES_DB: commerce_lab
+      TZ: UTC
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-postgres-schemas.sql:/docker-entrypoint-initdb.d/01-init-schemas.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d commerce_lab"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mongodb:
+    <<: *low-resource-limits
+    image: mongo:7.0
+    container_name: commerce-lab-mongodb
+    restart: unless-stopped
+    # Mặc định WiredTiger lấy tối thiểu 256MB cache -> bắt buộc ép xuống 0.1GB (~100MB) để sống trong 250MB RAM
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.1"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_admin
+      MONGO_INITDB_ROOT_PASSWORD: mongo_password
+      MONGO_INITDB_DATABASE: commerce_lab_doc
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+      - ./scripts/init-mongo-indexes.js:/docker-entrypoint-initdb.d/01-init-indexes.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    <<: *low-resource-limits
+    image: redis:7.2-alpine
+    container_name: commerce-lab-redis
+    restart: unless-stopped
+    # Giới hạn maxmemory 180MB để tổng RSS container không bao giờ vượt 250MB
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "180mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redpanda:
+    <<: *low-resource-limits
+    image: docker.redpanda.com/redpandadata/redpanda:v24.1.4
+    container_name: commerce-lab-redpanda
+    restart: unless-stopped
+    # Khóa Seastar engine ở 1 luồng (--smp 1) và 200MB RAM (--memory 200M) để khớp trần 250MB container
+    command:
+      - redpanda
+      - start
+      - --smp 1
+      - --memory 200M
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+
+  # ============================================================================
+  # 2. TẦNG 10 MICROSERVICES (Mỗi service <= 250MB RAM & <= 0.25 CPU)
+  # Bật toàn bộ bằng: docker compose --profile app up -d --build
+  # ============================================================================
+  api-gateway:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: api-gateway
+    container_name: commerce-lab-api-gateway
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      API_GATEWAY_PORT: "8080"
+    ports:
+      - "8080:8080"
+
+  catalog-pricing-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: catalog-pricing-service
+    container_name: commerce-lab-catalog-pricing
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      CATALOG_PRICING_PORT: "8081"
+    ports:
+      - "8081:8081"
+
+  inventory-warehouse-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: inventory-warehouse-service
+    container_name: commerce-lab-inventory-warehouse
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      INVENTORY_WAREHOUSE_PORT: "8082"
+    ports:
+      - "8082:8082"
+
+  order-checkout-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: order-checkout-service
+    container_name: commerce-lab-order-checkout
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      ORDER_CHECKOUT_PORT: "8083"
+    ports:
+      - "8083:8083"
+
+  payment-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: payment-service
+    container_name: commerce-lab-payment
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      PAYMENT_SERVICE_PORT: "8084"
+    ports:
+      - "8084:8084"
+
+  fulfillment-shipping-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: fulfillment-shipping-service
+    container_name: commerce-lab-fulfillment-shipping
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      FULFILLMENT_SHIPPING_PORT: "8085"
+    ports:
+      - "8085:8085"
+
+  ledger-reconciliation-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: ledger-reconciliation-service
+    container_name: commerce-lab-ledger-reconciliation
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      LEDGER_RECONCILIATION_PORT: "8086"
+    ports:
+      - "8086:8086"
+
+  iam-auth-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: iam-auth-service
+    container_name: commerce-lab-iam-auth
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      IAM_AUTH_PORT: "8087"
+    ports:
+      - "8087:8087"
+
+  backoffice-support-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: ./services/backoffice-support-service
+      dockerfile: Dockerfile
+    container_name: commerce-lab-backoffice-support
+    environment:
+      NODE_OPTIONS: "--max-old-space-size=180"
+      UV_THREADPOOL_SIZE: "2"
+      BACKOFFICE_SUPPORT_PORT: "8088"
+    ports:
+      - "8088:8088"
+
+  notification-service:
+    <<: *low-resource-limits
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        SERVICE_NAME: notification-service
+    container_name: commerce-lab-notification
+    environment:
+      GOMAXPROCS: "1"
+      GOMEMLIMIT: "220MiB"
+      NOTIFICATION_SERVICE_PORT: "8089"
+    ports:
+      - "8089:8089"
+
+volumes:
+  postgres_data:
+  mongo_data:
+  redis_data:
+  redpanda_data:

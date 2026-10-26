@@ -1,0 +1,54 @@
+# Local environment and credentials (keep the documented template)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.aws/
+.npmrc
+
+# Go binaries, test artifacts, and local workspace settings
+/bin/
+/build/
+/tmp/
+*.exe
+*.test
+*.out
+coverage/
+coverage.*
+go.work
+go.work.sum
+
+# NestJS dependencies and generated output (including nested services)
+node_modules/
+dist/
+.pnpm-store/
+*.tsbuildinfo
+.cache/
+
+# Runtime logs and local database volumes / dumps
+*.log
+/data/
+/postgres_data/
+/mongo_data/
+/redis_data/
+/redpanda_data/
+*.dump
+*.rdb
+appendonlydir/
+
+# Machine-specific editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+
+# Local assistant settings
+.claude/
+.codex/
+CLAUDE.md
