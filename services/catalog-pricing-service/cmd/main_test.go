@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/hieuvu0211/full-service-shopping/be/services/catalog-pricing-service/internal/domain"
-	"github.com/hieuvu0211/full-service-shopping/be/services/catalog-pricing-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
 )
 
 func TestCatalogProductsAndQuotePersistence_SC01(t *testing.T) {

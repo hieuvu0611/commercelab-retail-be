@@ -6,9 +6,9 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/auth"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/config"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 )
 
 type ServiceTargets struct {

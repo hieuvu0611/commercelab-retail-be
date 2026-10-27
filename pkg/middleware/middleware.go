@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 )
 
 // Chain áp dụng danh sách HTTP middlewares (CORS, Correlation-ID, Recovery)

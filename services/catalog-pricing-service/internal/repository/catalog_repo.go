@@ -6,8 +6,8 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/db"
-	"github.com/hieuvu0211/full-service-shopping/be/services/catalog-pricing-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )

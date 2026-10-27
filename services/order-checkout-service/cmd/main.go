@@ -6,10 +6,10 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/config"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/middleware"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/response"
-	"github.com/hieuvu0211/full-service-shopping/be/services/order-checkout-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/domain"
 )
 
 func main() {

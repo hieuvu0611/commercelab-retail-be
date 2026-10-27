@@ -6,12 +6,12 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/config"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/db"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/middleware"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/response"
-	"github.com/hieuvu0211/full-service-shopping/be/services/inventory-warehouse-service/internal/domain"
-	"github.com/hieuvu0211/full-service-shopping/be/services/inventory-warehouse-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
 )
 
 func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Handler {

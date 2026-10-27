@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/hieuvu0211/full-service-shopping/be/services/inventory-warehouse-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

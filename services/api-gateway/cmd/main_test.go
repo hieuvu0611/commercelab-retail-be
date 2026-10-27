@@ -7,8 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/auth"
-	"github.com/hieuvu0211/full-service-shopping/be/services/api-gateway/internal/proxy"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/services/api-gateway/internal/proxy"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)

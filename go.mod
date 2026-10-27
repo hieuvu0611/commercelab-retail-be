@@ -1,4 +1,4 @@
-module github.com/hieuvu0211/full-service-shopping/be
+module github.com/hieuvu0611/commercelab-retail-be
 
 go 1.26.3
 

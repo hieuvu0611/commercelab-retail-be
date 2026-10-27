@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/hieuvu0211/full-service-shopping/be/services/iam-auth-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/repository"
 )
 
 func TestAuthLoginMeAndRefreshFlow(t *testing.T) {

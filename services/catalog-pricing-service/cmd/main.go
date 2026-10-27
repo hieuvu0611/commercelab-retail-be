@@ -9,12 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/config"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/db"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/middleware"
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/response"
-	"github.com/hieuvu0211/full-service-shopping/be/services/catalog-pricing-service/internal/domain"
-	"github.com/hieuvu0211/full-service-shopping/be/services/catalog-pricing-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
 )
 
 var quoteSeq uint64 = 1

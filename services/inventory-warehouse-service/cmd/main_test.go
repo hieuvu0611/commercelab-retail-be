@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/hieuvu0211/full-service-shopping/be/services/inventory-warehouse-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
 )
 
 func TestInventoryReserveCommitHandoverAndWarehouseScope_SC02_SC12(t *testing.T) {
