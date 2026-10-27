@@ -96,6 +96,25 @@ func (e *LedgerEngine) CommitReservation(lines []ReserveLine) error {
 	return nil
 }
 
+// ReleaseReservation nhả Giữ tạm về lại Khả dụng khi thanh toán thất bại hoặc hết hạn (SC05)
+func (e *LedgerEngine) ReleaseReservation(lines []ReserveLine) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, line := range lines {
+		st, ok := e.stocks[line.SkuID]
+		if !ok || st.Reserved < line.Quantity {
+			return ErrInvalidReservationState
+		}
+	}
+	for _, line := range lines {
+		st := e.stocks[line.SkuID]
+		st.Reserved -= line.Quantity
+		st.Version++
+	}
+	return nil
+}
+
 // HandoverShipment giảm đồng thời Tồn thực tế và Cam kết chưa xuất khi bàn giao bưu tá (SC02: không trừ Khả dụng lần 2)
 func (e *LedgerEngine) HandoverShipment(lines []ReserveLine) error {
 	e.mu.Lock()

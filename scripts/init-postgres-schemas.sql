@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS pricing.quotes (
     discount_vnd        BIGINT NOT NULL CHECK (discount_vnd >= 0),
     shipping_fee_vnd    BIGINT NOT NULL CHECK (shipping_fee_vnd >= 0),
     total_payable_vnd   BIGINT NOT NULL CHECK (total_payable_vnd >= 0),
+    lines_json          JSONB NOT NULL DEFAULT '[]'::jsonb,
     version             INT NOT NULL DEFAULT 1,
     expires_at          TIMESTAMPTZ NOT NULL, -- P02: Báo giá hiệu lực 5 phút
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -138,6 +139,7 @@ CREATE TABLE IF NOT EXISTS inventory.reservations (
     order_id        VARCHAR(64) NOT NULL UNIQUE,
     warehouse_id    VARCHAR(32) NOT NULL DEFAULT 'WH-HCM-01',
     status          VARCHAR(32) NOT NULL, -- ACTIVE_10M, EXCEPTION_HOLD_30M, COMMITTED, RELEASED, HANDED_OVER
+    lines_json      JSONB NOT NULL DEFAULT '[]'::jsonb,
     expires_at      TIMESTAMPTZ NOT NULL,
     version         BIGINT NOT NULL DEFAULT 1,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -321,3 +323,26 @@ INSERT INTO orders.voucher_campaigns (voucher_code, discount_pct, total_quota, r
 VALUES
     ('WELCOME10', 10, 100, 0, 0)
 ON CONFLICT (voucher_code) DO NOTHING;
+
+-- Seed tài khoản mẫu cho các phòng ban (Mật khẩu mặc định: 123456 -> SHA-256)
+INSERT INTO iam.users (id, email, full_name, password_hash, role, warehouse_scope, is_active)
+VALUES
+    ('user-lan', 'lan@example.com', 'Khách hàng Lan', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'CUSTOMER', 'NONE', TRUE),
+    ('staff-wh-hcm', 'wh.hcm@commercelab.vn', 'Nhân viên Kho HCM', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'WAREHOUSE_STAFF', 'WH-HCM-01', TRUE),
+    ('staff-wh-hn', 'wh.hn@commercelab.vn', 'Nhân viên Kho HN', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'WAREHOUSE_STAFF', 'WH-HN-01', TRUE),
+    ('staff-cskh', 'cskh@commercelab.vn', 'Chuyên viên CSKH', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'CSKH', 'ALL', TRUE),
+    ('staff-finance', 'finance@commercelab.vn', 'Kế toán Đối soát', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'FINANCE', 'ALL', TRUE),
+    ('mgr-ops', 'ops.mgr@commercelab.vn', 'Quản lý Vận hành', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'OPS_MGR', 'ALL', TRUE)
+ON CONFLICT (id) DO NOTHING;
+
+-- Cấp quyền thao tác bảng cho 9 DB Roles trên đúng Schema tương ứng
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA iam TO iam_svc_user;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA pricing TO pricing_svc_user;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA inventory TO inventory_svc_user;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA orders TO order_svc_user;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA orders TO order_svc_user;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA payments TO payment_svc_user;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA fulfillment TO fulfillment_svc_user;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA ledger TO ledger_svc_user;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA support TO support_svc_user;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA notifications TO notify_svc_user;
