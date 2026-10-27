@@ -32,7 +32,7 @@ func (r *OrderRepository) PlaceOrder(
 	items []domain.OrderItemLine,
 ) (*domain.OrderRecord, bool, error) {
 	items = domain.DefaultItemsIfEmpty(items)
-	reqHash := domain.HashIntent(userID, quoteID, voucherCode, totalPayableVND)
+	reqHash := domain.HashIntent(userID, quoteID, voucherCode, subtotalVND, discountVND, shippingFeeVND, totalPayableVND, items)
 
 	if r.pgPool != nil {
 		tx, err := r.pgPool.Begin(ctx)

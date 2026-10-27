@@ -23,3 +23,21 @@ func TestIdempotencyAndVoucherQuota_SC04AndSC10(t *testing.T) {
 		t.Fatalf("expected ErrIdempotencyConflict, got %v", err)
 	}
 }
+
+func TestIdempotencyRejectsChangedCartAndTotal(t *testing.T) {
+	eng := NewCheckoutEngine()
+	items := []OrderItemLine{{SkuID: "sku", Quantity: 1, UnitPriceVND: 100}}
+	place := func(total int64, lines []OrderItemLine) error {
+		_, _, err := eng.PlaceOrderWithLines("key", "order", "user", "quote", "", 100, 0, 0, total, lines)
+		return err
+	}
+	if err := place(100, items); err != nil {
+		t.Fatal(err)
+	}
+	if err := place(101, items); err != ErrIdempotencyConflict {
+		t.Fatalf("changed total: expected conflict, got %v", err)
+	}
+	if err := place(100, []OrderItemLine{{SkuID: "sku", Quantity: 2, UnitPriceVND: 100}}); err != ErrIdempotencyConflict {
+		t.Fatalf("changed cart: expected conflict, got %v", err)
+	}
+}

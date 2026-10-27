@@ -3,6 +3,7 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"sort"
 	"sync"
@@ -69,8 +70,19 @@ func NewCheckoutEngine() *CheckoutEngine {
 	}
 }
 
-func HashIntent(userID, quoteID, voucherCode string, totalPayable int64) string {
-	sum := sha256.Sum256([]byte(userID + "|" + quoteID + "|" + voucherCode))
+func HashIntent(userID, quoteID, voucherCode string, subtotal, discount, shipping, total int64, items []OrderItemLine) string {
+	lines := DefaultItemsIfEmpty(items)
+	sort.Slice(lines, func(i, j int) bool {
+		a, _ := json.Marshal(lines[i])
+		b, _ := json.Marshal(lines[j])
+		return string(a) < string(b)
+	})
+	intent, _ := json.Marshal(struct {
+		UserID, QuoteID, VoucherCode        string
+		Subtotal, Discount, Shipping, Total int64
+		Items                               []OrderItemLine
+	}{userID, quoteID, voucherCode, subtotal, discount, shipping, total, lines})
+	sum := sha256.Sum256(intent)
 	return hex.EncodeToString(sum[:])
 }
 
@@ -113,7 +125,7 @@ func (e *CheckoutEngine) PlaceOrderWithLines(
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	reqHash := HashIntent(userID, quoteID, voucherCode, totalPayable)
+	reqHash := HashIntent(userID, quoteID, voucherCode, subtotalVND, discountVND, shippingFeeVND, totalPayable, items)
 	if existing, ok := e.idempotency[idempotencyKey]; ok {
 		if existing.RequestHash != reqHash {
 			return nil, false, ErrIdempotencyConflict
