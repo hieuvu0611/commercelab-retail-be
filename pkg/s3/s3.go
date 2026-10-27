@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/hieuvu0211/full-service-shopping/be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 )
 
 // Client cấu hình kết nối thẳng AWS S3 (không dùng MinIO)

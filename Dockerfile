@@ -4,7 +4,7 @@ FROM golang:1.26-alpine AS builder
 ARG SERVICE_NAME
 WORKDIR /src
 
-COPY go.mod ./
+COPY go.mod go.sum* ./
 COPY pkg ./pkg
 COPY contracts ./contracts
 COPY services/${SERVICE_NAME} ./services/${SERVICE_NAME}

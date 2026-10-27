@@ -17,11 +17,13 @@ benchmark-down:
 benchmark-stats:
 	docker stats --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}"
 
+GO_ENV = PATH="$$(GOTOOLCHAIN=local go env GOROOT)/bin:$$PATH" GOTOOLCHAIN=local
+
 build:
-	go build ./...
+	$(GO_ENV) go build ./...
 
 test:
-	go test -v -race ./...
+	$(GO_ENV) go test -v -race ./...
 
 run-gateway:
 	go run ./services/api-gateway/cmd/main.go
