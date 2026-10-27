@@ -18,8 +18,8 @@ const opMsgCode int32 = 2013
 
 var mongoReqID int32 = 1
 
-// MongoStore kết nối tới MongoDB commerce_lab_doc sử dụng BSON v2 + OP_MSG wire protocol
-// siêu nhẹ (tiết kiệm tối đa bộ nhớ dưới trần 250MB RAM).
+// MongoStore connects to MongoDB commerce_lab_doc using lightweight BSON v2 + OP_MSG wire protocol
+// to minimize memory footprint under the 250MB RAM container cap.
 type MongoStore struct {
 	addr   string
 	dbName string
@@ -28,7 +28,7 @@ type MongoStore struct {
 func ConnectMongo(ctx context.Context, uri, dbName string) (*MongoStore, *MongoStore, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil || parsed.Host == "" {
-		return nil, nil, errors.New("MONGO_URI không hợp lệ")
+		return nil, nil, errors.New("invalid MONGO_URI")
 	}
 	if dbName == "" {
 		dbName = "commerce_lab_doc"
@@ -46,6 +46,15 @@ func ConnectMongo(ctx context.Context, uri, dbName string) (*MongoStore, *MongoS
 func (m *MongoStore) Ping(ctx context.Context) error {
 	_, err := m.RunCommand(ctx, bson.D{
 		{Key: "ping", Value: 1},
+		{Key: "$db", Value: m.dbName},
+	})
+	return err
+}
+
+func (m *MongoStore) InsertOne(ctx context.Context, collection string, doc any) error {
+	_, err := m.RunCommand(ctx, bson.D{
+		{Key: "insert", Value: collection},
+		{Key: "documents", Value: bson.A{doc}},
 		{Key: "$db", Value: m.dbName},
 	})
 	return err
@@ -70,7 +79,7 @@ func (m *MongoStore) FindAll(ctx context.Context, collection string, filter bson
 		return nil, err
 	}
 	if resp.OK != 1 {
-		return nil, fmt.Errorf("truy vấn MongoDB collection %s thất bại", collection)
+		return nil, fmt.Errorf("failed to query MongoDB collection %s", collection)
 	}
 	return resp.Cursor.FirstBatch, nil
 }
@@ -112,7 +121,7 @@ func (m *MongoStore) RunCommand(ctx context.Context, cmd bson.D) ([]byte, error)
 	}
 	respLen := int(binary.LittleEndian.Uint32(hdr[0:4]))
 	if respLen < 21 || respLen > 16*1024*1024 {
-		return nil, errors.New("phản hồi OP_MSG từ MongoDB không hợp lệ")
+		return nil, errors.New("invalid OP_MSG response from MongoDB")
 	}
 	payload := make([]byte, respLen-16)
 	if _, err := io.ReadFull(conn, payload); err != nil {
