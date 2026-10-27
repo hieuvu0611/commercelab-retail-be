@@ -5,21 +5,39 @@ import "testing"
 func TestIdempotencyAndVoucherQuota_SC04AndSC10(t *testing.T) {
 	eng := NewCheckoutEngine()
 
-	// Lần bấm 1: Tạo đơn O-001
+	// Attempt 1: Create order O-001
 	ord1, replayed, err := eng.PlaceOrder("idem-key-1", "O-001", "user-lan", "Q-001", "WELCOME10", 660000)
 	if err != nil || replayed {
 		t.Fatalf("expected fresh order, got replayed=%v err=%v", replayed, err)
 	}
 
-	// Lần bấm 2 (SC04): Gửi lại cùng Idempotency-Key và cùng nội dung -> nhận lại đúng O-001
+	// Attempt 2 (SC04): Replay same Idempotency-Key and identical payload -> returns existing O-001
 	ord2, replayed, err := eng.PlaceOrder("idem-key-1", "O-002-ignored", "user-lan", "Q-001", "WELCOME10", 660000)
 	if err != nil || !replayed || ord2.OrderID != ord1.OrderID {
 		t.Fatalf("expected idempotent replay of O-001, got %+v err=%v", ord2, err)
 	}
 
-	// Lần bấm 3 (SC04): Cùng Idempotency-Key nhưng đổi QuoteID -> phải chặn lỗi Conflict
+	// Attempt 3 (SC04): Same Idempotency-Key with modified QuoteID -> must reject with ErrIdempotencyConflict
 	_, _, err = eng.PlaceOrder("idem-key-1", "O-003", "user-lan", "Q-CHANGED", "WELCOME10", 660000)
 	if err != ErrIdempotencyConflict {
 		t.Fatalf("expected ErrIdempotencyConflict, got %v", err)
+	}
+}
+
+func TestIdempotencyRejectsChangedCartAndTotal(t *testing.T) {
+	eng := NewCheckoutEngine()
+	items := []OrderItemLine{{SkuID: "sku", Quantity: 1, UnitPriceVND: 100}}
+	place := func(total int64, lines []OrderItemLine) error {
+		_, _, err := eng.PlaceOrderWithLines("key", "order", "user", "quote", "", 100, 0, 0, total, lines)
+		return err
+	}
+	if err := place(100, items); err != nil {
+		t.Fatal(err)
+	}
+	if err := place(101, items); err != ErrIdempotencyConflict {
+		t.Fatalf("changed total: expected conflict, got %v", err)
+	}
+	if err := place(100, []OrderItemLine{{SkuID: "sku", Quantity: 2, UnitPriceVND: 100}}); err != ErrIdempotencyConflict {
+		t.Fatalf("changed cart: expected conflict, got %v", err)
 	}
 }
