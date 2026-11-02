@@ -76,6 +76,11 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(parsedURL)
+	proxy.ModifyResponse = func(res *http.Response) error {
+		// The gateway's correlation ID is authoritative for the client response.
+		res.Header.Del("X-Correlation-ID")
+		return nil
+	}
 	if rt.Transport != nil {
 		proxy.Transport = rt.Transport
 	}

@@ -17,6 +17,33 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func TestProxiedResponseContainsOnlyGatewayCorrelationID(t *testing.T) {
+	for _, upstreamID := range []string{"req-test", "different-id", ""} {
+		t.Run("upstream_"+upstreamID, func(t *testing.T) {
+			rt := proxy.NewRouter(proxy.DefaultTargetsFromEnv())
+			rt.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if got := req.Header.Get("X-Correlation-ID"); got != "req-test" {
+					t.Errorf("forwarded correlation ID = %q", got)
+				}
+				w := httptest.NewRecorder()
+				if upstreamID != "" {
+					w.Header().Set("X-Correlation-ID", upstreamID)
+				}
+				w.WriteHeader(http.StatusOK)
+				return w.Result(), nil
+			})
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/products", nil)
+			r.Header.Set("X-Correlation-ID", "req-test")
+			w := httptest.NewRecorder()
+			NewServer(NewCartStorage(nil), rt, false).ServeHTTP(w, r)
+			values := w.Header().Values("X-Correlation-ID")
+			if len(values) != 1 || values[0] != "req-test" {
+				t.Fatalf("unexpected correlation IDs: %q", values)
+			}
+		})
+	}
+}
+
 func TestGatewayCartAndAuthenticatedReverseProxy(t *testing.T) {
 	var capturedUserID, capturedRole, capturedWarehouseScope, capturedHost string
 
