@@ -11,6 +11,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/repository"
 )
@@ -42,8 +43,18 @@ func NewServer(repo *repository.UserRepository, dbConnected bool) http.Handler {
 			Email    string `json:"email"`
 			Password string `json:"password"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Password == "" {
-			response.Error(w, r, http.StatusBadRequest, "INVALID_CREDENTIALS", "Email và mật khẩu là bắt buộc", nil)
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		fieldErrors := map[string][]string{}
+		if req.Email == "" {
+			fieldErrors["email"] = []string{"Email is required"}
+		}
+		if req.Password == "" {
+			fieldErrors["password"] = []string{"Password is required"}
+		}
+		if len(fieldErrors) != 0 {
+			response.Error(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Request validation failed", fieldErrors)
 			return
 		}
 		u, err := repo.Authenticate(r.Context(), req.Email, req.Password)

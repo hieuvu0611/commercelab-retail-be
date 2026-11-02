@@ -16,6 +16,7 @@ func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
 	// 1. Đăng nhập với tài khoản Nhân viên Kho HCM (I08: WarehouseScope = WH-HCM-01)
 	loginBody := []byte(`{"email":"wh.hcm@commercelab.vn","password":"123456"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 
@@ -51,5 +52,24 @@ func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
 
 	if refRec.Code != http.StatusOK {
 		t.Fatalf("expected 200 OK on /auth/refresh, got %d: %s", refRec.Code, refRec.Body.String())
+	}
+}
+
+func TestLoginValidationResponse(t *testing.T) {
+	srv := NewServer(repository.NewUserRepository(nil), false)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"email":""}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	var body struct {
+		Code          string              `json:"code"`
+		Errors        map[string][]string `json:"errors"`
+		CorrelationID string              `json:"correlationId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusUnprocessableEntity || body.Code != "VALIDATION_FAILED" || len(body.Errors["email"]) == 0 || len(body.Errors["password"]) == 0 || body.CorrelationID == "" {
+		t.Fatalf("unexpected validation response: %d %+v", rec.Code, body)
 	}
 }
