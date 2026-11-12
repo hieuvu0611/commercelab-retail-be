@@ -2,6 +2,8 @@ import { Body, Controller, Get, Post } from '@nestjs/common';
 import { ApprovalCandidate, MakerCheckerPolicyService } from './common/guards/maker-checker.guard';
 import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
+import { CreateReturnDto } from './modules/returns-rma/create-return.dto';
+import { ApiResult } from './common/http/api-response.interceptor';
 
 @Controller()
 export class AppController {
@@ -13,42 +15,29 @@ export class AppController {
 
   @Get('/health')
   health() {
-    return {
-      message: 'backoffice-support-service healthy',
-      data: {
-        service: 'backoffice-support-service',
-        runtime: 'NestJS',
-        postgresSchema: 'support',
-        mongoCollections: ['support_exception_cases', 'support_rma_dossiers'],
-      },
-    };
+    return new ApiResult({
+      service: 'backoffice-support-service',
+      runtime: 'NestJS',
+      postgresSchema: 'support',
+      mongoCollections: ['support_exception_cases', 'support_rma_dossiers'],
+    }, 'backoffice-support-service healthy');
   }
 
   @Get('/api/v1/backoffice/exception-cases')
   listExceptionCases() {
     const items = this.exceptionCases.listOpenCases();
-    return {
-      message: 'Lấy danh sách Vụ việc ngoại lệ thành công (Mục 17)',
-      data: items,
-      metadata: {
-        total: items.length,
-        page: 1,
-        pageCount: 1,
-        limit: 20,
-      },
-    };
+    return new ApiResult(items, 'Exception cases retrieved successfully', {
+      total: items.length,
+      page: 1,
+      pageCount: 1,
+      limit: 20,
+    });
   }
 
   @Post('/api/v1/backoffice/returns')
   createReturnRequest(
     @Body()
-    body: {
-      rmaId?: string;
-      orderId: string;
-      skuId: string;
-      quantity: number;
-      reason: 'CHANGE_OF_MIND' | 'SELLER_FAULT';
-    },
+    body: CreateReturnDto,
   ) {
     const dossier = this.returnsService.openRmaRequest(
       body.rmaId || `RMA-${Date.now()}`,
@@ -57,21 +46,15 @@ export class AppController {
       body.quantity,
       body.reason,
     );
-    return {
-      message: 'Tạo hồ sơ trả hàng RMA và khóa trần số lượng I07 thành công',
-      data: dossier,
-    };
+    return new ApiResult(dossier, 'Return request created successfully');
   }
 
   @Post('/api/v1/backoffice/approvals/validate')
   validateApproval(@Body() body: ApprovalCandidate) {
     this.makerChecker.validateApproval(body);
-    return {
-      message: 'Phê duyệt hợp lệ theo Policy P10 (Maker != Checker) và đúng hạn mức thẩm quyền',
-      data: {
-        approved: true,
-        ...body,
-      },
-    };
+    return new ApiResult({
+      approved: true,
+      ...body,
+    }, 'Approval is valid');
   }
 }
