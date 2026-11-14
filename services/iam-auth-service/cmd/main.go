@@ -104,7 +104,13 @@ func signRefresh(u repository.User, tokenID, familyID string) (string, repositor
 	}, nil
 }
 
+// NewServer builds the IAM handler without the administration API.
 func NewServer(repo UserStore, tokens TokenStore, dbConnected bool) http.Handler {
+	return NewServerWithAdmin(repo, tokens, nil, dbConnected)
+}
+
+// NewServerWithAdmin also serves the ACCESS_ADMIN staff administration API when admin is not nil.
+func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbConnected bool) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +416,10 @@ func NewServer(repo UserStore, tokens TokenStore, dbConnected bool) http.Handler
 		response.JSON(w, http.StatusOK, "Password changed; other sessions were signed out", profile, nil)
 	})))
 
+	if admin != nil {
+		registerAdminRoutes(mux, admin)
+	}
+
 	return middleware.Chain(mux)
 }
 
@@ -454,5 +464,5 @@ func main() {
 
 	repo := repository.NewUserRepository(pool)
 	log.Printf("[iam-auth-service] listening on :%s (schema: iam)", port)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, repository.NewRefreshRepository(repo), true)))
+	log.Fatal(http.ListenAndServe(":"+port, NewServerWithAdmin(repo, repository.NewRefreshRepository(repo), repository.NewAdminRepository(repo), true)))
 }
