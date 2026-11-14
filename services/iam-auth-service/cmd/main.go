@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -33,6 +34,31 @@ type UserProfile struct {
 type UserStore interface {
 	Authenticate(ctx context.Context, email, password string) (repository.User, error)
 	FindByID(ctx context.Context, id string) (repository.User, error)
+	Register(ctx context.Context, email, password, fullName string) (repository.User, error)
+}
+
+// issueSession signs an access and a refresh token for u and returns the profile the clients receive.
+// It writes the error response itself and returns false when signing fails.
+func issueSession(w http.ResponseWriter, r *http.Request, u repository.User) (UserProfile, bool) {
+	accessTok, err := auth.SignAccessToken(u.ID, u.Role, u.WarehouseScope)
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the access token", nil)
+		return UserProfile{}, false
+	}
+	refreshTok, err := auth.SignRefreshToken(u.ID, u.Role, u.WarehouseScope)
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the refresh token", nil)
+		return UserProfile{}, false
+	}
+	return UserProfile{
+		ID:             u.ID,
+		Name:           u.Name,
+		Email:          u.Email,
+		Role:           u.Role,
+		WarehouseScope: u.WarehouseScope,
+		AccessToken:    accessTok,
+		RefreshToken:   refreshTok,
+	}, true
 }
 
 func NewServer(repo UserStore, dbConnected bool) http.Handler {
@@ -75,25 +101,46 @@ func NewServer(repo UserStore, dbConnected bool) http.Handler {
 			response.Error(w, r, http.StatusUnauthorized, "INVALID_CREDENTIALS", err.Error(), nil)
 			return
 		}
-		accessTok, err := auth.SignAccessToken(u.ID, u.Role, u.WarehouseScope)
-		if err != nil {
-			response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Không thể tạo access token", nil)
+		profile, ok := issueSession(w, r, u)
+		if !ok {
 			return
 		}
-		refreshTok, err := auth.SignRefreshToken(u.ID, u.Role, u.WarehouseScope)
-		if err != nil {
-			response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Không thể tạo refresh token", nil)
+		response.JSON(w, http.StatusOK, "Đăng nhập thành công", profile, nil)
+	})
+
+	// P1-T03 (D-02): customers self-register with email + password; the role is always CUSTOMER.
+	mux.HandleFunc("POST /api/v1/auth/register", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Email    string `json:"email"`
+			Password string `json:"password"`
+			FullName string `json:"fullName"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
 			return
 		}
-		response.JSON(w, http.StatusOK, "Đăng nhập thành công", UserProfile{
-			ID:             u.ID,
-			Name:           u.Name,
-			Email:          u.Email,
-			Role:           u.Role,
-			WarehouseScope: u.WarehouseScope,
-			AccessToken:    accessTok,
-			RefreshToken:   refreshTok,
-		}, nil)
+		email := normalizeEmail(req.Email)
+		if fieldErrors := validateRegistration(email, req.Password, req.FullName); len(fieldErrors) != 0 {
+			response.Error(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Request validation failed", fieldErrors)
+			return
+		}
+		u, err := repo.Register(r.Context(), email, req.Password, strings.TrimSpace(req.FullName))
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if errors.Is(err, repository.ErrEmailTaken) {
+			response.Error(w, r, http.StatusConflict, "EMAIL_ALREADY_REGISTERED", "An account with this email already exists", nil)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "REGISTER_FAILED", "Could not create the account", nil)
+			return
+		}
+		profile, ok := issueSession(w, r, u)
+		if !ok {
+			return
+		}
+		response.JSON(w, http.StatusCreated, "Account created", profile, nil)
 	})
 
 	// Khớp 100% với fe/src/configs/axios-config.ts (POST /auth/refresh)

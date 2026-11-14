@@ -93,3 +93,54 @@ func TestStoreErrorsAreMarkedUnavailable(t *testing.T) {
 		t.Fatalf("a failing store must be reported as unavailable, got %v", err)
 	}
 }
+
+func TestRegisterStoresCustomerAndRejectsDuplicateEmail(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+	email := fmt.Sprintf("it-%d@example.com", time.Now().UnixNano())
+
+	u, err := repo.Register(ctx, email, "a-long-enough-password", "Integration User")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if u.Role != "CUSTOMER" || u.WarehouseScope != "NONE" || !u.IsActive || !strings.HasPrefix(u.ID, "usr-") {
+		t.Fatalf("unexpected user %+v", u)
+	}
+
+	signedIn, err := repo.Authenticate(ctx, strings.ToUpper(email), "a-long-enough-password")
+	if err != nil || signedIn.ID != u.ID {
+		t.Fatalf("the new account must sign in: user=%+v err=%v", signedIn, err)
+	}
+
+	// The database unique constraint, not just a pre-check, rejects the duplicate (also under concurrency).
+	if _, err := repo.Register(ctx, email, "another-long-password", "Someone Else"); !errors.Is(err, ErrEmailTaken) {
+		t.Fatalf("duplicate err = %v, want ErrEmailTaken", err)
+	}
+}
+
+func TestConcurrentRegistrationsOfOneEmailCreateExactlyOneAccount(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+	email := fmt.Sprintf("race-%d@example.com", time.Now().UnixNano())
+
+	const attempts = 6
+	results := make(chan error, attempts)
+	for i := 0; i < attempts; i++ {
+		go func() {
+			_, err := repo.Register(ctx, email, "a-long-enough-password", "Racer")
+			results <- err
+		}()
+	}
+	created, taken := 0, 0
+	for i := 0; i < attempts; i++ {
+		switch err := <-results; {
+		case err == nil:
+			created++
+		case errors.Is(err, ErrEmailTaken):
+			taken++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if created != 1 || taken != attempts-1 {
+		t.Fatalf("created %d, taken %d; want exactly 1 and %d", created, taken, attempts-1)
+	}
+}
