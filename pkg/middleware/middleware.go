@@ -87,24 +87,11 @@ func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Correlation-ID, X-User-ID, X-User-Role, X-Warehouse-Scope")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Correlation-ID")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// RequireWarehouseScope rejects missing or mismatched warehouse scope.
-func RequireWarehouseScope(targetWarehouse string, next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		userScope := r.Header.Get("X-Warehouse-Scope")
-		if userScope != "ALL" && userScope != targetWarehouse {
-			response.Error(w, r, http.StatusForbidden, "FORBIDDEN_WAREHOUSE_SCOPE",
-				"Warehouse access is forbidden", nil)
-			return
-		}
-		next(w, r)
-	}
 }

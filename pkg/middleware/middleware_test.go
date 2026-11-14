@@ -56,25 +56,3 @@ func TestCorrelationIDReplacesInvalidHeader(t *testing.T) {
 		t.Error("response and request correlation IDs differ")
 	}
 }
-
-func TestWarehouseScopeFailsClosed(t *testing.T) {
-	for _, tc := range []struct {
-		scope  string
-		status int
-	}{
-		{"", http.StatusForbidden}, {"other", http.StatusForbidden},
-		{"WH-HCM-01", http.StatusNoContent}, {"ALL", http.StatusNoContent},
-	} {
-		t.Run(tc.scope, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/", nil)
-			req.Header.Set("X-Warehouse-Scope", tc.scope)
-			w := httptest.NewRecorder()
-			RequireWarehouseScope("WH-HCM-01", func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusNoContent)
-			}).ServeHTTP(w, req)
-			if w.Code != tc.status {
-				t.Fatalf("got %d, want %d", w.Code, tc.status)
-			}
-		})
-	}
-}
