@@ -81,7 +81,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (rt *Router) resolveTarget(path string) string {
 	switch {
-	case path == "/auth/refresh" || strings.HasPrefix(path, "/api/v1/auth"):
+	case path == "/auth/refresh" || strings.HasPrefix(path, "/api/v1/auth") || strings.HasPrefix(path, "/api/v1/admin"):
 		return rt.targets.IAM
 	case strings.HasPrefix(path, "/api/v1/products") || strings.HasPrefix(path, "/api/v1/categories") || strings.HasPrefix(path, "/api/v1/quotes"):
 		return rt.targets.Catalog
