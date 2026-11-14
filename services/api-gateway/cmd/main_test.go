@@ -126,3 +126,27 @@ func TestLoadConfigAcceptsStrongSecrets(t *testing.T) {
 		t.Fatalf("tokens must work after a valid configuration: %v", err)
 	}
 }
+
+func TestProxiedResponseHasExactlyOneSetOfCORSHeaders(t *testing.T) {
+	authtest.Configure(t)
+	rt := proxy.NewRouter(proxy.DefaultTargetsFromEnv())
+	rt.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		// The downstream service adds its own CORS headers, as every Go service does through middleware.Chain.
+		w := httptest.NewRecorder()
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.WriteHeader(http.StatusOK)
+		return w.Result(), nil
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/products", nil)
+	w := httptest.NewRecorder()
+	NewServer(NewCartStorage(nil), rt, false).ServeHTTP(w, r)
+
+	for _, header := range []string{"Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers"} {
+		if values := w.Header().Values(header); len(values) != 1 {
+			t.Fatalf("%s has %d values %q; a browser rejects a response with more than one", header, len(values), values)
+		}
+	}
+}

@@ -71,6 +71,14 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ModifyResponse = func(res *http.Response) error {
 		// The gateway's correlation ID is authoritative for the client response.
 		res.Header.Del("X-Correlation-ID")
+		// The gateway answers CORS itself. Every service adds the same headers, and a browser rejects a
+		// response that carries more than one Access-Control-Allow-Origin value.
+		for _, header := range []string{
+			"Access-Control-Allow-Origin", "Access-Control-Allow-Methods", "Access-Control-Allow-Headers",
+			"Access-Control-Allow-Credentials", "Access-Control-Expose-Headers", "Access-Control-Max-Age",
+		} {
+			res.Header.Del(header)
+		}
 		return nil
 	}
 	if rt.Transport != nil {
