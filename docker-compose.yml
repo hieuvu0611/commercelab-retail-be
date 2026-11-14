@@ -13,6 +13,25 @@ x-low-resource-limits: &low-resource-limits
         cpus: '0.05'
         memory: 32M
 
+# Shared settings for the Go services (see each service's `environment` for what it actually reads).
+x-go-env: &go-env
+  GOMAXPROCS: "1"
+  GOMEMLIMIT: "220MiB"
+
+x-store-env: &store-env
+  MONGO_URI: mongodb://mongo_admin:mongo_password@mongodb:27017/commerce_lab_doc?authSource=admin
+  MONGO_DATABASE: commerce_lab_doc
+  REDIS_ADDR: redis:6379
+
+# Every app service waits for healthy infrastructure before it starts.
+x-infra-healthy: &infra-healthy
+  postgres:
+    condition: service_healthy
+  mongodb:
+    condition: service_healthy
+  redis:
+    condition: service_healthy
+
 services:
   # ============================================================================
   # 1. TẦNG INFRASTRUCTURE (Mỗi container <= 250MB RAM & <= 0.25 CPU)
@@ -20,7 +39,6 @@ services:
   postgres:
     <<: *low-resource-limits
     image: postgres:16-alpine
-    container_name: commerce-lab-postgres
     restart: unless-stopped
     # Tinh chỉnh bộ nhớ nội bộ của PostgreSQL để chạy mượt trong trần 250MB RAM mà không bị OOM-killer
     command:
@@ -41,7 +59,7 @@ services:
       POSTGRES_DB: commerce_lab
       TZ: UTC
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-postgres-schemas.sql:/docker-entrypoint-initdb.d/01-init-schemas.sql:ro
@@ -54,34 +72,36 @@ services:
   mongodb:
     <<: *low-resource-limits
     image: mongo:7.0
-    container_name: commerce-lab-mongodb
     restart: unless-stopped
-    # Mặc định WiredTiger lấy tối thiểu 256MB cache -> bắt buộc ép xuống 0.1GB (~100MB) để sống trong 250MB RAM
-    command: ["mongod", "--wiredTigerCacheSizeGB", "0.1"]
+    # MongoDB 7 rejects a WiredTiger cache below 0.25 GB; 0.25 is the smallest value that starts.
+    command: ["mongod", "--wiredTigerCacheSizeGB", "0.25"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: mongo_admin
       MONGO_INITDB_ROOT_PASSWORD: mongo_password
       MONGO_INITDB_DATABASE: commerce_lab_doc
     ports:
-      - "27017:27017"
+      - "${MONGO_HOST_PORT:-27017}:27017"
     volumes:
       - mongo_data:/data/db
       - ./scripts/init-mongo-indexes.js:/docker-entrypoint-initdb.d/01-init-indexes.js:ro
     healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      # Plain TCP probe on the container IP. mongosh is a Node.js process; started repeatedly inside the
+      # capped container it gets OOM-killed. While init scripts run, mongod only listens on 127.0.0.1,
+      # so this check passes only once the real server is up.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/$$(hostname -i)/27017'"]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
   redis:
     <<: *low-resource-limits
     image: redis:7.2-alpine
-    container_name: commerce-lab-redis
     restart: unless-stopped
     # Giới hạn maxmemory 180MB để tổng RSS container không bao giờ vượt 250MB
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "180mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -93,7 +113,6 @@ services:
   redpanda:
     <<: *low-resource-limits
     image: docker.redpanda.com/redpandadata/redpanda:v24.1.4
-    container_name: commerce-lab-redpanda
     restart: unless-stopped
     # Khóa Seastar engine ở 1 luồng (--smp 1) và 200MB RAM (--memory 200M) để khớp trần 250MB container
     command:
@@ -106,8 +125,8 @@ services:
       - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
       - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
     ports:
-      - "19092:19092"
-      - "9644:9644"
+      - "${REDPANDA_KAFKA_HOST_PORT:-19092}:19092"
+      - "${REDPANDA_ADMIN_HOST_PORT:-9644}:9644"
     volumes:
       - redpanda_data:/var/lib/redpanda/data
 
@@ -123,13 +142,47 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: api-gateway
-    container_name: commerce-lab-api-gateway
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
+      <<: *go-env
       API_GATEWAY_PORT: "8080"
+      REDIS_ADDR: redis:6379
+      IAM_SERVICE_URL: http://iam-auth-service:8087
+      CATALOG_SERVICE_URL: http://catalog-pricing-service:8081
+      INVENTORY_SERVICE_URL: http://inventory-warehouse-service:8082
+      ORDER_SERVICE_URL: http://order-checkout-service:8083
+      PAYMENT_SERVICE_URL: http://payment-service:8084
+      FULFILLMENT_SERVICE_URL: http://fulfillment-shipping-service:8085
+      LEDGER_SERVICE_URL: http://ledger-reconciliation-service:8086
+      BACKOFFICE_SERVICE_URL: http://backoffice-support-service:8088
+      NOTIFICATION_SERVICE_URL: http://notification-service:8089
     ports:
-      - "8080:8080"
+      - "${API_GATEWAY_HOST_PORT:-8080}:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      iam-auth-service:
+        condition: service_healthy
+      catalog-pricing-service:
+        condition: service_healthy
+      inventory-warehouse-service:
+        condition: service_healthy
+      order-checkout-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+      fulfillment-shipping-service:
+        condition: service_healthy
+      ledger-reconciliation-service:
+        condition: service_healthy
+      backoffice-support-service:
+        condition: service_healthy
+      notification-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   catalog-pricing-service:
     <<: *low-resource-limits
@@ -139,13 +192,17 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: catalog-pricing-service
-    container_name: commerce-lab-catalog-pricing
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
-      CATALOG_PRICING_PORT: "8081"
-    ports:
-      - "8081:8081"
+      <<: [*go-env, *store-env]
+      CATALOG_PRICING_PORT: 8081
+      DATABASE_URL_PRICING: postgres://pricing_svc_user:pricing_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=pricing
+      MIGRATE_ON_START: "true"
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   inventory-warehouse-service:
     <<: *low-resource-limits
@@ -155,13 +212,17 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: inventory-warehouse-service
-    container_name: commerce-lab-inventory-warehouse
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
-      INVENTORY_WAREHOUSE_PORT: "8082"
-    ports:
-      - "8082:8082"
+      <<: *go-env
+      INVENTORY_WAREHOUSE_PORT: 8082
+      DATABASE_URL_INVENTORY: postgres://inventory_svc_user:inventory_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=inventory
+      MIGRATE_ON_START: "true"
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   order-checkout-service:
     <<: *low-resource-limits
@@ -171,13 +232,15 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: order-checkout-service
-    container_name: commerce-lab-order-checkout
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
-      ORDER_CHECKOUT_PORT: "8083"
-    ports:
-      - "8083:8083"
+      <<: *go-env
+      ORDER_CHECKOUT_PORT: 8083
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   payment-service:
     <<: *low-resource-limits
@@ -187,13 +250,15 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: payment-service
-    container_name: commerce-lab-payment
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
-      PAYMENT_SERVICE_PORT: "8084"
-    ports:
-      - "8084:8084"
+      <<: *go-env
+      PAYMENT_PORT: 8084
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8084/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   fulfillment-shipping-service:
     <<: *low-resource-limits
@@ -203,13 +268,15 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: fulfillment-shipping-service
-    container_name: commerce-lab-fulfillment-shipping
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
-      FULFILLMENT_SHIPPING_PORT: "8085"
-    ports:
-      - "8085:8085"
+      <<: *go-env
+      FULFILLMENT_SHIPPING_PORT: 8085
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8085/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   ledger-reconciliation-service:
     <<: *low-resource-limits
@@ -219,13 +286,15 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: ledger-reconciliation-service
-    container_name: commerce-lab-ledger-reconciliation
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
-      LEDGER_RECONCILIATION_PORT: "8086"
-    ports:
-      - "8086:8086"
+      <<: *go-env
+      LEDGER_RECONCILIATION_PORT: 8086
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8086/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   iam-auth-service:
     <<: *low-resource-limits
@@ -235,13 +304,17 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: iam-auth-service
-    container_name: commerce-lab-iam-auth
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
-      IAM_AUTH_PORT: "8087"
-    ports:
-      - "8087:8087"
+      <<: *go-env
+      IAM_AUTH_PORT: 8087
+      DATABASE_URL_IAM: postgres://iam_svc_user:iam_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=iam
+      MIGRATE_ON_START: "true"
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8087/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   backoffice-support-service:
     <<: *low-resource-limits
@@ -249,13 +322,18 @@ services:
     build:
       context: ./services/backoffice-support-service
       dockerfile: Dockerfile
-    container_name: commerce-lab-backoffice-support
     environment:
       NODE_OPTIONS: "--max-old-space-size=180"
       UV_THREADPOOL_SIZE: "2"
       BACKOFFICE_SUPPORT_PORT: "8088"
     ports:
-      - "8088:8088"
+      - "${BACKOFFICE_SUPPORT_HOST_PORT:-8088}:8088"
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8088/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   notification-service:
     <<: *low-resource-limits
@@ -265,13 +343,17 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: notification-service
-    container_name: commerce-lab-notification
     environment:
-      GOMAXPROCS: "1"
-      GOMEMLIMIT: "220MiB"
-      NOTIFICATION_SERVICE_PORT: "8089"
+      <<: *go-env
+      NOTIFICATION_PORT: 8089
     ports:
-      - "8089:8089"
+      - "${NOTIFICATION_SERVICE_HOST_PORT:-8089}:8089"
+    depends_on: *infra-healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8089/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   postgres_data:
