@@ -2,126 +2,85 @@ package db
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"net/url"
-	"sync/atomic"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-const opMsgCode int32 = 2013
+const (
+	// mongoServerSelectionTimeout bounds how long an operation waits for a reachable server,
+	// so an unreachable Mongo fails in seconds instead of hanging a request.
+	mongoServerSelectionTimeout = 2 * time.Second
+	// mongoMaxPoolSize keeps the driver small enough for the 250 MB service containers.
+	mongoMaxPoolSize = 5
+	// defaultMongoDatabase is used when no database name is given.
+	defaultMongoDatabase = "commerce_lab_doc"
+)
 
-var mongoReqID int32 = 1
-
-// MongoStore kết nối tới MongoDB commerce_lab_doc sử dụng BSON v2 + OP_MSG wire protocol
-// siêu nhẹ (tiết kiệm tối đa bộ nhớ dưới trần 250MB RAM).
+// MongoStore is a thin wrapper over the official MongoDB driver bound to one database.
+// Authentication comes from the connection URI (for example "?authSource=admin").
 type MongoStore struct {
-	addr   string
-	dbName string
+	client *mongo.Client
+	db     *mongo.Database
 }
 
-// NewMongoStore builds a store for uri without contacting the server.
+// NewMongoStore prepares a store for uri without contacting the server (the driver connects lazily).
 func NewMongoStore(uri, dbName string) (*MongoStore, error) {
-	parsed, err := url.Parse(uri)
-	if err != nil || parsed.Host == "" {
-		return nil, errors.New("MONGO_URI không hợp lệ")
+	if uri == "" {
+		return nil, errors.New("MONGO_URI is empty")
 	}
 	if dbName == "" {
-		dbName = "commerce_lab_doc"
+		dbName = defaultMongoDatabase
 	}
-	return &MongoStore{addr: parsed.Host, dbName: dbName}, nil
+	client, err := mongo.Connect(options.Client().
+		ApplyURI(uri).
+		SetServerSelectionTimeout(mongoServerSelectionTimeout).
+		SetMaxPoolSize(mongoMaxPoolSize).
+		// Decode embedded documents as bson.M so callers can type-assert them like top-level documents.
+		SetBSONOptions(&options.BSONOptions{DefaultDocumentM: true}))
+	if err != nil {
+		return nil, fmt.Errorf("invalid MONGO_URI: %w", err)
+	}
+	return &MongoStore{client: client, db: client.Database(dbName)}, nil
 }
 
+// ConnectMongo connects to Mongo, verifies the credentials with a ping (retrying while the server starts)
+// and returns the store. The store is returned twice to keep the signature existing callers use.
 func ConnectMongo(ctx context.Context, uri, dbName string) (*MongoStore, *MongoStore, error) {
 	store, err := NewMongoStore(uri, dbName)
 	if err != nil {
 		return nil, nil, err
 	}
 	if err := retryStartup(ctx, startupAttempts, startupRetryDelay, func() error { return store.Ping(ctx) }); err != nil {
+		_ = store.Close(context.Background())
 		return nil, nil, err
 	}
 	return store, store, nil
 }
 
+// Ping checks that the server is reachable and the credentials are accepted.
 func (m *MongoStore) Ping(ctx context.Context) error {
-	_, err := m.RunCommand(ctx, bson.D{
-		{Key: "ping", Value: 1},
-		{Key: "$db", Value: m.dbName},
-	})
-	return err
+	return m.db.RunCommand(ctx, bson.D{{Key: "ping", Value: 1}}).Err()
 }
 
+// FindAll returns every document of collection matching filter, iterating all cursor batches.
 func (m *MongoStore) FindAll(ctx context.Context, collection string, filter bson.D) ([]bson.M, error) {
-	raw, err := m.RunCommand(ctx, bson.D{
-		{Key: "find", Value: collection},
-		{Key: "filter", Value: filter},
-		{Key: "$db", Value: m.dbName},
-	})
+	cursor, err := m.db.Collection(collection).Find(ctx, filter)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("find in %s: %w", collection, err)
 	}
-	var resp struct {
-		OK     float64 `bson:"ok"`
-		Cursor struct {
-			FirstBatch []bson.M `bson:"firstBatch"`
-		} `bson:"cursor"`
+	var docs []bson.M
+	if err := cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("read cursor of %s: %w", collection, err)
 	}
-	if err := bson.Unmarshal(raw, &resp); err != nil {
-		return nil, err
-	}
-	if resp.OK != 1 {
-		return nil, fmt.Errorf("truy vấn MongoDB collection %s thất bại", collection)
-	}
-	return resp.Cursor.FirstBatch, nil
+	return docs, nil
 }
 
-func (m *MongoStore) RunCommand(ctx context.Context, cmd bson.D) ([]byte, error) {
-	dialer := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := dialer.DialContext(ctx, "tcp", m.addr)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-
-	body, err := bson.Marshal(cmd)
-	if err != nil {
-		return nil, err
-	}
-
-	// OP_MSG layout: 16-byte MsgHeader + 4-byte flagBits (0) + 1-byte section kind (0) + BSON document
-	totalLen := int32(16 + 4 + 1 + len(body))
-	reqID := atomic.AddInt32(&mongoReqID, 1)
-
-	buf := make([]byte, 21+len(body))
-	binary.LittleEndian.PutUint32(buf[0:4], uint32(totalLen))
-	binary.LittleEndian.PutUint32(buf[4:8], uint32(reqID))
-	binary.LittleEndian.PutUint32(buf[8:12], 0)
-	binary.LittleEndian.PutUint32(buf[12:16], uint32(opMsgCode))
-	binary.LittleEndian.PutUint32(buf[16:20], 0) // flagBits
-	buf[20] = 0                                  // payloadType 0 (single BSON body)
-	copy(buf[21:], body)
-
-	if _, err := conn.Write(buf); err != nil {
-		return nil, err
-	}
-
-	var hdr [16]byte
-	if _, err := io.ReadFull(conn, hdr[:]); err != nil {
-		return nil, err
-	}
-	respLen := int(binary.LittleEndian.Uint32(hdr[0:4]))
-	if respLen < 21 || respLen > 16*1024*1024 {
-		return nil, errors.New("phản hồi OP_MSG từ MongoDB không hợp lệ")
-	}
-	payload := make([]byte, respLen-16)
-	if _, err := io.ReadFull(conn, payload); err != nil {
-		return nil, err
-	}
-	return payload[5:], nil
+// Close releases the driver's connections.
+func (m *MongoStore) Close(ctx context.Context) error {
+	return m.client.Disconnect(ctx)
 }
