@@ -94,7 +94,8 @@ func SignAccessToken(userID, role, warehouseScope string) (string, error) {
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 }
 
-func SignRefreshToken(userID, role, warehouseScope string) (string, error) {
+// SignRefreshToken signs a refresh token whose "jti" is tokenID, so the server can find and rotate it.
+func SignRefreshToken(userID, role, warehouseScope, tokenID string) (string, error) {
 	secrets, err := currentSecrets()
 	if err != nil {
 		return "", err
@@ -107,6 +108,7 @@ func SignRefreshToken(userID, role, warehouseScope string) (string, error) {
 		WarehouseScope: warehouseScope,
 		TokenType:      "REFRESH",
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        tokenID,
 			Subject:   userID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(7 * 24 * time.Hour)),
