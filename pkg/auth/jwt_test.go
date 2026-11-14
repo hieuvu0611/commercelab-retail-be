@@ -3,6 +3,11 @@ package auth
 import "testing"
 
 func TestSignAndParseTokens(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	if err := Configure(Secrets{Access: "access-secret-0123456789abcdef-test", Refresh: "refresh-secret-0123456789abcdef-test"}); err != nil {
+		t.Fatal(err)
+	}
 	accessTok, err := SignAccessToken("user-lan", "CUSTOMER", "NONE")
 	if err != nil {
 		t.Fatalf("unexpected error signing access token: %v", err)

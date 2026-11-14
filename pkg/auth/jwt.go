@@ -2,11 +2,68 @@ package auth
 
 import (
 	"errors"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 )
+
+// MinSecretBytes is the minimum length of a JWT signing secret.
+const MinSecretBytes = 32
+
+// Environment variables that hold the signing secrets.
+const (
+	AccessSecretEnvVar  = "JWT_ACCESS_SECRET"
+	RefreshSecretEnvVar = "JWT_REFRESH_SECRET"
+)
+
+// ErrNotConfigured is returned when tokens are used before Configure was called.
+var ErrNotConfigured = errors.New("auth: JWT secrets are not configured")
+
+// Secrets are the keys used to sign and verify tokens.
+type Secrets struct {
+	Access  string
+	Refresh string
+}
+
+var configured atomic.Pointer[Secrets]
+
+// Configure installs the signing secrets. Services call it once at start-up (see LoadSecrets).
+func Configure(s Secrets) error {
+	if s.Access == "" || s.Refresh == "" {
+		return ErrNotConfigured
+	}
+	cp := s
+	configured.Store(&cp)
+	return nil
+}
+
+// LoadSecrets reads the secrets from the environment into l (they are mandatory, at least MinSecretBytes,
+// except in APP_ENV=dev) and configures the package when they are valid.
+func LoadSecrets(l *config.Loader) Secrets {
+	s := Secrets{
+		Access:  l.Secret(AccessSecretEnvVar, MinSecretBytes),
+		Refresh: l.Secret(RefreshSecretEnvVar, MinSecretBytes),
+	}
+	if l.Err() == nil {
+		_ = Configure(s)
+	}
+	return s
+}
+
+// Reset removes the configured secrets. It exists for tests.
+func Reset() {
+	configured.Store(nil)
+}
+
+func currentSecrets() (Secrets, error) {
+	s := configured.Load()
+	if s == nil {
+		return Secrets{}, ErrNotConfigured
+	}
+	return *s, nil
+}
 
 type Claims struct {
 	UserID         string `json:"userId"`
@@ -17,7 +74,11 @@ type Claims struct {
 }
 
 func SignAccessToken(userID, role, warehouseScope string) (string, error) {
-	secret := config.EnvOrDefault("JWT_ACCESS_SECRET", "commerce_lab_access_secret_key_change_in_prod")
+	secrets, err := currentSecrets()
+	if err != nil {
+		return "", err
+	}
+	secret := secrets.Access
 	now := time.Now().UTC()
 	claims := Claims{
 		UserID:         userID,
@@ -34,7 +95,11 @@ func SignAccessToken(userID, role, warehouseScope string) (string, error) {
 }
 
 func SignRefreshToken(userID, role, warehouseScope string) (string, error) {
-	secret := config.EnvOrDefault("JWT_REFRESH_SECRET", "commerce_lab_refresh_secret_key_change_in_prod")
+	secrets, err := currentSecrets()
+	if err != nil {
+		return "", err
+	}
+	secret := secrets.Refresh
 	now := time.Now().UTC()
 	claims := Claims{
 		UserID:         userID,
@@ -51,13 +116,19 @@ func SignRefreshToken(userID, role, warehouseScope string) (string, error) {
 }
 
 func ParseAccessToken(tokenStr string) (*Claims, error) {
-	secret := config.EnvOrDefault("JWT_ACCESS_SECRET", "commerce_lab_access_secret_key_change_in_prod")
-	return parseWithSecret(tokenStr, secret, "ACCESS")
+	secrets, err := currentSecrets()
+	if err != nil {
+		return nil, err
+	}
+	return parseWithSecret(tokenStr, secrets.Access, "ACCESS")
 }
 
 func ParseRefreshToken(tokenStr string) (*Claims, error) {
-	secret := config.EnvOrDefault("JWT_REFRESH_SECRET", "commerce_lab_refresh_secret_key_change_in_prod")
-	return parseWithSecret(tokenStr, secret, "REFRESH")
+	secrets, err := currentSecrets()
+	if err != nil {
+		return nil, err
+	}
+	return parseWithSecret(tokenStr, secrets.Refresh, "REFRESH")
 }
 
 func parseWithSecret(tokenStr, secret, expectedType string) (*Claims, error) {
