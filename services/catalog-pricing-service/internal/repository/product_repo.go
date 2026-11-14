@@ -143,6 +143,11 @@ func (s *MongoProductStore) SaveDraft(ctx context.Context, d domain.ProductRevis
 	return nil
 }
 
+func (s *MongoProductStore) DeleteDraft(ctx context.Context, productID string) error {
+	_, err := s.drafts.DeleteOne(ctx, bson.D{{Key: "_id", Value: productID}})
+	return dependency.Wrap(err)
+}
+
 func (s *MongoProductStore) ListSKUs(ctx context.Context, productID string) ([]domain.SKU, error) {
 	cur, err := s.skus.Find(ctx, bson.D{{Key: "productId", Value: productID}}, options.Find().SetSort(bson.D{{Key: "_id", Value: 1}}))
 	if err != nil {

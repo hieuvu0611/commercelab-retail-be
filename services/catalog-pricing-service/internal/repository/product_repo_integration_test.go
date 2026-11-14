@@ -86,6 +86,17 @@ func TestMongoProductWorkflow(t *testing.T) {
 		t.Fatalf("stale draft write: %v", err)
 	}
 
+	// Applying the revision deletes the draft; deleting a missing draft is not an error.
+	if err := products.DeleteDraft(ctx, v.ID); err != nil {
+		t.Fatalf("delete draft: %v", err)
+	}
+	if _, found, err := products.GetDraft(ctx, v.ID); err != nil || found {
+		t.Fatalf("draft after delete: found=%v err=%v", found, err)
+	}
+	if err := products.DeleteDraft(ctx, v.ID); err != nil {
+		t.Fatalf("delete missing draft: %v", err)
+	}
+
 	// List: status filter, pagination, regex characters are literal.
 	page, total, err := svc.ListProducts(ctx, domain.ProductFilter{Page: 1, Limit: 1})
 	if err != nil || total != 2 || len(page) != 1 {

@@ -61,6 +61,8 @@ type Product struct {
 	Specs             map[string]any `json:"specs" bson:"specs"`
 	Images            []ProductImage `json:"images" bson:"images"`
 	Status            ProductStatus  `json:"status" bson:"status"`
+	RejectionReason   string         `json:"rejectionReason,omitempty" bson:"rejectionReason,omitempty"`
+	PublishedAt       *time.Time     `json:"publishedAt,omitempty" bson:"publishedAt,omitempty"`
 	Version           int64          `json:"version" bson:"version"`
 	CreatedBy         string         `json:"createdBy" bson:"createdBy"`
 	UpdatedBy         string         `json:"updatedBy" bson:"updatedBy"`

@@ -42,7 +42,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 		deps.Categories = domain.NewCategoryService(domain.NewMemoryCategoryStore())
 	}
 	if deps.Products == nil {
-		deps.Products = domain.NewProductService(domain.NewMemoryProductStore(), deps.Categories)
+		deps.Products = domain.NewProductService(domain.NewMemoryProductStore(), deps.Categories).WithPricing(repo, repo)
 	}
 	registerCategoryRoutes(mux, deps.Categories, deps.Cache)
 	registerProductAdminRoutes(mux, deps.Products)
@@ -216,6 +216,9 @@ func main() {
 	}
 
 	repo := repository.NewCatalogPricingRepository(pgPool, mongoStore)
+	if deps.Products != nil {
+		deps.Products.WithPricing(repo, repo)
+	}
 	log.Printf("[catalog-pricing-service] listening on :%s (schema: pricing, mongo: catalog_products)", port)
 	log.Fatal(http.ListenAndServe(":"+port, NewServerWithDeps(repo, pgPool != nil, mongoStore != nil, deps)))
 }

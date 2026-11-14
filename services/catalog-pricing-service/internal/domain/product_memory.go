@@ -161,3 +161,10 @@ func (m *MemoryProductStore) DeleteSKU(_ context.Context, skuID string) error {
 	delete(m.skus, skuID)
 	return nil
 }
+
+func (m *MemoryProductStore) DeleteDraft(_ context.Context, productID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.drafts, productID)
+	return nil
+}
