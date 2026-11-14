@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/services/api-gateway/internal/proxy"
 )
@@ -104,5 +107,33 @@ func TestGatewayCartAndAuthenticatedReverseProxy(t *testing.T) {
 	var resp map[string]any
 	if err := json.Unmarshal(invRec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal proxy response: %v", err)
+	}
+}
+
+func TestCartStoreOutageAnswers503(t *testing.T) {
+	redisClient := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: time.Second, MaxRetries: -1})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	srv := NewServer(NewCartStorage(redisClient), proxy.NewRouter(proxy.ServiceTargets{}), true)
+
+	tests := []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{name: "read cart", method: http.MethodGet},
+		{name: "write cart", method: http.MethodPut, body: `{"items":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/api/v1/carts/user-lan", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "DEPENDENCY_UNAVAILABLE") {
+				t.Fatalf("missing DEPENDENCY_UNAVAILABLE code: %s", rec.Body.String())
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/api-gateway/internal/proxy"
@@ -50,34 +52,53 @@ func NewCartStorage(redisClient *redis.Client) *CartStorage {
 	}
 }
 
-func (s *CartStorage) Get(ctx context.Context, userID string) Cart {
+// Get returns the cart for userID. With Redis configured, any Redis failure other than a missing key
+// is reported as an unavailable dependency; the in-memory store is only used without Redis
+// (ALLOW_MEMORY_FALLBACK=true).
+func (s *CartStorage) Get(ctx context.Context, userID string) (Cart, error) {
 	if s.redisClient != nil {
 		raw, err := s.redisClient.Get(ctx, "cart:"+userID).Bytes()
-		if err == nil {
-			var c Cart
-			if json.Unmarshal(raw, &c) == nil {
-				return c
-			}
+		if errors.Is(err, redis.Nil) {
+			return emptyCart(userID), nil
 		}
+		if err != nil {
+			return Cart{}, dependency.Wrap(err)
+		}
+		var c Cart
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return Cart{}, dependency.Wrap(err)
+		}
+		return c, nil
 	}
 	s.mu.RLock()
 	cart, ok := s.memStore[userID]
 	s.mu.RUnlock()
 	if !ok {
-		return Cart{UserID: userID, Items: []CartItem{}, Note: "Giỏ hàng tạm — Chưa giữ tồn kho (P02)"}
+		return emptyCart(userID), nil
 	}
-	return cart
+	return cart, nil
 }
 
-func (s *CartStorage) Put(ctx context.Context, cart Cart) {
+func emptyCart(userID string) Cart {
+	return Cart{UserID: userID, Items: []CartItem{}, Note: "Giỏ hàng tạm — Chưa giữ tồn kho (P02)"}
+}
+
+// Put stores the cart. With Redis configured, a write failure is an unavailable dependency.
+func (s *CartStorage) Put(ctx context.Context, cart Cart) error {
 	if s.redisClient != nil {
-		if raw, err := json.Marshal(cart); err == nil {
-			_ = s.redisClient.Set(ctx, "cart:"+cart.UserID, raw, 7*24*time.Hour).Err()
+		raw, err := json.Marshal(cart)
+		if err != nil {
+			return err
 		}
+		if err := s.redisClient.Set(ctx, "cart:"+cart.UserID, raw, 7*24*time.Hour).Err(); err != nil {
+			return dependency.Wrap(err)
+		}
+		return nil
 	}
 	s.mu.Lock()
 	s.memStore[cart.UserID] = cart
 	s.mu.Unlock()
+	return nil
 }
 
 func NewServer(cartStorage *CartStorage, proxyRouter *proxy.Router, redisConnected bool) http.Handler {
@@ -94,7 +115,11 @@ func NewServer(cartStorage *CartStorage, proxyRouter *proxy.Router, redisConnect
 	// P02: Quản lý giỏ hàng tạm (Chưa hứa giữ hàng)
 	mux.HandleFunc("GET /api/v1/carts/{userId}", func(w http.ResponseWriter, r *http.Request) {
 		userID := r.PathValue("userId")
-		cart := cartStorage.Get(r.Context(), userID)
+		cart, err := cartStorage.Get(r.Context(), userID)
+		if err != nil {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		response.JSON(w, http.StatusOK, "Lấy giỏ hàng thành công", cart, nil)
 	})
 
@@ -118,7 +143,10 @@ func NewServer(cartStorage *CartStorage, proxyRouter *proxy.Router, redisConnect
 			Items:  req.Items,
 			Note:   "Giỏ hàng tạm trên Redis — Chưa giữ tồn kho (Policy P02)",
 		}
-		cartStorage.Put(r.Context(), cart)
+		if err := cartStorage.Put(r.Context(), cart); err != nil {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		response.JSON(w, http.StatusOK, "Cập nhật giỏ hàng thành công", cart, nil)
 	})
 
@@ -134,9 +162,10 @@ func main() {
 	redisPass := config.EnvOrDefault("REDIS_PASSWORD", "")
 
 	redisClient, err := db.ConnectRedis(context.Background(), redisAddr, redisPass)
-	if err != nil {
-		log.Printf("[api-gateway] redis unavailable (%v), using in-memory cart fallback", err)
-	} else {
+	if err := dependency.CheckStartup("api-gateway", "redis", err); err != nil {
+		log.Fatal(err)
+	}
+	if redisClient != nil {
 		defer func() { _ = redisClient.Close() }()
 	}
 
