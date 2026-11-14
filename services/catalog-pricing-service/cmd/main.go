@@ -12,9 +12,11 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/migrations"
 )
 
 var quoteSeq uint64 = 1
@@ -120,6 +122,12 @@ func main() {
 	mongoDB := config.EnvOrDefault("MONGO_DATABASE", "commerce_lab_doc")
 
 	ctx := context.Background()
+	if migrate.EnabledOnStart() {
+		if _, err := migrate.Up(ctx, pgURL, migrations.FS); err != nil {
+			log.Fatalf("[catalog-pricing-service] migrations failed: %v", err)
+		}
+	}
+
 	pgPool, pgErr := db.ConnectPostgres(ctx, pgURL)
 	if pgErr != nil {
 		log.Printf("[catalog-pricing-service] postgres unavailable (%v), using seed fallback", pgErr)
