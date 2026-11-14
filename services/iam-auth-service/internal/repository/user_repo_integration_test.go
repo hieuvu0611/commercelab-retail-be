@@ -229,3 +229,59 @@ func TestRoleGrantsAreConstrainedByTheDatabase(t *testing.T) {
 		t.Fatalf("roles = %d (err %v), want the 13 blueprint roles", roles, err)
 	}
 }
+
+func registerForTest(t *testing.T, repo *UserRepository, ctx context.Context) User {
+	t.Helper()
+	u, err := repo.Register(ctx, fmt.Sprintf("p-%d@example.com", time.Now().UnixNano()), "a-long-enough-password", "Profile Test")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	return u
+}
+
+func TestUpdateProfilePersistsNameAndPhone(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+	u := registerForTest(t, repo, ctx)
+
+	name, phone := "New Name", "+84901234567"
+	updated, err := repo.UpdateProfile(ctx, u.ID, ProfileUpdate{FullName: &name, Phone: &phone})
+	if err != nil || updated.Name != "New Name" || updated.Phone != "+84901234567" {
+		t.Fatalf("update: user=%+v err=%v", updated, err)
+	}
+
+	onlyName := "Only Name"
+	updated, err = repo.UpdateProfile(ctx, u.ID, ProfileUpdate{FullName: &onlyName})
+	if err != nil || updated.Name != "Only Name" || updated.Phone != "+84901234567" {
+		t.Fatalf("a missing phone must stay unchanged: user=%+v err=%v", updated, err)
+	}
+
+	empty := ""
+	updated, err = repo.UpdateProfile(ctx, u.ID, ProfileUpdate{Phone: &empty})
+	if err != nil || updated.Phone != "" || updated.Name != "Only Name" {
+		t.Fatalf("an empty phone must clear it: user=%+v err=%v", updated, err)
+	}
+	if _, err := repo.UpdateProfile(ctx, "no-such-user", ProfileUpdate{FullName: &name}); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("unknown user err = %v, want ErrUserNotFound", err)
+	}
+}
+
+func TestChangePasswordChecksTheCurrentPasswordAgainstTheStoredHash(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+	u := registerForTest(t, repo, ctx)
+
+	if err := repo.ChangePassword(ctx, u.ID, "not-the-password", "another-long-password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong current password err = %v, want ErrInvalidCredentials", err)
+	}
+	if _, err := repo.Authenticate(ctx, u.Email, "a-long-enough-password"); err != nil {
+		t.Fatalf("a rejected change must keep the old password: %v", err)
+	}
+	if err := repo.ChangePassword(ctx, u.ID, "a-long-enough-password", "another-long-password"); err != nil {
+		t.Fatalf("change: %v", err)
+	}
+	if _, err := repo.Authenticate(ctx, u.Email, "another-long-password"); err != nil {
+		t.Fatalf("the new password must sign in: %v", err)
+	}
+	if _, err := repo.Authenticate(ctx, u.Email, "a-long-enough-password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("the old password must stop working, got %v", err)
+	}
+}

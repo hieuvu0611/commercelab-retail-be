@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/mail"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -65,4 +66,30 @@ func validateRegistration(email, password, fullName string) map[string][]string 
 		fieldErrors["fullName"] = []string{"Full name must be at most 100 characters"}
 	}
 	return fieldErrors
+}
+
+// phonePattern is an international number: optional "+" and 7 to 15 digits (E.164).
+var phonePattern = regexp.MustCompile(`^\+?[0-9]{7,15}$`)
+
+// phoneSeparators are removed from user input before validation.
+var phoneSeparators = strings.NewReplacer(" ", "", "-", "", "(", "", ")", "", ".", "")
+
+// normalizePhone strips common separators. An empty result means "no phone number".
+func normalizePhone(phone string) string {
+	return phoneSeparators.Replace(strings.TrimSpace(phone))
+}
+
+func validPhone(normalized string) bool {
+	return phonePattern.MatchString(normalized)
+}
+
+// validateName checks a full name that is already trimmed.
+func validateName(name string) []string {
+	switch {
+	case name == "":
+		return []string{"Full name is required"}
+	case utf8.RuneCountInString(name) > maxNameLength:
+		return []string{"Full name must be at most 100 characters"}
+	}
+	return nil
 }
