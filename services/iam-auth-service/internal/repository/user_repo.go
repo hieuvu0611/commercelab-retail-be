@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -37,6 +39,8 @@ func HashPassword(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// NewUserRepository returns a repository backed by pool. A nil pool selects the seeded in-memory
+// users, which is only meant for development and tests (ALLOW_MEMORY_FALLBACK=true).
 func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
 	defaultHash := HashPassword("123456")
 	seeds := []User{
@@ -62,6 +66,9 @@ func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
 
 func (r *UserRepository) Authenticate(ctx context.Context, email, password string) (User, error) {
 	u, err := r.FindByEmail(ctx, email)
+	if dependency.IsUnavailable(err) {
+		return User{}, err
+	}
 	if err != nil {
 		return User{}, ErrInvalidCredentials
 	}
@@ -82,6 +89,10 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (User, e
 		if err == nil {
 			return u, nil
 		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return User{}, ErrUserNotFound
+		}
+		return User{}, dependency.Wrap(err)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -103,6 +114,10 @@ func (r *UserRepository) FindByID(ctx context.Context, id string) (User, error) 
 		if err == nil {
 			return u, nil
 		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return User{}, ErrUserNotFound
+		}
+		return User{}, dependency.Wrap(err)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()

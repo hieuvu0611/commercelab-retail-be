@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestInventoryReserveCommitHandoverAndWarehouseScope_SC02_SC12(t *testing.T) {
@@ -66,5 +69,43 @@ func TestInventoryReserveCommitHandoverAndWarehouseScope_SC02_SC12(t *testing.T)
 	_ = json.Unmarshal(stRec.Body.Bytes(), &stResp)
 	if int64(stResp.Data["onHand"].(float64)) != 8 || int64(stResp.Data["available"].(float64)) != 8 {
 		t.Fatalf("expected onHand=8 and available=8 after handover, got %+v", stResp.Data)
+	}
+}
+
+func TestStoreOutageAnswers503InsteadOfSeededStock(t *testing.T) {
+	pool, err := pgxpool.New(context.Background(), "postgres://inventory_svc_user:x@127.0.0.1:1/commerce_lab?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	srv := NewServer(repository.NewInventoryRepository(pool), true)
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+	}{
+		{name: "stock lookup", method: http.MethodGet, path: "/api/v1/inventory/SKU-BALO-BLACK-20L"},
+		{name: "reserve", method: http.MethodPost, path: "/api/v1/inventory/reservations",
+			body: `{"orderId":"O-1","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`},
+		{name: "commit", method: http.MethodPost, path: "/api/v1/inventory/reservations/O-1/commit"},
+		{name: "release", method: http.MethodPost, path: "/api/v1/inventory/reservations/O-1/release"},
+		{name: "handover", method: http.MethodPost, path: "/api/v1/inventory/shipments/handover", body: `{"orderId":"O-1"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Warehouse-Scope", "WH-HCM-01")
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503; body: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "DEPENDENCY_UNAVAILABLE") {
+				t.Fatalf("missing DEPENDENCY_UNAVAILABLE code: %s", rec.Body.String())
+			}
+		})
 	}
 }

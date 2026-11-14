@@ -25,17 +25,22 @@ type MongoStore struct {
 	dbName string
 }
 
-func ConnectMongo(ctx context.Context, uri, dbName string) (*MongoStore, *MongoStore, error) {
+// NewMongoStore builds a store for uri without contacting the server.
+func NewMongoStore(uri, dbName string) (*MongoStore, error) {
 	parsed, err := url.Parse(uri)
 	if err != nil || parsed.Host == "" {
-		return nil, nil, errors.New("MONGO_URI không hợp lệ")
+		return nil, errors.New("MONGO_URI không hợp lệ")
 	}
 	if dbName == "" {
 		dbName = "commerce_lab_doc"
 	}
-	store := &MongoStore{
-		addr:   parsed.Host,
-		dbName: dbName,
+	return &MongoStore{addr: parsed.Host, dbName: dbName}, nil
+}
+
+func ConnectMongo(ctx context.Context, uri, dbName string) (*MongoStore, *MongoStore, error) {
+	store, err := NewMongoStore(uri, dbName)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := retryStartup(ctx, startupAttempts, startupRetryDelay, func() error { return store.Ping(ctx) }); err != nil {
 		return nil, nil, err

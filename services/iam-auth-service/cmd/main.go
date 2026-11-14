@@ -10,6 +10,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
@@ -60,6 +61,10 @@ func NewServer(repo *repository.UserRepository, dbConnected bool) http.Handler {
 			return
 		}
 		u, err := repo.Authenticate(r.Context(), req.Email, req.Password)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusUnauthorized, "INVALID_CREDENTIALS", err.Error(), nil)
 			return
@@ -100,6 +105,10 @@ func NewServer(repo *repository.UserRepository, dbConnected bool) http.Handler {
 			return
 		}
 		u, err := repo.FindByID(r.Context(), claims.UserID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil || !u.IsActive {
 			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "Tài khoản không tồn tại hoặc đã khóa", nil)
 			return
@@ -126,6 +135,10 @@ func NewServer(repo *repository.UserRepository, dbConnected bool) http.Handler {
 			return
 		}
 		u, err := repo.FindByID(r.Context(), claims.UserID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusNotFound, "USER_NOT_FOUND", err.Error(), nil)
 			return
@@ -153,9 +166,10 @@ func main() {
 	}
 
 	pool, err := db.ConnectPostgres(context.Background(), dbURL)
-	if err != nil {
-		log.Printf("[iam-auth-service] postgres unavailable (%v), using seed fallback repository", err)
-	} else {
+	if err := dependency.CheckStartup("iam-auth-service", "postgres", err); err != nil {
+		log.Fatal(err)
+	}
+	if pool != nil {
 		defer pool.Close()
 	}
 
