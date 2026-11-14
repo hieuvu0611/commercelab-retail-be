@@ -19,16 +19,18 @@ func ConnectPostgres(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg.MaxConnLifetime = 30 * time.Minute
 	cfg.MaxConnIdleTime = 5 * time.Minute
 
-	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.NewWithConfig(pingCtx, cfg)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	if err := pool.Ping(pingCtx); err != nil {
+	pingErr := retryStartup(ctx, startupAttempts, startupRetryDelay, func() error {
+		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return pool.Ping(pingCtx)
+	})
+	if pingErr != nil {
 		pool.Close()
-		return nil, err
+		return nil, pingErr
 	}
 	return pool, nil
 }

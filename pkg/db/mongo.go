@@ -37,7 +37,7 @@ func ConnectMongo(ctx context.Context, uri, dbName string) (*MongoStore, *MongoS
 		addr:   parsed.Host,
 		dbName: dbName,
 	}
-	if err := store.Ping(ctx); err != nil {
+	if err := retryStartup(ctx, startupAttempts, startupRetryDelay, func() error { return store.Ping(ctx) }); err != nil {
 		return nil, nil, err
 	}
 	return store, store, nil
