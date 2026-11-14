@@ -1,4 +1,4 @@
-.PHONY: migrate infra-up infra-down benchmark-up benchmark-down benchmark-stats build test run-gateway run-iam run-catalog run-inventory run-order run-payment run-fulfillment run-ledger run-notification run-backoffice
+.PHONY: migrate test-integration infra-up infra-down benchmark-up benchmark-down benchmark-stats build test run-gateway run-iam run-catalog run-inventory run-order run-payment run-fulfillment run-ledger run-notification run-backoffice
 
 infra-up:
 	docker compose up -d
@@ -28,6 +28,10 @@ migrate:
 
 test:
 	$(GO_ENV) go test -v -race ./...
+
+# Run the integration tests against disposable Postgres, Mongo and Redis (own Compose project, always cleaned up).
+test-integration:
+	./scripts/test-integration.sh
 
 run-gateway:
 	go run ./services/api-gateway/cmd/main.go
