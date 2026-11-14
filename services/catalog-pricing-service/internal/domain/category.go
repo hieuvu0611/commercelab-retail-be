@@ -124,6 +124,11 @@ func mapPathErr(err error) error {
 	return err
 }
 
+// Get returns one category or ErrCategoryNotFound.
+func (s *CategoryService) Get(ctx context.Context, id string) (Category, error) {
+	return s.store.Get(ctx, id)
+}
+
 // List returns every category, including inactive ones.
 func (s *CategoryService) List(ctx context.Context) ([]Category, error) {
 	return s.store.List(ctx)

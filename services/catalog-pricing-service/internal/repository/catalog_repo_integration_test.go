@@ -39,17 +39,18 @@ func insertProduct(t *testing.T, uri, dbName string) string {
 
 	productID := fmt.Sprintf("IT-PROD-%d", time.Now().UnixNano())
 	_, err = client.Database(dbName).Collection("catalog_products").InsertOne(ctx, bson.M{
-		"product_id":    productID,
-		"name":          "Integration Backpack",
-		"category_type": "BACKPACK",
-		"status":        "PUBLISHED",
-		"specs":         bson.M{"capacityLiters": 20, "material": "Cordura"},
+		"_id":               productID,
+		"slug":              "integration-backpack-" + productID,
+		"name":              "Integration Backpack",
+		"primaryCategoryId": "cat-integration",
+		"status":            "PUBLISHED",
+		"specs":             bson.M{"capacity_liters": 20, "material": "Cordura"},
 	})
 	if err != nil {
 		t.Fatalf("insert product: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = client.Database(dbName).Collection("catalog_products").DeleteOne(context.Background(), bson.M{"product_id": productID})
+		_, _ = client.Database(dbName).Collection("catalog_products").DeleteOne(context.Background(), bson.M{"_id": productID})
 	})
 	return productID
 }
@@ -88,7 +89,7 @@ func TestCatalogReadsRealMongoDocumentsWithAuthentication(t *testing.T) {
 	if found == nil {
 		t.Fatalf("inserted product %s not returned; got %d products", productID, len(products))
 	}
-	if found.Name != "Integration Backpack" || found.CategoryType != "BACKPACK" {
+	if found.Name != "Integration Backpack" || found.PrimaryCategoryID != "cat-integration" {
 		t.Fatalf("unexpected product fields: %+v", found)
 	}
 	if found.Specs["material"] != "Cordura" {

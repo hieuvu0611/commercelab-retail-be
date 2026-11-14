@@ -24,10 +24,11 @@ import (
 
 var quoteSeq uint64 = 1
 
-// Deps are the optional collaborators of the catalog handler. Without Categories the category endpoints
-// use an in-memory store (development and tests); without Cache nothing is cached.
+// Deps are the optional collaborators of the catalog handler. Without Categories or Products the matching
+// endpoints use an in-memory store (development and tests); without Cache nothing is cached.
 type Deps struct {
 	Categories *domain.CategoryService
+	Products   *domain.ProductService
 	Cache      cache.Cache
 }
 
@@ -40,7 +41,11 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	if deps.Categories == nil {
 		deps.Categories = domain.NewCategoryService(domain.NewMemoryCategoryStore())
 	}
+	if deps.Products == nil {
+		deps.Products = domain.NewProductService(domain.NewMemoryProductStore(), deps.Categories)
+	}
 	registerCategoryRoutes(mux, deps.Categories, deps.Cache)
+	registerProductAdminRoutes(mux, deps.Products)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "catalog-pricing-service healthy", map[string]any{
@@ -194,6 +199,11 @@ func main() {
 			log.Fatalf("[catalog-pricing-service] category store: %v", err)
 		}
 		deps.Categories = domain.NewCategoryService(categoryStore)
+		productStore, err := repository.NewMongoProductStore(ctx, mongoStore)
+		if err != nil {
+			log.Fatalf("[catalog-pricing-service] product store: %v", err)
+		}
+		deps.Products = domain.NewProductService(productStore, deps.Categories)
 	}
 	// The category cache is an optimisation: without Redis (dev/test fallback only) nothing is cached.
 	redisClient, redisErr := db.ConnectRedis(ctx, redisAddr, redisPass)
