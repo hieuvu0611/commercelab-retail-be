@@ -18,11 +18,12 @@ import (
 
 // productAdminAPI serves the PRODUCT_STAFF product and SKU endpoints.
 type productAdminAPI struct {
-	svc *domain.ProductService
+	svc    *domain.ProductService
+	images *domain.ImageService
 }
 
-func registerProductAdminRoutes(mux *http.ServeMux, svc *domain.ProductService) {
-	api := &productAdminAPI{svc: svc}
+func registerProductAdminRoutes(mux *http.ServeMux, svc *domain.ProductService, images *domain.ImageService) {
+	api := &productAdminAPI{svc: svc, images: images}
 	staff := func(h http.HandlerFunc) http.Handler {
 		return auth.RequireAuth(auth.RequireRole(RoleProductStaff)(h))
 	}
@@ -37,6 +38,10 @@ func registerProductAdminRoutes(mux *http.ServeMux, svc *domain.ProductService) 
 	mux.Handle("POST /api/v1/admin/products/{id}/publish", staff(api.transition("Product published", api.svc.Publish)))
 	mux.Handle("POST /api/v1/admin/products/{id}/unpublish", staff(api.transition("Product unpublished", api.svc.Unpublish)))
 	mux.Handle("POST /api/v1/admin/products/{id}/reject", staff(api.reject))
+	mux.Handle("POST /api/v1/admin/products/{id}/images/upload-url", staff(api.uploadURL))
+	mux.Handle("POST /api/v1/admin/products/{id}/images", staff(api.attachImage))
+	mux.Handle("PUT /api/v1/admin/products/{id}/images/order", staff(api.reorderImages))
+	mux.Handle("DELETE /api/v1/admin/products/{id}/images/{imageId}", staff(api.removeImage))
 }
 
 func actorOf(r *http.Request) string {
@@ -66,7 +71,9 @@ func expectedVersion(w http.ResponseWriter, r *http.Request, bodyVersion *int64)
 	return version, true
 }
 
-func writeView(w http.ResponseWriter, status int, message string, v domain.ProductView) {
+// writeView answers with the product view; image URLs are signed per response.
+func (a *productAdminAPI) writeView(w http.ResponseWriter, r *http.Request, status int, message string, v domain.ProductView) {
+	v.Images = a.images.WithURLs(r.Context(), v.Images)
 	w.Header().Set("ETag", `"`+strconv.FormatInt(v.Version, 10)+`"`)
 	response.JSON(w, status, message, v, nil)
 }
@@ -93,7 +100,7 @@ func (a *productAdminAPI) create(w http.ResponseWriter, r *http.Request) {
 		writeProductError(w, r, err)
 		return
 	}
-	writeView(w, http.StatusCreated, "Product created", v)
+	a.writeView(w, r, http.StatusCreated, "Product created", v)
 }
 
 func (a *productAdminAPI) get(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +109,7 @@ func (a *productAdminAPI) get(w http.ResponseWriter, r *http.Request) {
 		writeProductError(w, r, err)
 		return
 	}
-	writeView(w, http.StatusOK, "Product", v)
+	a.writeView(w, r, http.StatusOK, "Product", v)
 }
 
 func queryInt(r *http.Request, name string, def int) (int, bool) {
@@ -165,7 +172,7 @@ func (a *productAdminAPI) update(w http.ResponseWriter, r *http.Request) {
 		writeProductError(w, r, err)
 		return
 	}
-	writeView(w, http.StatusOK, "Product updated", v)
+	a.writeView(w, r, http.StatusOK, "Product updated", v)
 }
 
 func (a *productAdminAPI) createSKU(w http.ResponseWriter, r *http.Request) {
@@ -186,7 +193,7 @@ func (a *productAdminAPI) createSKU(w http.ResponseWriter, r *http.Request) {
 		writeProductError(w, r, err)
 		return
 	}
-	writeView(w, http.StatusCreated, "SKU created", v)
+	a.writeView(w, r, http.StatusCreated, "SKU created", v)
 }
 
 func (a *productAdminAPI) updateSKU(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +215,7 @@ func (a *productAdminAPI) updateSKU(w http.ResponseWriter, r *http.Request) {
 		writeProductError(w, r, err)
 		return
 	}
-	writeView(w, http.StatusOK, "SKU updated", v)
+	a.writeView(w, r, http.StatusOK, "SKU updated", v)
 }
 
 func (a *productAdminAPI) deleteSKU(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +228,7 @@ func (a *productAdminAPI) deleteSKU(w http.ResponseWriter, r *http.Request) {
 		writeProductError(w, r, err)
 		return
 	}
-	writeView(w, http.StatusOK, "SKU deleted", v)
+	a.writeView(w, r, http.StatusOK, "SKU deleted", v)
 }
 
 // transition serves a status change that needs nothing but the product version (header or optional body).
@@ -242,7 +249,7 @@ func (a *productAdminAPI) transition(message string, do func(ctx context.Context
 			writeProductError(w, r, err)
 			return
 		}
-		writeView(w, http.StatusOK, message, v)
+		a.writeView(w, r, http.StatusOK, message, v)
 	}
 }
 
@@ -263,7 +270,77 @@ func (a *productAdminAPI) reject(w http.ResponseWriter, r *http.Request) {
 		writeProductError(w, r, err)
 		return
 	}
-	writeView(w, http.StatusOK, "Product rejected", v)
+	a.writeView(w, r, http.StatusOK, "Product rejected", v)
+}
+
+func (a *productAdminAPI) uploadURL(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ContentType string `json:"contentType"`
+		SizeBytes   int64  `json:"sizeBytes"`
+	}
+	if !request.DecodeJSON(w, r, &body) {
+		return
+	}
+	target, err := a.images.RequestUpload(r.Context(), r.PathValue("id"), body.ContentType, body.SizeBytes)
+	if err != nil {
+		writeProductError(w, r, err)
+		return
+	}
+	response.JSON(w, http.StatusCreated, "Upload URL created", target, nil)
+}
+
+func (a *productAdminAPI) attachImage(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Version *int64 `json:"version"`
+		Key     string `json:"key"`
+		Alt     string `json:"alt"`
+	}
+	if !request.DecodeJSON(w, r, &body) {
+		return
+	}
+	version, ok := expectedVersion(w, r, body.Version)
+	if !ok {
+		return
+	}
+	v, err := a.images.Attach(r.Context(), actorOf(r), r.PathValue("id"), version, body.Key, body.Alt)
+	if err != nil {
+		writeProductError(w, r, err)
+		return
+	}
+	a.writeView(w, r, http.StatusCreated, "Image attached", v)
+}
+
+func (a *productAdminAPI) reorderImages(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Version  *int64   `json:"version"`
+		ImageIDs []string `json:"imageIds"`
+	}
+	if !request.DecodeJSON(w, r, &body) {
+		return
+	}
+	version, ok := expectedVersion(w, r, body.Version)
+	if !ok {
+		return
+	}
+	v, err := a.images.Reorder(r.Context(), actorOf(r), r.PathValue("id"), version, body.ImageIDs)
+	if err != nil {
+		writeProductError(w, r, err)
+		return
+	}
+	a.writeView(w, r, http.StatusOK, "Images reordered", v)
+}
+
+func (a *productAdminAPI) removeImage(w http.ResponseWriter, r *http.Request) {
+	version, ok := expectedVersion(w, r, nil)
+	if !ok {
+		return
+	}
+	v, err := a.images.Remove(r.Context(), actorOf(r), r.PathValue("id"), version, r.PathValue("imageId"))
+	if err != nil {
+		writeProductError(w, r, err)
+		return
+	}
+	a.writeView(w, r, http.StatusOK, "Image removed", v)
 }
 
 func writeProductError(w http.ResponseWriter, r *http.Request, err error) {
@@ -275,6 +352,11 @@ func writeProductError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, domain.ErrCategoryNotFound):
 		response.Error(w, r, http.StatusBadRequest, "VALIDATION_FAILED", "The request has invalid fields",
 			map[string][]string{"categoryIds": {"one of the categories does not exist"}})
+	case errors.Is(err, domain.ErrImageNotFound):
+		response.Error(w, r, http.StatusNotFound, "IMAGE_NOT_FOUND", "Image not found", nil)
+	case errors.Is(err, domain.ErrImageStorageUnavailable):
+		log.Printf("[catalog] image storage unavailable: %v", err)
+		response.Error(w, r, http.StatusServiceUnavailable, "IMAGE_STORAGE_UNAVAILABLE", "Image storage is not available", nil)
 	case errors.Is(err, domain.ErrProductNotFound):
 		response.Error(w, r, http.StatusNotFound, "PRODUCT_NOT_FOUND", "Product not found", nil)
 	case errors.Is(err, domain.ErrSKUNotFound):

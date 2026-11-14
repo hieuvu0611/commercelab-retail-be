@@ -115,6 +115,7 @@ type ProductPatch struct {
 	CategoryIDs       *[]string
 	VariantAxes       *[]string
 	Specs             *map[string]any
+	Images            *[]ProductImage
 }
 
 // SKUInput is the data to create a SKU.
@@ -254,6 +255,9 @@ func (s *ProductService) applyPatch(ctx context.Context, base Product, patch Pro
 	}
 	if patch.Specs != nil {
 		next.Specs = *patch.Specs
+	}
+	if patch.Images != nil {
+		next.Images = *patch.Images
 	}
 	next, err := NormalizeProduct(next)
 	if err != nil {

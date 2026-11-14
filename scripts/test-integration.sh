@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 
 PROJECT="commerce-it-$$-${RANDOM}"
 COMPOSE=(docker compose -p "$PROJECT")
-STORES=(postgres mongodb redis)
+STORES=(postgres mongodb redis object-storage)
 
 free_port() {
   python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
@@ -17,7 +17,8 @@ free_port() {
 POSTGRES_PORT="$(free_port)"
 MONGO_PORT="$(free_port)"
 REDIS_PORT="$(free_port)"
-export POSTGRES_HOST_PORT="$POSTGRES_PORT" MONGO_HOST_PORT="$MONGO_PORT" REDIS_HOST_PORT="$REDIS_PORT"
+S3_PORT="$(free_port)"
+export POSTGRES_HOST_PORT="$POSTGRES_PORT" MONGO_HOST_PORT="$MONGO_PORT" REDIS_HOST_PORT="$REDIS_PORT" S3_HOST_PORT="$S3_PORT"
 
 cleanup() {
   echo "Cleaning up Compose project ${PROJECT}..."
@@ -50,6 +51,8 @@ export DATABASE_URL_NOTIFICATIONS="$(service_dsn notify_svc_user notify_secret n
 export MONGO_URI="mongodb://mongo_admin:mongo_password@localhost:${MONGO_PORT}/commerce_lab_doc?authSource=admin"
 export MONGO_DATABASE="commerce_lab_doc"
 export REDIS_ADDR="localhost:${REDIS_PORT}"
+export S3_ENDPOINT="http://localhost:${S3_PORT}" AWS_REGION="us-east-1" AWS_S3_BUCKET="it-assets"
+export AWS_ACCESS_KEY_ID="devstorage" AWS_SECRET_ACCESS_KEY="devstorage-secret"
 
 echo "Applying migrations..."
 make migrate

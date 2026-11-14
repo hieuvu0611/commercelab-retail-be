@@ -17,9 +17,11 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cache"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/storage"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/migrations"
 )
 
@@ -31,6 +33,7 @@ type Deps struct {
 	Categories *domain.CategoryService
 	Products   *domain.ProductService
 	Prices     *domain.PriceService
+	Images     *domain.ImageService
 	Cache      cache.Cache
 }
 
@@ -47,7 +50,10 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 		deps.Products = domain.NewProductService(domain.NewMemoryProductStore(), deps.Categories).WithPricing(repo, repo)
 	}
 	registerCategoryRoutes(mux, deps.Categories, deps.Cache)
-	registerProductAdminRoutes(mux, deps.Products)
+	if deps.Images == nil {
+		deps.Images = domain.NewImageService(deps.Products, nil)
+	}
+	registerProductAdminRoutes(mux, deps.Products, deps.Images)
 	if deps.Prices == nil {
 		deps.Prices = domain.NewPriceService(deps.Products, repo)
 	}
@@ -234,6 +240,13 @@ func main() {
 	if deps.Products != nil {
 		deps.Products.WithPricing(repo, repo)
 		deps.Prices = domain.NewPriceService(deps.Products, repo)
+		s3Client := s3.NewFromEnv()
+		if config.EnvOrDefault("S3_AUTO_CREATE_BUCKET", "") == "true" {
+			if err := s3Client.EnsureBucket(ctx); err != nil {
+				log.Fatalf("[catalog-pricing-service] %v", err)
+			}
+		}
+		deps.Images = domain.NewImageService(deps.Products, storage.NewS3Images(s3Client))
 	}
 	log.Printf("[catalog-pricing-service] listening on :%s (schema: pricing, mongo: catalog_products)", port)
 	log.Fatal(http.ListenAndServe(":"+port, NewServerWithDeps(repo, pgPool != nil, mongoStore != nil, deps)))
