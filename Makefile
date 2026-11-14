@@ -1,4 +1,4 @@
-.PHONY: migrate test-integration infra-up infra-down benchmark-up benchmark-down benchmark-stats build test run-gateway run-iam run-catalog run-inventory run-order run-payment run-fulfillment run-ledger run-notification run-backoffice
+.PHONY: seed migrate test-integration infra-up infra-down benchmark-up benchmark-down benchmark-stats build test run-gateway run-iam run-catalog run-inventory run-order run-payment run-fulfillment run-ledger run-notification run-backoffice
 
 infra-up:
 	docker compose up -d
@@ -28,6 +28,11 @@ migrate:
 
 test:
 	$(GO_ENV) go test -v -race ./...
+
+# Load the demo catalog (categories, ~30 products with variants, prices, placeholder images). Idempotent.
+# Needs the migrated Postgres and MongoDB (see DATABASE_URL_PRICING, MONGO_URI, MONGO_DATABASE).
+seed:
+	$(GO_ENV) go run ./services/catalog-pricing-service/cmd/seed
 
 # Run the integration tests against disposable Postgres, Mongo and Redis (own Compose project, always cleaned up).
 test-integration:

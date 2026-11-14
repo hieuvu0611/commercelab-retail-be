@@ -307,3 +307,19 @@ func (s *MongoProductStore) PublishedBySlug(ctx context.Context, slug string) (d
 }
 
 var _ domain.StorefrontStore = (*MongoProductStore)(nil)
+
+// Upsert writes the product document as given, replacing any existing one with the same id. It bypasses the
+// version check and the workflow and exists for the demo seed only.
+func (s *MongoProductStore) Upsert(ctx context.Context, p domain.Product) error {
+	_, err := s.products.ReplaceOne(ctx, bson.D{{Key: "_id", Value: p.ID}}, p, options.Replace().SetUpsert(true))
+	if mongo.IsDuplicateKeyError(err) {
+		return domain.ErrProductSlugTaken
+	}
+	return dependency.Wrap(err)
+}
+
+// UpsertSKU writes the SKU document as given (demo seed only).
+func (s *MongoProductStore) UpsertSKU(ctx context.Context, sku domain.SKU) error {
+	_, err := s.skus.ReplaceOne(ctx, bson.D{{Key: "_id", Value: sku.SkuID}}, sku, options.Replace().SetUpsert(true))
+	return dependency.Wrap(err)
+}
