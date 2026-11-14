@@ -11,6 +11,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
@@ -37,6 +38,10 @@ func NewServer(repo *repository.CatalogPricingRepository, pgConnected, mongoConn
 	// B01: Lấy danh sách sản phẩm từ Catalog (MongoDB polymorphic specs + Postgres SKU prices)
 	mux.HandleFunc("GET /api/v1/products", func(w http.ResponseWriter, r *http.Request) {
 		products, err := repo.ListPublishedProducts(r.Context())
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusInternalServerError, "CATALOG_FETCH_FAILED", err.Error(), nil)
 			return
@@ -67,6 +72,10 @@ func NewServer(repo *repository.CatalogPricingRepository, pgConnected, mongoConn
 		for i := range req.Items {
 			if req.Items[i].UnitPriceVND <= 0 || req.Items[i].SkuName == "" {
 				sp, err := repo.GetSkuPrice(r.Context(), req.Items[i].SkuID)
+				if dependency.IsUnavailable(err) {
+					dependency.WriteUnavailable(w, r, err)
+					return
+				}
 				if err != nil {
 					response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", err.Error()+": "+req.Items[i].SkuID, nil)
 					return
@@ -91,6 +100,10 @@ func NewServer(repo *repository.CatalogPricingRepository, pgConnected, mongoConn
 			return
 		}
 		if err := repo.SaveQuote(r.Context(), quote); err != nil {
+			if dependency.IsUnavailable(err) {
+				dependency.WriteUnavailable(w, r, err)
+				return
+			}
 			response.Error(w, r, http.StatusInternalServerError, "QUOTE_PERSIST_FAILED", err.Error(), nil)
 			return
 		}
@@ -101,6 +114,10 @@ func NewServer(repo *repository.CatalogPricingRepository, pgConnected, mongoConn
 	mux.HandleFunc("GET /api/v1/quotes/{quoteId}", func(w http.ResponseWriter, r *http.Request) {
 		quoteID := r.PathValue("quoteId")
 		quote, err := repo.GetQuoteByID(r.Context(), quoteID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusNotFound, "QUOTE_NOT_FOUND", err.Error(), nil)
 			return
@@ -129,15 +146,16 @@ func main() {
 	}
 
 	pgPool, pgErr := db.ConnectPostgres(ctx, pgURL)
-	if pgErr != nil {
-		log.Printf("[catalog-pricing-service] postgres unavailable (%v), using seed fallback", pgErr)
-	} else {
+	if err := dependency.CheckStartup("catalog-pricing-service", "postgres", pgErr); err != nil {
+		log.Fatal(err)
+	}
+	if pgPool != nil {
 		defer pgPool.Close()
 	}
 
 	_, mongoStore, mongoErr := db.ConnectMongo(ctx, mongoURI, mongoDB)
-	if mongoErr != nil {
-		log.Printf("[catalog-pricing-service] mongodb unavailable (%v), using seed fallback", mongoErr)
+	if err := dependency.CheckStartup("catalog-pricing-service", "mongodb", mongoErr); err != nil {
+		log.Fatal(err)
 	}
 
 	repo := repository.NewCatalogPricingRepository(pgPool, mongoStore)

@@ -7,7 +7,9 @@ import (
 	"sync"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
@@ -43,6 +45,9 @@ type CatalogPricingRepository struct {
 	quotes     map[string]*domain.Quote
 }
 
+// NewCatalogPricingRepository returns a repository backed by the given stores. A nil store selects
+// seeded in-memory data for that part, which is only meant for development and tests
+// (ALLOW_MEMORY_FALLBACK=true). A configured store never falls back to seeds on failure.
 func NewCatalogPricingRepository(pgPool *pgxpool.Pool, mongoStore *db.MongoStore) *CatalogPricingRepository {
 	return &CatalogPricingRepository{
 		pgPool:     pgPool,
@@ -80,6 +85,10 @@ func (r *CatalogPricingRepository) GetSkuPrice(ctx context.Context, skuID string
 		if err == nil {
 			return sp, nil
 		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return SkuPrice{}, ErrSkuNotFound
+		}
+		return SkuPrice{}, dependency.Wrap(err)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -93,25 +102,30 @@ func (r *CatalogPricingRepository) GetSkuPrice(ctx context.Context, skuID string
 func (r *CatalogPricingRepository) ListPublishedProducts(ctx context.Context) ([]ProductCatalogDoc, error) {
 	if r.mongoStore != nil {
 		docs, err := r.mongoStore.FindAll(ctx, "catalog_products", bson.D{{Key: "status", Value: "PUBLISHED"}})
-		if err == nil && len(docs) > 0 {
-			out := make([]ProductCatalogDoc, 0, len(docs))
-			for _, d := range docs {
-				prodID, _ := d["product_id"].(string)
-				name, _ := d["name"].(string)
-				cat, _ := d["category_type"].(string)
-				status, _ := d["status"].(string)
-				specs, _ := d["specs"].(bson.M)
-				out = append(out, ProductCatalogDoc{
-					ProductID:    prodID,
-					Name:         name,
-					CategoryType: cat,
-					Status:       status,
-					Specs:        specs,
-					Skus:         r.loadProductSkus(ctx, prodID),
-				})
-			}
-			return out, nil
+		if err != nil {
+			return nil, dependency.Wrap(err)
 		}
+		out := make([]ProductCatalogDoc, 0, len(docs))
+		for _, d := range docs {
+			prodID, _ := d["product_id"].(string)
+			name, _ := d["name"].(string)
+			cat, _ := d["category_type"].(string)
+			status, _ := d["status"].(string)
+			specs, _ := d["specs"].(bson.M)
+			skus, err := r.loadProductSkus(ctx, prodID)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, ProductCatalogDoc{
+				ProductID:    prodID,
+				Name:         name,
+				CategoryType: cat,
+				Status:       status,
+				Specs:        specs,
+				Skus:         skus,
+			})
+		}
+		return out, nil
 	}
 
 	return []ProductCatalogDoc{
@@ -148,7 +162,7 @@ func (r *CatalogPricingRepository) ListPublishedProducts(ctx context.Context) ([
 	}, nil
 }
 
-func (r *CatalogPricingRepository) loadProductSkus(ctx context.Context, productID string) []map[string]any {
+func (r *CatalogPricingRepository) loadProductSkus(ctx context.Context, productID string) ([]map[string]any, error) {
 	if r.pgPool != nil {
 		rows, err := r.pgPool.Query(ctx, `
 			SELECT sku_id, sku_name, unit_price_vnd, vat_rate_pct
@@ -156,26 +170,29 @@ func (r *CatalogPricingRepository) loadProductSkus(ctx context.Context, productI
 			WHERE product_id = $1 AND is_published = TRUE
 			ORDER BY sku_id
 		`, productID)
-		if err == nil {
-			defer rows.Close()
-			var skus []map[string]any
-			for rows.Next() {
-				var skuID, skuName string
-				var price int64
-				var vat int
-				if err := rows.Scan(&skuID, &skuName, &price, &vat); err == nil {
-					skus = append(skus, map[string]any{
-						"skuId":          skuID,
-						"skuName":        skuName,
-						"unitPriceVnd":   price,
-						"vatIncludedPct": vat,
-					})
-				}
-			}
-			if len(skus) > 0 {
-				return skus
-			}
+		if err != nil {
+			return nil, dependency.Wrap(err)
 		}
+		defer rows.Close()
+		skus := []map[string]any{}
+		for rows.Next() {
+			var skuID, skuName string
+			var price int64
+			var vat int
+			if err := rows.Scan(&skuID, &skuName, &price, &vat); err != nil {
+				return nil, dependency.Wrap(err)
+			}
+			skus = append(skus, map[string]any{
+				"skuId":          skuID,
+				"skuName":        skuName,
+				"unitPriceVnd":   price,
+				"vatIncludedPct": vat,
+			})
+		}
+		if err := rows.Err(); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		return skus, nil
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -190,7 +207,7 @@ func (r *CatalogPricingRepository) loadProductSkus(ctx context.Context, productI
 			})
 		}
 	}
-	return skus
+	return skus, nil
 }
 
 func (r *CatalogPricingRepository) SaveQuote(ctx context.Context, q *domain.Quote) error {
@@ -210,9 +227,10 @@ func (r *CatalogPricingRepository) SaveQuote(ctx context.Context, q *domain.Quot
 				lines_json = EXCLUDED.lines_json,
 				expires_at = EXCLUDED.expires_at
 		`, q.QuoteID, q.UserID, q.VoucherCode, q.SubtotalVND, q.DiscountVND, q.ShippingFeeVND, q.TotalPayableVND, string(linesJSON), q.ExpiresAt)
-		if err == nil {
-			return nil
+		if err != nil {
+			return dependency.Wrap(err)
 		}
+		return nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -237,6 +255,10 @@ func (r *CatalogPricingRepository) GetQuoteByID(ctx context.Context, quoteID str
 			}
 			return &q, nil
 		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrQuoteNotFound
+		}
+		return nil, dependency.Wrap(err)
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
