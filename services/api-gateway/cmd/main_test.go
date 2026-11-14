@@ -86,7 +86,7 @@ func TestGatewayCartAndAuthenticatedReverseProxy(t *testing.T) {
 	}
 
 	// 2. Kiểm tra Reverse Proxy kèm chống giả mạo header X-Warehouse-Scope và tiêm từ JWT thật (I08)
-	token, err := auth.SignAccessToken("staff-wh-hcm", "WAREHOUSE_STAFF", "WH-HCM-01")
+	token, err := auth.SignAccessToken(auth.Identity{UserID: "staff-wh-hcm", Role: "WAREHOUSE_STAFF", WarehouseScope: "WH-HCM-01", Roles: []string{"WAREHOUSE_STAFF"}, WarehouseScopes: []string{"WH-HCM-01"}})
 	if err != nil {
 		t.Fatalf("failed to sign token: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestLoadConfigFailsWithoutJWTSecrets(t *testing.T) {
 			t.Fatalf("error %q does not mention %q", err, want)
 		}
 	}
-	if _, signErr := auth.SignAccessToken("u", "CUSTOMER", "NONE"); signErr == nil {
+	if _, signErr := auth.SignAccessToken(auth.Identity{UserID: "u", Role: "CUSTOMER", WarehouseScope: "NONE"}); signErr == nil {
 		t.Fatal("tokens must not work when the configuration is invalid")
 	}
 }
@@ -173,7 +173,7 @@ func TestLoadConfigAcceptsStrongSecrets(t *testing.T) {
 	if _, err := loadConfig(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, err := auth.SignAccessToken("u", "CUSTOMER", "NONE"); err != nil {
+	if _, err := auth.SignAccessToken(auth.Identity{UserID: "u", Role: "CUSTOMER", WarehouseScope: "NONE"}); err != nil {
 		t.Fatalf("tokens must work after a valid configuration: %v", err)
 	}
 }

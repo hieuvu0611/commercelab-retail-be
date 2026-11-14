@@ -144,3 +144,88 @@ func TestConcurrentRegistrationsOfOneEmailCreateExactlyOneAccount(t *testing.T) 
 		t.Fatalf("created %d, taken %d; want exactly 1 and %d", created, taken, attempts-1)
 	}
 }
+
+func grantsOf(t *testing.T, repo *UserRepository, ctx context.Context, userID string) []RoleGrant {
+	t.Helper()
+	u, err := repo.FindByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("find %s: %v", userID, err)
+	}
+	return u.Grants
+}
+
+func TestSeedUsersGetBlueprintRolesFromTheLegacyColumns(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+
+	cases := []struct {
+		userID     string
+		wantRole   string
+		wantScopes []string
+	}{
+		{"user-lan", "CUSTOMER", nil},
+		{"staff-wh-hcm", "WAREHOUSE_STAFF", []string{"WH-HCM-01"}},
+		{"staff-wh-hn", "WAREHOUSE_STAFF", []string{"WH-HN-01"}},
+		{"staff-cskh", "SUPPORT_AGENT", nil},
+		{"staff-finance", "FINANCE", nil},
+		{"mgr-ops", "OPS_MGR", nil},
+		{"staff-admin", "ACCESS_ADMIN", nil},
+	}
+	for _, tc := range cases {
+		u, err := repo.FindByID(ctx, tc.userID)
+		if err != nil {
+			t.Fatalf("find %s: %v", tc.userID, err)
+		}
+		id := u.Identity()
+		if len(id.Roles) != 1 || id.Roles[0] != tc.wantRole {
+			t.Errorf("%s roles = %v, want [%s]", tc.userID, id.Roles, tc.wantRole)
+		}
+		if strings.Join(id.WarehouseScopes, ",") != strings.Join(tc.wantScopes, ",") {
+			t.Errorf("%s scopes = %v, want %v", tc.userID, id.WarehouseScopes, tc.wantScopes)
+		}
+	}
+}
+
+func TestDevAccessAdminCanSignIn(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+	u, err := repo.Authenticate(ctx, "admin@commercelab.vn", devPassword)
+	if err != nil {
+		t.Fatalf("the dev ACCESS_ADMIN must sign in with the dev password: %v", err)
+	}
+	if !u.HasRole("ACCESS_ADMIN") {
+		t.Fatalf("grants = %+v", u.Grants)
+	}
+}
+
+func TestRegisteredCustomerHoldsTheCustomerGrant(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+	u, err := repo.Register(ctx, fmt.Sprintf("grant-%d@example.com", time.Now().UnixNano()), "a-long-enough-password", "Grant Test")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	grants := grantsOf(t, repo, ctx, u.ID)
+	if len(grants) != 1 || grants[0].Role != "CUSTOMER" || grants[0].WarehouseID != "" {
+		t.Fatalf("grants = %+v, want exactly the CUSTOMER grant", grants)
+	}
+}
+
+func TestRoleGrantsAreConstrainedByTheDatabase(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+
+	if _, err := repo.pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ('user-lan', 'NOT_A_ROLE')`); err == nil {
+		t.Fatal("an unknown role must be rejected by the foreign key")
+	}
+	if _, err := repo.pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ('user-lan', 'CUSTOMER')`); err == nil {
+		t.Fatal("granting the same role twice must be rejected")
+	}
+	if _, err := repo.pool.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ('no-such-user', 'CUSTOMER')`); err == nil {
+		t.Fatal("a grant for an unknown user must be rejected")
+	}
+	var permissions int
+	if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM role_permissions WHERE role = 'ACCESS_ADMIN'`).Scan(&permissions); err != nil || permissions == 0 {
+		t.Fatalf("ACCESS_ADMIN must hold permissions, got %d (err %v)", permissions, err)
+	}
+	var roles int
+	if err := repo.pool.QueryRow(ctx, `SELECT count(*) FROM roles`).Scan(&roles); err != nil || roles != 13 {
+		t.Fatalf("roles = %d (err %v), want the 13 blueprint roles", roles, err)
+	}
+}
