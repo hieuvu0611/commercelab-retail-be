@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
@@ -36,6 +38,12 @@ func NewMongoProductStore(ctx context.Context, store *db.MongoStore) (*MongoProd
 		Keys: bson.D{{Key: "slug", Value: 1}}, Options: options.Index().SetUnique(true).SetName("uniq_slug"),
 	}); err != nil {
 		return nil, fmt.Errorf("create product slug index: %w", dependency.Wrap(err))
+	}
+	if _, err := s.products.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "name", Value: "text"}, {Key: "brand", Value: "text"}, {Key: "description", Value: "text"}},
+		Options: options.Index().SetName("text_search").SetWeights(bson.D{{Key: "name", Value: 5}, {Key: "brand", Value: 2}, {Key: "description", Value: 1}}),
+	}); err != nil {
+		return nil, fmt.Errorf("create product text index: %w", dependency.Wrap(err))
 	}
 	if _, err := s.skus.Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys: bson.D{{Key: "productId", Value: 1}}, Options: options.Index().SetName("by_product"),
@@ -199,3 +207,103 @@ func (s *MongoProductStore) DeleteSKU(ctx context.Context, skuID string) error {
 }
 
 var _ domain.ProductStore = (*MongoProductStore)(nil)
+
+// NewMongoStorefrontStore returns the read side of the catalog on an existing Mongo connection. It creates no
+// indexes (NewMongoProductStore does).
+func NewMongoStorefrontStore(store *db.MongoStore) *MongoProductStore {
+	d := store.Database()
+	return &MongoProductStore{products: d.Collection(productCollection), skus: d.Collection(skuCollection), drafts: d.Collection(draftCollection)}
+}
+
+const maxStorefrontScan = 5001
+
+// FindPublished implements domain.StorefrontStore. The search text goes to Mongo's text index as a word search,
+// never into a regular expression.
+func (s *MongoProductStore) FindPublished(ctx context.Context, text string, categoryIDs []string) ([]domain.PublishedRef, error) {
+	filter := bson.D{{Key: "status", Value: string(domain.ProductPublished)}}
+	if categoryIDs != nil {
+		filter = append(filter, bson.E{Key: "categoryIds", Value: bson.D{{Key: "$in", Value: categoryIDs}}})
+	}
+	if text != "" {
+		filter = append(filter, bson.E{Key: "$text", Value: bson.D{{Key: "$search", Value: text}}})
+	}
+	cur, err := s.products.Find(ctx, filter, options.Find().
+		SetProjection(bson.D{{Key: "_id", Value: 1}, {Key: "publishedAt", Value: 1}}).SetLimit(maxStorefrontScan))
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	var rows []struct {
+		ID          string     `bson:"_id"`
+		PublishedAt *time.Time `bson:"publishedAt"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	refs := make([]domain.PublishedRef, len(rows))
+	for i, r := range rows {
+		refs[i] = domain.PublishedRef{ID: r.ID}
+		if r.PublishedAt != nil {
+			refs[i].PublishedAt = *r.PublishedAt
+		}
+	}
+	return refs, nil
+}
+
+// ActiveSKUs implements domain.StorefrontStore; attribute values are matched as escaped, anchored text.
+func (s *MongoProductStore) ActiveSKUs(ctx context.Context, productIDs []string, attrs map[string]string) ([]domain.SKU, error) {
+	filter := bson.D{{Key: "productId", Value: bson.D{{Key: "$in", Value: productIDs}}}, {Key: "isActive", Value: true}}
+	for axis, value := range attrs {
+		filter = append(filter, bson.E{Key: "attributes." + axis, Value: bson.D{
+			{Key: "$regex", Value: "^" + regexp.QuoteMeta(strings.TrimSpace(value)) + "$"}, {Key: "$options", Value: "i"},
+		}})
+	}
+	cur, err := s.skus.Find(ctx, filter)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	out := []domain.SKU{}
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	return out, nil
+}
+
+// PublishedByIDs implements domain.StorefrontStore.
+func (s *MongoProductStore) PublishedByIDs(ctx context.Context, ids []string) ([]domain.Product, error) {
+	cur, err := s.products.Find(ctx, bson.D{
+		{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}}, {Key: "status", Value: string(domain.ProductPublished)},
+	})
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	var found []domain.Product
+	if err := cur.All(ctx, &found); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	byID := make(map[string]domain.Product, len(found))
+	for _, p := range found {
+		byID[p.ID] = p
+	}
+	out := make([]domain.Product, 0, len(found))
+	for _, id := range ids {
+		if p, ok := byID[id]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// PublishedBySlug implements domain.StorefrontStore.
+func (s *MongoProductStore) PublishedBySlug(ctx context.Context, slug string) (domain.Product, error) {
+	var p domain.Product
+	err := s.products.FindOne(ctx, bson.D{{Key: "slug", Value: slug}, {Key: "status", Value: string(domain.ProductPublished)}}).Decode(&p)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return domain.Product{}, domain.ErrProductNotFound
+	}
+	if err != nil {
+		return domain.Product{}, dependency.Wrap(err)
+	}
+	return p, nil
+}
+
+var _ domain.StorefrontStore = (*MongoProductStore)(nil)

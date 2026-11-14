@@ -214,6 +214,9 @@ func TestPostgresPricePeriods(t *testing.T) {
 	if err != nil || got.UnitPriceVND != 400000 || got.SkuName != "IT SKU" {
 		t.Fatalf("immediate price = %+v, %v", got, err)
 	}
+	if prices, err := repo.OrderablePrices(ctx, []string{sku, "IT-UNKNOWN"}); err != nil || len(prices) != 1 || prices[sku].UnitPriceVND != 400000 || prices[sku].VatRatePct != 10 {
+		t.Fatalf("orderable prices = %+v, %v", prices, err)
+	}
 	history, _ := repo.SkuPriceHistory(ctx, sku)
 	if len(history) != 1 {
 		t.Fatalf("superseded scheduled price must be gone: %+v", history)
@@ -243,6 +246,9 @@ func TestPostgresPricePeriods(t *testing.T) {
 	}
 	if _, err := repo.GetSkuPrice(ctx, sku); !errors.Is(err, ErrSkuNotOrderable) {
 		t.Fatalf("closed SKU, err = %v", err)
+	}
+	if prices, _ := repo.OrderablePrices(ctx, []string{sku}); len(prices) != 0 {
+		t.Fatalf("closed SKU listed with a price: %+v", prices)
 	}
 	if _, err := repo.GetSkuPrice(ctx, "IT-UNKNOWN"); !errors.Is(err, ErrSkuNotFound) {
 		t.Fatalf("unknown SKU, err = %v", err)
