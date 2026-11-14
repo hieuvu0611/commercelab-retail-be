@@ -17,6 +17,8 @@ func TestResolveTargetRoutesEveryPublicPrefixToItsService(t *testing.T) {
 		{"/api/v1/auth/login", "iam"},
 		{"/api/v1/auth/me", "iam"},
 		{"/api/v1/products", "catalog"},
+		{"/api/v1/categories", "catalog"},
+		{"/api/v1/categories/backpacks", "catalog"},
 		{"/api/v1/quotes", "catalog"},
 		{"/api/v1/quotes/q-1", "catalog"},
 		{"/api/v1/inventory/SKU-1", "inventory"},

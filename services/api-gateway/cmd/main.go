@@ -15,6 +15,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/api-gateway/internal/proxy"
 )
@@ -113,24 +114,24 @@ func NewServer(cartStorage *CartStorage, proxyRouter *proxy.Router, redisConnect
 		}, nil)
 	})
 
-	// P02: Quản lý giỏ hàng tạm (Chưa hứa giữ hàng)
-	mux.HandleFunc("GET /api/v1/carts/{userId}", func(w http.ResponseWriter, r *http.Request) {
-		userID := r.PathValue("userId")
-		cart, err := cartStorage.Get(r.Context(), userID)
+	// P02: the temporary cart. It always belongs to the subject of the access token; the user id is never
+	// taken from the URL or the body, so one user cannot read or write another user's cart.
+	mux.Handle("GET /api/v1/carts/me", auth.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFrom(r.Context())
+		cart, err := cartStorage.Get(r.Context(), claims.UserID)
 		if err != nil {
 			dependency.WriteUnavailable(w, r, err)
 			return
 		}
 		response.JSON(w, http.StatusOK, "Lấy giỏ hàng thành công", cart, nil)
-	})
+	})))
 
-	mux.HandleFunc("PUT /api/v1/carts/{userId}", func(w http.ResponseWriter, r *http.Request) {
-		userID := r.PathValue("userId")
+	mux.Handle("PUT /api/v1/carts/me", auth.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFrom(r.Context())
 		var req struct {
 			Items []CartItem `json:"items"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "Dữ liệu giỏ hàng không hợp lệ", nil)
+		if !request.DecodeJSON(w, r, &req) {
 			return
 		}
 		for _, item := range req.Items {
@@ -140,7 +141,7 @@ func NewServer(cartStorage *CartStorage, proxyRouter *proxy.Router, redisConnect
 			}
 		}
 		cart := Cart{
-			UserID: userID,
+			UserID: claims.UserID,
 			Items:  req.Items,
 			Note:   "Giỏ hàng tạm trên Redis — Chưa giữ tồn kho (Policy P02)",
 		}
@@ -149,10 +150,18 @@ func NewServer(cartStorage *CartStorage, proxyRouter *proxy.Router, redisConnect
 			return
 		}
 		response.JSON(w, http.StatusOK, "Cập nhật giỏ hàng thành công", cart, nil)
-	})
+	})))
 
-	// Định tuyến toàn bộ các API còn lại xuống các downstream microservices (:8081 - :8089)
-	mux.Handle("/", proxyRouter)
+	// Every other API goes to the downstream services. Only the public allowlist may skip authentication;
+	// anything else needs a valid access token, which the service then verifies again itself.
+	authenticatedProxy := auth.RequireAuth(proxyRouter)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if isPublic(r.Method, r.URL.Path) {
+			proxyRouter.ServeHTTP(w, r)
+			return
+		}
+		authenticatedProxy.ServeHTTP(w, r)
+	})
 
 	return middleware.Chain(mux)
 }
