@@ -12,7 +12,7 @@ func TestTokensFailClosedWithoutSecrets(t *testing.T) {
 	if _, err := SignAccessToken("u", "CUSTOMER", "NONE"); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("SignAccessToken err = %v, want ErrNotConfigured", err)
 	}
-	if _, err := SignRefreshToken("u", "CUSTOMER", "NONE"); !errors.Is(err, ErrNotConfigured) {
+	if _, err := SignRefreshToken("u", "CUSTOMER", "NONE", "tok-1"); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("SignRefreshToken err = %v, want ErrNotConfigured", err)
 	}
 	if _, err := ParseAccessToken("anything"); !errors.Is(err, ErrNotConfigured) {

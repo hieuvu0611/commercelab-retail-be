@@ -25,7 +25,7 @@ func TestSignAndParseTokens(t *testing.T) {
 		t.Fatalf("expected error when parsing access token as refresh token")
 	}
 
-	refreshTok, err := SignRefreshToken("staff-wh-hcm", "WAREHOUSE_STAFF", "WH-HCM-01")
+	refreshTok, err := SignRefreshToken("staff-wh-hcm", "WAREHOUSE_STAFF", "WH-HCM-01", "tok-1")
 	if err != nil {
 		t.Fatalf("unexpected error signing refresh token: %v", err)
 	}

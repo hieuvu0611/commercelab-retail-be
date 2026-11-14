@@ -9,7 +9,6 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
-	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/repository"
 )
 
 func postRegister(t *testing.T, srv http.Handler, body string) *httptest.ResponseRecorder {
@@ -24,7 +23,7 @@ func postRegister(t *testing.T, srv http.Handler, body string) *httptest.Respons
 func TestRegisterCreatesCustomerAndReturnsTokens(t *testing.T) {
 	authtest.Configure(t)
 	store := newFakeStore(t)
-	srv := NewServer(store, true)
+	srv := NewServer(store, newFakeTokens(), true)
 
 	rec := postRegister(t, srv, `{"email":"  New.User@Example.COM ","password":"a-long-enough-password","fullName":" New User "}`)
 	if rec.Code != http.StatusCreated {
@@ -63,7 +62,7 @@ func TestRegisterCreatesCustomerAndReturnsTokens(t *testing.T) {
 
 func TestRegisterRejectsDuplicateEmailCaseInsensitively(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(newFakeStore(t), true)
+	srv := newTestServer(t)
 
 	rec := postRegister(t, srv, `{"email":"LAN@example.com","password":"a-long-enough-password","fullName":"Another Lan"}`)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "EMAIL_ALREADY_REGISTERED") {
@@ -73,7 +72,7 @@ func TestRegisterRejectsDuplicateEmailCaseInsensitively(t *testing.T) {
 
 func TestRegisterValidatesInput(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(newFakeStore(t), true)
+	srv := newTestServer(t)
 
 	tests := []struct {
 		name      string
@@ -112,7 +111,7 @@ func TestRegisterValidatesInput(t *testing.T) {
 
 func TestRegisterRejectsUnknownFieldsAndRoleEscalation(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(newFakeStore(t), true)
+	srv := newTestServer(t)
 
 	rec := postRegister(t, srv, `{"email":"a@example.com","password":"a-long-enough-password","fullName":"X","role":"ADMIN"}`)
 	if rec.Code != http.StatusBadRequest {
@@ -122,7 +121,7 @@ func TestRegisterRejectsUnknownFieldsAndRoleEscalation(t *testing.T) {
 
 func TestRegisterAnswers503WhenStoreIsDown(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewUserRepository(unreachablePool(t)), true)
+	srv := newOutageServer(t)
 
 	rec := postRegister(t, srv, `{"email":"a@example.com","password":"a-long-enough-password","fullName":"X"}`)
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "DEPENDENCY_UNAVAILABLE") {
