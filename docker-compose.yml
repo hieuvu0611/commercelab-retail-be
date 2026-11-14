@@ -71,6 +71,19 @@ services:
 
   mongodb:
     <<: *low-resource-limits
+    # Exception to the 250 MB cap: MongoDB 7 needs a WiredTiger cache of at least 0.25 GB, and the image's
+    # own start-up mongosh needs more on top. At 250-400 MB the kernel OOM-kills that mongosh, the entrypoint
+    # aborts and the container restarts, so the stack is intermittently unhealthy.
+    mem_limit: 512m
+    memswap_limit: 512m
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 512M
+        reservations:
+          cpus: '0.05'
+          memory: 32M
     image: mongo:7.0
     restart: unless-stopped
     # MongoDB 7 rejects a WiredTiger cache below 0.25 GB; 0.25 is the smallest value that starts.
