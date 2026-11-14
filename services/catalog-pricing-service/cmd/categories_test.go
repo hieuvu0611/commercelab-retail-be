@@ -292,3 +292,10 @@ func serve(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 func nilCtx() context.Context { return context.Background() }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+func httpRec(code int, body []byte) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	rec.Code = code
+	_, _ = rec.Body.Write(body)
+	return rec
+}

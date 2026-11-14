@@ -34,6 +34,7 @@ type Deps struct {
 	Products   *domain.ProductService
 	Prices     *domain.PriceService
 	Images     *domain.ImageService
+	Storefront *domain.StorefrontService
 	Cache      cache.Cache
 }
 
@@ -46,14 +47,23 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	if deps.Categories == nil {
 		deps.Categories = domain.NewCategoryService(domain.NewMemoryCategoryStore())
 	}
+	memoryProducts := domain.NewMemoryProductStore()
 	if deps.Products == nil {
-		deps.Products = domain.NewProductService(domain.NewMemoryProductStore(), deps.Categories).WithPricing(repo, repo)
+		deps.Products = domain.NewProductService(memoryProducts, deps.Categories).WithPricing(repo, repo)
+	}
+	if deps.Storefront == nil {
+		var reads domain.StorefrontStore = memoryProducts
+		if mongoStore := repo.MongoStore(); mongoStore != nil {
+			reads = repository.NewMongoStorefrontStore(mongoStore)
+		}
+		deps.Storefront = domain.NewStorefrontService(reads, deps.Categories, repo)
 	}
 	registerCategoryRoutes(mux, deps.Categories, deps.Cache)
 	if deps.Images == nil {
 		deps.Images = domain.NewImageService(deps.Products, nil)
 	}
 	registerProductAdminRoutes(mux, deps.Products, deps.Images)
+	registerStorefrontRoutes(mux, deps.Storefront, deps.Images)
 	if deps.Prices == nil {
 		deps.Prices = domain.NewPriceService(deps.Products, repo)
 	}
@@ -67,25 +77,6 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 			"pgConnected":    pgConnected,
 			"mongoConnected": mongoConnected,
 		}, nil)
-	})
-
-	// B01: Lấy danh sách sản phẩm từ Catalog (MongoDB polymorphic specs + Postgres SKU prices)
-	mux.HandleFunc("GET /api/v1/products", func(w http.ResponseWriter, r *http.Request) {
-		products, err := repo.ListPublishedProducts(r.Context())
-		if dependency.IsUnavailable(err) {
-			dependency.WriteUnavailable(w, r, err)
-			return
-		}
-		if err != nil {
-			response.Error(w, r, http.StatusInternalServerError, "CATALOG_FETCH_FAILED", err.Error(), nil)
-			return
-		}
-		response.JSON(w, http.StatusOK, "Lấy danh mục sản phẩm thành công", products, &response.Metadata{
-			Total:     int64(len(products)),
-			Page:      1,
-			PageCount: 1,
-			Limit:     10,
-		})
 	})
 
 	// P02, P08, SC01: Tạo báo giá có hiệu lực 5 phút & lưu vào pricing.quotes

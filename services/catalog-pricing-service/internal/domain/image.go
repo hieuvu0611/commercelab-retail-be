@@ -211,11 +211,17 @@ func (s *ImageService) Remove(ctx context.Context, actor, productID string, expe
 // URL empty instead of failing the whole response.
 func (s *ImageService) WithURLs(ctx context.Context, images []ProductImage) []ProductImage {
 	out := slices.Clone(images)
+	for i := range out {
+		// Seed and imported images may point at an external https URL instead of a stored object.
+		if strings.HasPrefix(out[i].Key, "https://") || strings.HasPrefix(out[i].Key, "http://") {
+			out[i].URL = out[i].Key
+		}
+	}
 	if s == nil || s.storage == nil {
 		return out
 	}
 	for i := range out {
-		if out[i].Key == "" {
+		if out[i].Key == "" || out[i].URL != "" {
 			continue
 		}
 		if url, err := s.storage.PresignDownload(ctx, out[i].Key, downloadURLTTL); err == nil {

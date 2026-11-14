@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -168,3 +169,86 @@ func (m *MemoryProductStore) DeleteDraft(_ context.Context, productID string) er
 	delete(m.drafts, productID)
 	return nil
 }
+
+func wordsOf(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r > 127)
+	})
+}
+
+// FindPublished implements StorefrontStore; the text matches whole words of the name, brand or description.
+func (m *MemoryProductStore) FindPublished(_ context.Context, text string, categoryIDs []string) ([]PublishedRef, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	queryWords := wordsOf(text)
+	var refs []PublishedRef
+	for _, p := range m.products {
+		if p.Status != ProductPublished {
+			continue
+		}
+		if categoryIDs != nil && !slices.ContainsFunc(p.CategoryIDs, func(id string) bool { return slices.Contains(categoryIDs, id) }) {
+			continue
+		}
+		if strings.TrimSpace(text) != "" {
+			words := wordsOf(p.Name + " " + p.Brand + " " + p.Description)
+			if !slices.ContainsFunc(queryWords, func(w string) bool { return slices.Contains(words, w) }) {
+				continue
+			}
+		}
+		ref := PublishedRef{ID: p.ID}
+		if p.PublishedAt != nil {
+			ref.PublishedAt = *p.PublishedAt
+		}
+		refs = append(refs, ref)
+	}
+	return refs, nil
+}
+
+// ActiveSKUs implements StorefrontStore.
+func (m *MemoryProductStore) ActiveSKUs(_ context.Context, productIDs []string, attrs map[string]string) ([]SKU, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []SKU
+	for _, s := range m.skus {
+		if !s.IsActive || !slices.Contains(productIDs, s.ProductID) {
+			continue
+		}
+		ok := true
+		for axis, want := range attrs {
+			if !strings.EqualFold(strings.TrimSpace(s.Attributes[axis]), strings.TrimSpace(want)) {
+				ok = false
+			}
+		}
+		if ok {
+			out = append(out, s)
+		}
+	}
+	return out, nil
+}
+
+// PublishedByIDs implements StorefrontStore.
+func (m *MemoryProductStore) PublishedByIDs(_ context.Context, ids []string) ([]Product, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Product
+	for _, id := range ids {
+		if p, ok := m.products[id]; ok && p.Status == ProductPublished {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+// PublishedBySlug implements StorefrontStore.
+func (m *MemoryProductStore) PublishedBySlug(_ context.Context, slug string) (Product, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.products {
+		if p.Slug == slug && p.Status == ProductPublished {
+			return p, nil
+		}
+	}
+	return Product{}, ErrProductNotFound
+}
+
+var _ StorefrontStore = (*MemoryProductStore)(nil)

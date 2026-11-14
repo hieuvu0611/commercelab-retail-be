@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"github.com/jackc/pgx/v5"
@@ -145,3 +146,52 @@ func (r *CatalogPricingRepository) SkuPriceHistory(ctx context.Context, skuID st
 	defer r.mu.RUnlock()
 	return slices.Clone(r.history[skuID]), nil
 }
+
+// OrderablePrices returns the price in effect now (and its VAT rate) of every given SKU that can be ordered:
+// published row and a period in effect.
+func (r *CatalogPricingRepository) OrderablePrices(ctx context.Context, skuIDs []string) (map[string]domain.SKUPrice, error) {
+	out := map[string]domain.SKUPrice{}
+	if len(skuIDs) == 0 {
+		return out, nil
+	}
+	now := r.now()
+	if r.pgPool != nil {
+		rows, err := r.pgPool.Query(ctx, `
+			SELECT p.sku_id, h.unit_price_vnd, p.vat_rate_pct
+			FROM sku_prices p
+			JOIN LATERAL (
+				SELECT unit_price_vnd FROM sku_price_history
+				WHERE sku_id = p.sku_id AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)
+				ORDER BY effective_from DESC LIMIT 1
+			) h ON TRUE
+			WHERE p.sku_id = ANY($1) AND p.is_published`, skuIDs, now)
+		if err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			var price domain.SKUPrice
+			if err := rows.Scan(&id, &price.UnitPriceVND, &price.VatRatePct); err != nil {
+				return nil, dependency.Wrap(err)
+			}
+			out[id] = price
+		}
+		return out, dependency.Wrap(rows.Err())
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, id := range skuIDs {
+		sp, ok := r.skuPrices[id]
+		if !ok || !sp.IsPublished {
+			continue
+		}
+		if period, active := effectivePeriod(r.history[id], now); active {
+			out[id] = domain.SKUPrice{UnitPriceVND: period.UnitPriceVND, VatRatePct: sp.VatRatePct}
+		}
+	}
+	return out, nil
+}
+
+// MongoStore reports whether the repository is backed by MongoDB (false in the in-memory development mode).
+func (r *CatalogPricingRepository) MongoStore() *db.MongoStore { return r.mongoStore }
