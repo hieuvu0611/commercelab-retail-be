@@ -98,8 +98,8 @@ func newFakeStore(t *testing.T) *fakeStore {
 		t.Fatalf("hash: %v", err)
 	}
 	users := []repository.User{
-		{ID: "user-lan", Email: "lan@example.com", Name: "Lan", PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true},
-		{ID: "staff-wh-hcm", Email: "wh.hcm@commercelab.vn", Name: "Warehouse HCM", PasswordHash: hash, Role: "WAREHOUSE_STAFF", WarehouseScope: "WH-HCM-01", IsActive: true},
+		{ID: "user-lan", Email: "lan@example.com", Name: "Lan", PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true, Grants: []repository.RoleGrant{{Role: "CUSTOMER"}}},
+		{ID: "staff-wh-hcm", Email: "wh.hcm@commercelab.vn", Name: "Warehouse HCM", PasswordHash: hash, Role: "WAREHOUSE_STAFF", WarehouseScope: "WH-HCM-01", IsActive: true, Grants: []repository.RoleGrant{{Role: "WAREHOUSE_STAFF", WarehouseID: "WH-HCM-01"}}},
 		{ID: "user-off", Email: "off@example.com", Name: "Off", PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: false},
 	}
 	store := &fakeStore{byID: map[string]repository.User{}}
@@ -131,7 +131,7 @@ func (f *fakeStore) Register(_ context.Context, email, plain, fullName string) (
 	if err != nil {
 		return repository.User{}, err
 	}
-	u := repository.User{ID: "usr-" + email, Email: email, Name: fullName, PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true}
+	u := repository.User{ID: "usr-" + email, Email: email, Name: fullName, PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true, Grants: []repository.RoleGrant{{Role: "CUSTOMER"}}}
 	f.byID[u.ID] = u
 	return u, nil
 }
@@ -260,7 +260,7 @@ func TestStoreOutageAnswers503InsteadOfSeededUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign refresh token: %v", err)
 	}
-	accessToken, err := auth.SignAccessToken("user-lan", "CUSTOMER", "NONE")
+	accessToken, err := auth.SignAccessToken(auth.Identity{UserID: "user-lan", Role: "CUSTOMER", WarehouseScope: "NONE", Roles: []string{"CUSTOMER"}})
 	if err != nil {
 		t.Fatalf("sign access token: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestLoadConfigFailsWithoutJWTSecrets(t *testing.T) {
 			t.Fatalf("error %q does not mention %q", err, want)
 		}
 	}
-	if _, signErr := auth.SignAccessToken("u", "CUSTOMER", "NONE"); signErr == nil {
+	if _, signErr := auth.SignAccessToken(auth.Identity{UserID: "u", Role: "CUSTOMER", WarehouseScope: "NONE"}); signErr == nil {
 		t.Fatal("tokens must not work when the configuration is invalid")
 	}
 }
@@ -327,7 +327,33 @@ func TestLoadConfigAcceptsStrongSecrets(t *testing.T) {
 	if _, err := loadConfig(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, err := auth.SignAccessToken("u", "CUSTOMER", "NONE"); err != nil {
+	if _, err := auth.SignAccessToken(auth.Identity{UserID: "u", Role: "CUSTOMER", WarehouseScope: "NONE"}); err != nil {
 		t.Fatalf("tokens must work after a valid configuration: %v", err)
+	}
+}
+
+func TestLoginTokenAndProfileCarryRolesAndWarehouseScopes(t *testing.T) {
+	authtest.Configure(t)
+	srv := newTestServer(t)
+
+	rec := postJSON(t, srv, "/api/v1/auth/login", `{"email":"wh.hcm@commercelab.vn","password":"`+testPassword+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data UserProfile `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Data.Roles) != 1 || resp.Data.Roles[0] != "WAREHOUSE_STAFF" || len(resp.Data.WarehouseScopes) != 1 || resp.Data.WarehouseScopes[0] != "WH-HCM-01" {
+		t.Fatalf("profile roles/scopes = %v / %v", resp.Data.Roles, resp.Data.WarehouseScopes)
+	}
+	claims, err := auth.ParseAccessToken(resp.Data.AccessToken)
+	if err != nil {
+		t.Fatalf("parse access token: %v", err)
+	}
+	if !claims.HasRole("WAREHOUSE_STAFF") || len(claims.WarehouseScopes) != 1 || claims.WarehouseScopes[0] != "WH-HCM-01" {
+		t.Fatalf("token claims roles/scopes = %v / %v", claims.Roles, claims.WarehouseScopes)
 	}
 }

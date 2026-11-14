@@ -21,13 +21,14 @@ var (
 )
 
 type User struct {
-	ID             string `json:"id"`
-	Email          string `json:"email"`
-	Name           string `json:"name"`
-	PasswordHash   string `json:"-"`
-	Role           string `json:"role"`
-	WarehouseScope string `json:"warehouseScope"`
-	IsActive       bool   `json:"isActive"`
+	ID             string      `json:"id"`
+	Email          string      `json:"email"`
+	Name           string      `json:"name"`
+	PasswordHash   string      `json:"-"`
+	Role           string      `json:"role"`
+	WarehouseScope string      `json:"warehouseScope"`
+	IsActive       bool        `json:"isActive"`
+	Grants         []RoleGrant `json:"-"`
 }
 
 // UserRepository reads users from the iam schema in Postgres. There is no in-memory fallback:
@@ -87,19 +88,31 @@ func (r *UserRepository) Register(ctx context.Context, email, plain, fullName st
 	if err != nil {
 		return User{}, err
 	}
-	u := User{ID: id, Email: NormalizeEmail(email), Name: fullName, PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true}
-	_, err = r.pool.Exec(ctx, `
+	u := User{ID: id, Email: NormalizeEmail(email), Name: fullName, PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true,
+		Grants: []RoleGrant{{Role: "CUSTOMER"}}}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return User{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `
 		INSERT INTO users (id, email, full_name, password_hash, role, warehouse_scope, is_active)
 		VALUES ($1, $2, $3, $4, $5, $6, TRUE)
 	`, u.ID, u.Email, u.Name, u.PasswordHash, u.Role, u.WarehouseScope)
-	if err == nil {
-		return u, nil
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return User{}, ErrEmailTaken
+		}
+		return User{}, dependency.Wrap(err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-		return User{}, ErrEmailTaken
+	if _, err := tx.Exec(ctx, `INSERT INTO user_roles (user_id, role) VALUES ($1, 'CUSTOMER')`, u.ID); err != nil {
+		return User{}, dependency.Wrap(err)
 	}
-	return User{}, dependency.Wrap(err)
+	if err := tx.Commit(ctx); err != nil {
+		return User{}, dependency.Wrap(err)
+	}
+	return u, nil
 }
 
 func newUserID() (string, error) {
@@ -124,11 +137,31 @@ func (r *UserRepository) findOne(ctx context.Context, query string, arg string) 
 	var u User
 	err := r.pool.QueryRow(ctx, query, arg).
 		Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.WarehouseScope, &u.IsActive)
-	if err == nil {
-		return u, nil
-	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrUserNotFound
 	}
-	return User{}, dependency.Wrap(err)
+	if err != nil {
+		return User{}, dependency.Wrap(err)
+	}
+	if u.Grants, err = r.loadGrants(ctx, u.ID); err != nil {
+		return User{}, err
+	}
+	return u, nil
+}
+
+func (r *UserRepository) loadGrants(ctx context.Context, userID string) ([]RoleGrant, error) {
+	rows, err := r.pool.Query(ctx, `SELECT role, COALESCE(warehouse_id, '') FROM user_roles WHERE user_id = $1 ORDER BY role, warehouse_id`, userID)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+	var grants []RoleGrant
+	for rows.Next() {
+		var g RoleGrant
+		if err := rows.Scan(&g.Role, &g.WarehouseID); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		grants = append(grants, g)
+	}
+	return grants, dependency.Wrap(rows.Err())
 }

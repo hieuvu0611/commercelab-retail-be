@@ -21,13 +21,15 @@ import (
 )
 
 type UserProfile struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	Email          string `json:"email"`
-	Role           string `json:"role"`
-	WarehouseScope string `json:"warehouseScope"`
-	AccessToken    string `json:"accessToken,omitempty"`
-	RefreshToken   string `json:"refreshToken,omitempty"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	Email           string   `json:"email"`
+	Role            string   `json:"role"`
+	WarehouseScope  string   `json:"warehouseScope"`
+	AccessToken     string   `json:"accessToken,omitempty"`
+	RefreshToken    string   `json:"refreshToken,omitempty"`
+	Roles           []string `json:"roles"`
+	WarehouseScopes []string `json:"warehouseScopes"`
 }
 
 // UserStore is what the HTTP handlers need from the user repository.
@@ -40,7 +42,7 @@ type UserStore interface {
 // issueSession starts a new refresh-token family for u, signs an access token and returns the profile
 // the clients receive. It writes the error response itself and returns false on failure.
 func issueSession(w http.ResponseWriter, r *http.Request, tokens TokenStore, u repository.User) (UserProfile, bool) {
-	accessTok, err := auth.SignAccessToken(u.ID, u.Role, u.WarehouseScope)
+	accessTok, err := auth.SignAccessToken(u.Identity())
 	if err != nil {
 		response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the access token", nil)
 		return UserProfile{}, false
@@ -65,13 +67,15 @@ func issueSession(w http.ResponseWriter, r *http.Request, tokens TokenStore, u r
 		return UserProfile{}, false
 	}
 	return UserProfile{
-		ID:             u.ID,
-		Name:           u.Name,
-		Email:          u.Email,
-		Role:           u.Role,
-		WarehouseScope: u.WarehouseScope,
-		AccessToken:    accessTok,
-		RefreshToken:   refreshTok,
+		ID:              u.ID,
+		Name:            u.Name,
+		Email:           u.Email,
+		Role:            u.Role,
+		WarehouseScope:  u.WarehouseScope,
+		Roles:           u.Identity().Roles,
+		WarehouseScopes: u.Identity().WarehouseScopes,
+		AccessToken:     accessTok,
+		RefreshToken:    refreshTok,
 	}, true
 }
 
@@ -230,7 +234,7 @@ func NewServer(repo UserStore, tokens TokenStore, dbConnected bool) http.Handler
 			response.Error(w, r, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Refresh token is invalid", nil)
 			return
 		}
-		accessTok, err := auth.SignAccessToken(u.ID, u.Role, u.WarehouseScope)
+		accessTok, err := auth.SignAccessToken(u.Identity())
 		if err != nil {
 			response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the access token", nil)
 			return
@@ -294,11 +298,13 @@ func NewServer(repo UserStore, tokens TokenStore, dbConnected bool) http.Handler
 			return
 		}
 		response.JSON(w, http.StatusOK, "Lấy thông tin người dùng thành công", UserProfile{
-			ID:             u.ID,
-			Name:           u.Name,
-			Email:          u.Email,
-			Role:           u.Role,
-			WarehouseScope: u.WarehouseScope,
+			ID:              u.ID,
+			Name:            u.Name,
+			Email:           u.Email,
+			Role:            u.Role,
+			WarehouseScope:  u.WarehouseScope,
+			Roles:           u.Identity().Roles,
+			WarehouseScopes: u.Identity().WarehouseScopes,
 		}, nil)
 	})
 
