@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -43,7 +45,7 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 	}
 }
 
-func (r *InventoryRepository) GetStock(ctx context.Context, warehouseID, skuID string) (domain.StockItem, bool) {
+func (r *InventoryRepository) GetStock(ctx context.Context, warehouseID, skuID string) (domain.StockItem, bool, error) {
 	if warehouseID == "" {
 		warehouseID = "WH-HCM-01"
 	}
@@ -55,10 +57,15 @@ func (r *InventoryRepository) GetStock(ctx context.Context, warehouseID, skuID s
 			WHERE sku_id = $1 AND warehouse_id = $2
 		`, skuID, warehouseID).Scan(&st.SkuID, &st.WarehouseID, &st.OnHand, &st.Unsellable, &st.Reserved, &st.Committed, &st.InTransit, &st.Version)
 		if err == nil {
-			return st, true
+			return st, true, nil
 		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return domain.StockItem{}, false, nil
+		}
+		return domain.StockItem{}, false, dependency.Wrap(err)
 	}
-	return r.engine.GetStock(skuID)
+	st, ok := r.engine.GetStock(skuID)
+	return st, ok, nil
 }
 
 func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, warehouseID string, lines []domain.ReserveLine) (*ReservationRecord, error) {
@@ -86,6 +93,9 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 				_ = tx.Commit(ctx)
 				return &existing, nil
 			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return nil, dependency.Wrap(err)
+			}
 
 			for _, line := range lines {
 				if line.Quantity <= 0 {
@@ -98,7 +108,13 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 					WHERE sku_id = $1 AND warehouse_id = $2
 					FOR UPDATE
 				`, line.SkuID, warehouseID).Scan(&onHand, &unsellable, &reserved, &committed)
-				if err != nil || (onHand-unsellable-reserved-committed) < line.Quantity {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return nil, domain.ErrInsufficientStock
+				}
+				if err != nil {
+					return nil, dependency.Wrap(err)
+				}
+				if (onHand - unsellable - reserved - committed) < line.Quantity {
 					return nil, domain.ErrInsufficientStock
 				}
 			}
@@ -109,7 +125,7 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 					SET reserved = reserved + $1, version = version + 1, updated_at = NOW()
 					WHERE sku_id = $2 AND warehouse_id = $3
 				`, line.Quantity, line.SkuID, warehouseID); err != nil {
-					return nil, err
+					return nil, dependency.Wrap(err)
 				}
 			}
 
@@ -118,11 +134,11 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 				INSERT INTO reservations (reservation_id, order_id, warehouse_id, status, lines_json, expires_at)
 				VALUES ($1, $2, $3, 'ACTIVE_10M', $4::jsonb, $5)
 			`, resID, orderID, warehouseID, string(linesJSON), expiresAt); err != nil {
-				return nil, err
+				return nil, dependency.Wrap(err)
 			}
 
 			if err := tx.Commit(ctx); err != nil {
-				return nil, err
+				return nil, dependency.Wrap(err)
 			}
 			return &ReservationRecord{
 				ReservationID: resID,
@@ -133,6 +149,7 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 				ExpiresAt:     expiresAt,
 			}, nil
 		}
+		return nil, dependency.Wrap(err)
 	}
 
 	r.mu.Lock()
@@ -170,8 +187,11 @@ func (r *InventoryRepository) CommitOrderReservation(ctx context.Context, orderI
 				WHERE order_id = $1
 				FOR UPDATE
 			`, orderID).Scan(&rec.ReservationID, &rec.OrderID, &rec.WarehouseID, &rec.Status, &rawLines, &rec.ExpiresAt)
-			if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrReservationNotFound
+			}
+			if err != nil {
+				return nil, dependency.Wrap(err)
 			}
 			_ = json.Unmarshal(rawLines, &rec.Lines)
 			if rec.Status == "COMMITTED" {
@@ -187,20 +207,21 @@ func (r *InventoryRepository) CommitOrderReservation(ctx context.Context, orderI
 					SET reserved = reserved - $1, committed = committed + $1, version = version + 1, updated_at = NOW()
 					WHERE sku_id = $2 AND warehouse_id = $3
 				`, line.Quantity, line.SkuID, rec.WarehouseID); err != nil {
-					return nil, err
+					return nil, dependency.Wrap(err)
 				}
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE reservations SET status = 'COMMITTED', version = version + 1 WHERE order_id = $1
 			`, orderID); err != nil {
-				return nil, err
+				return nil, dependency.Wrap(err)
 			}
 			if err := tx.Commit(ctx); err != nil {
-				return nil, err
+				return nil, dependency.Wrap(err)
 			}
 			rec.Status = "COMMITTED"
 			return &rec, nil
 		}
+		return nil, dependency.Wrap(err)
 	}
 
 	r.mu.Lock()
@@ -234,8 +255,11 @@ func (r *InventoryRepository) ReleaseOrderReservation(ctx context.Context, order
 				WHERE order_id = $1
 				FOR UPDATE
 			`, orderID).Scan(&rec.ReservationID, &rec.OrderID, &rec.WarehouseID, &rec.Status, &rawLines, &rec.ExpiresAt)
-			if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrReservationNotFound
+			}
+			if err != nil {
+				return nil, dependency.Wrap(err)
 			}
 			_ = json.Unmarshal(rawLines, &rec.Lines)
 			if rec.Status == "RELEASED" {
@@ -251,20 +275,21 @@ func (r *InventoryRepository) ReleaseOrderReservation(ctx context.Context, order
 					SET reserved = reserved - $1, version = version + 1, updated_at = NOW()
 					WHERE sku_id = $2 AND warehouse_id = $3
 				`, line.Quantity, line.SkuID, rec.WarehouseID); err != nil {
-					return nil, err
+					return nil, dependency.Wrap(err)
 				}
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE reservations SET status = 'RELEASED', version = version + 1 WHERE order_id = $1
 			`, orderID); err != nil {
-				return nil, err
+				return nil, dependency.Wrap(err)
 			}
 			if err := tx.Commit(ctx); err != nil {
-				return nil, err
+				return nil, dependency.Wrap(err)
 			}
 			rec.Status = "RELEASED"
 			return &rec, nil
 		}
+		return nil, dependency.Wrap(err)
 	}
 
 	r.mu.Lock()
@@ -302,8 +327,11 @@ func (r *InventoryRepository) HandoverOrderShipment(ctx context.Context, orderID
 				WHERE order_id = $1
 				FOR UPDATE
 			`, orderID).Scan(&rec.ReservationID, &rec.OrderID, &rec.WarehouseID, &rec.Status, &rawLines, &rec.ExpiresAt)
-			if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return nil, ErrReservationNotFound
+			}
+			if err != nil {
+				return nil, dependency.Wrap(err)
 			}
 			_ = json.Unmarshal(rawLines, &rec.Lines)
 			if rec.Status != "COMMITTED" {
@@ -315,20 +343,21 @@ func (r *InventoryRepository) HandoverOrderShipment(ctx context.Context, orderID
 					SET on_hand = on_hand - $1, committed = committed - $1, version = version + 1, updated_at = NOW()
 					WHERE sku_id = $2 AND warehouse_id = $3
 				`, line.Quantity, line.SkuID, rec.WarehouseID); err != nil {
-					return nil, err
+					return nil, dependency.Wrap(err)
 				}
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE reservations SET status = 'HANDED_OVER', version = version + 1 WHERE order_id = $1
 			`, orderID); err != nil {
-				return nil, err
+				return nil, dependency.Wrap(err)
 			}
 			if err := tx.Commit(ctx); err != nil {
-				return nil, err
+				return nil, dependency.Wrap(err)
 			}
 			rec.Status = "HANDED_OVER"
 			return &rec, nil
 		}
+		return nil, dependency.Wrap(err)
 	}
 
 	r.mu.Lock()

@@ -8,6 +8,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
@@ -34,7 +35,11 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 		if warehouseID == "" {
 			warehouseID = "WH-HCM-01"
 		}
-		st, ok := repo.GetStock(r.Context(), warehouseID, skuID)
+		st, ok, err := repo.GetStock(r.Context(), warehouseID, skuID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if !ok {
 			response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", "Không tìm thấy tồn kho cho SKU "+skuID, nil)
 			return
@@ -64,6 +69,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 			return
 		}
 		rec, err := repo.ReserveForOrder(r.Context(), req.OrderID, req.WarehouseID, req.Lines)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusConflict, "INSUFFICIENT_STOCK", err.Error(), nil)
 			return
@@ -75,6 +84,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 	mux.HandleFunc("POST /api/v1/inventory/reservations/{orderId}/commit", func(w http.ResponseWriter, r *http.Request) {
 		orderID := r.PathValue("orderId")
 		rec, err := repo.CommitOrderReservation(r.Context(), orderID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusConflict, "COMMIT_RESERVATION_FAILED", err.Error(), nil)
 			return
@@ -86,6 +99,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 	mux.HandleFunc("POST /api/v1/inventory/reservations/{orderId}/release", func(w http.ResponseWriter, r *http.Request) {
 		orderID := r.PathValue("orderId")
 		rec, err := repo.ReleaseOrderReservation(r.Context(), orderID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusConflict, "RELEASE_RESERVATION_FAILED", err.Error(), nil)
 			return
@@ -103,6 +120,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 			return
 		}
 		rec, err := repo.HandoverOrderShipment(r.Context(), req.OrderID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusConflict, "HANDOVER_FAILED", err.Error(), nil)
 			return
@@ -124,9 +145,10 @@ func main() {
 	}
 
 	pgPool, err := db.ConnectPostgres(context.Background(), pgURL)
-	if err != nil {
-		log.Printf("[inventory-warehouse-service] postgres unavailable (%v), using in-memory LedgerEngine fallback", err)
-	} else {
+	if err := dependency.CheckStartup("inventory-warehouse-service", "postgres", err); err != nil {
+		log.Fatal(err)
+	}
+	if pgPool != nil {
 		defer pgPool.Close()
 	}
 
