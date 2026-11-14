@@ -102,9 +102,9 @@ func (rt *Router) resolveTarget(path string) string {
 		return rt.targets.Order
 	case strings.HasPrefix(path, "/api/v1/payments"):
 		return rt.targets.Payment
-	case strings.HasPrefix(path, "/api/v1/fulfillment"):
+	case strings.HasPrefix(path, "/api/v1/shipments"):
 		return rt.targets.Fulfillment
-	case strings.HasPrefix(path, "/api/v1/ledger"):
+	case strings.HasPrefix(path, "/api/v1/reconciliations"):
 		return rt.targets.Ledger
 	case strings.HasPrefix(path, "/api/v1/backoffice"):
 		return rt.targets.Backoffice
