@@ -10,7 +10,7 @@ COPY contracts ./contracts
 COPY services/${SERVICE_NAME} ./services/${SERVICE_NAME}
 
 # Strip DWARF/symbol table (-s -w) để giảm kích thước binary (~6MB) và giảm RSS RAM khởi điểm (~8-12MB)
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/service ./services/${SERVICE_NAME}/cmd/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/service ./services/${SERVICE_NAME}/cmd
 
 FROM alpine:3.20
 RUN apk --no-cache add ca-certificates tzdata
