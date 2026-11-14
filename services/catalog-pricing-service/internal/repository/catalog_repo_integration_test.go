@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -133,8 +134,14 @@ func TestPostgresPricingPortsOpenAndCloseSKUs(t *testing.T) {
 			t.Fatalf("insert price: %v", err)
 		}
 	}
+	for _, sku := range []string{skuA, skuB} {
+		if _, err := pool.Exec(ctx, `INSERT INTO sku_price_history (sku_id, unit_price_vnd, effective_from, changed_by) VALUES ($1, 1000, NOW() - INTERVAL '1 hour', 'it')`, sku); err != nil {
+			t.Fatalf("insert history: %v", err)
+		}
+	}
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM sku_prices WHERE product_id = $1`, productID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM sku_price_history WHERE sku_id LIKE $1`, productID+"%")
 	})
 
 	priced, err := repo.SKUsWithActivePrice(ctx, []string{skuA, skuB, "IT-MISSING"})
@@ -147,13 +154,97 @@ func TestPostgresPricingPortsOpenAndCloseSKUs(t *testing.T) {
 	if _, err := repo.GetSkuPrice(ctx, skuA); err != nil {
 		t.Fatalf("A must quote: %v", err)
 	}
-	if _, err := repo.GetSkuPrice(ctx, skuB); !errors.Is(err, ErrSkuNotFound) {
+	if _, err := repo.GetSkuPrice(ctx, skuB); !errors.Is(err, ErrSkuNotOrderable) {
 		t.Fatalf("B must be closed, err = %v", err)
 	}
 	if err := repo.SetOrderable(ctx, productID, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.GetSkuPrice(ctx, skuA); !errors.Is(err, ErrSkuNotFound) {
+	if _, err := repo.GetSkuPrice(ctx, skuA); !errors.Is(err, ErrSkuNotOrderable) {
 		t.Fatalf("A must be closed, err = %v", err)
+	}
+}
+
+func TestPostgresPricePeriods(t *testing.T) {
+	pgDSN := integrationEnv(t, "DATABASE_URL_PRICING")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := db.ConnectPostgres(ctx, pgDSN)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	repo := NewCatalogPricingRepository(pool, nil)
+
+	// The migration turned the seeded SC01 prices into open periods.
+	seeded, err := repo.GetSkuPrice(ctx, "SKU-BALO-BLACK-20L")
+	if err != nil || seeded.UnitPriceVND != 300000 {
+		t.Fatalf("seeded price = %+v, %v", seeded, err)
+	}
+
+	productID := fmt.Sprintf("IT-PRICE-%d", time.Now().UnixNano())
+	sku := productID + "-A"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM sku_prices WHERE sku_id = $1`, sku)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM sku_price_history WHERE sku_id = $1`, sku)
+	})
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	set := func(price int64, from time.Time) {
+		t.Helper()
+		err := repo.SetSkuPrice(ctx, domain.SetPriceInput{
+			SkuID: sku, ProductID: productID, SkuName: "IT SKU", UnitPriceVND: price, EffectiveFrom: from, ChangedBy: "mkt", Orderable: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A SKU with only a future price has no price in effect.
+	set(500000, now.Add(time.Hour))
+	if _, err := repo.GetSkuPrice(ctx, sku); !errors.Is(err, ErrSkuNotOrderable) {
+		t.Fatalf("future-only price must not quote, err = %v", err)
+	}
+	if priced, _ := repo.SKUsWithActivePrice(ctx, []string{sku}); priced[sku] {
+		t.Fatal("future-only price must not count as active")
+	}
+
+	// An immediate price supersedes the scheduled one that starts later.
+	set(400000, now)
+	got, err := repo.GetSkuPrice(ctx, sku)
+	if err != nil || got.UnitPriceVND != 400000 || got.SkuName != "IT SKU" {
+		t.Fatalf("immediate price = %+v, %v", got, err)
+	}
+	history, _ := repo.SkuPriceHistory(ctx, sku)
+	if len(history) != 1 {
+		t.Fatalf("superseded scheduled price must be gone: %+v", history)
+	}
+
+	// A scheduled change closes the open period at its start and keeps both in history.
+	later := now.Add(48 * time.Hour)
+	set(450000, later)
+	history, _ = repo.SkuPriceHistory(ctx, sku)
+	if len(history) != 2 || history[0].UnitPriceVND != 450000 || history[0].EffectiveTo != nil ||
+		history[1].EffectiveTo == nil || !history[1].EffectiveTo.Equal(later) || history[1].ChangedBy != "mkt" {
+		t.Fatalf("history = %+v", history)
+	}
+	if got, _ = repo.GetSkuPrice(ctx, sku); got.UnitPriceVND != 400000 {
+		t.Fatalf("price before the change = %d", got.UnitPriceVND)
+	}
+
+	// The mirror columns on sku_prices follow the period that has started.
+	var mirror int64
+	if err := pool.QueryRow(ctx, `SELECT unit_price_vnd FROM sku_prices WHERE sku_id = $1`, sku).Scan(&mirror); err != nil || mirror != 400000 {
+		t.Fatalf("mirror = %d, %v", mirror, err)
+	}
+
+	// Closing the product makes the SKU not orderable even though it has a price.
+	if err := repo.SetOrderable(ctx, productID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetSkuPrice(ctx, sku); !errors.Is(err, ErrSkuNotOrderable) {
+		t.Fatalf("closed SKU, err = %v", err)
+	}
+	if _, err := repo.GetSkuPrice(ctx, "IT-UNKNOWN"); !errors.Is(err, ErrSkuNotFound) {
+		t.Fatalf("unknown SKU, err = %v", err)
 	}
 }

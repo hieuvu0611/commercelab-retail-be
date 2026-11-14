@@ -3,6 +3,9 @@ package repository
 import (
 	"context"
 	"errors"
+	"time"
+
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"reflect"
 	"testing"
 
@@ -61,7 +64,7 @@ func TestMemoryPricingPortsOpenAndCloseSKUs(t *testing.T) {
 	if err := repo.SetOrderable(ctx, "PROD-BALO-CITY", nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.GetSkuPrice(ctx, "SKU-BALO-BLACK-20L"); !errors.Is(err, ErrSkuNotFound) {
+	if _, err := repo.GetSkuPrice(ctx, "SKU-BALO-BLACK-20L"); !errors.Is(err, ErrSkuNotOrderable) {
 		t.Fatalf("closed SKU must not quote, err = %v", err)
 	}
 	if err := repo.SetOrderable(ctx, "PROD-BALO-CITY", []string{"SKU-BALO-BLACK-20L"}); err != nil {
@@ -73,5 +76,51 @@ func TestMemoryPricingPortsOpenAndCloseSKUs(t *testing.T) {
 	// Other products are untouched.
 	if _, err := repo.GetSkuPrice(ctx, "SKU-BOTTLE-BLUE-500ML"); err != nil {
 		t.Fatalf("other product affected: %v", err)
+	}
+}
+
+func TestMemoryPricePeriods(t *testing.T) {
+	repo := NewCatalogPricingRepository(nil, nil)
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	repo.now = func() time.Time { return now }
+	ctx := context.Background()
+	set := func(price int64, from time.Time) {
+		t.Helper()
+		err := repo.SetSkuPrice(ctx, domain.SetPriceInput{
+			SkuID: "SKU-BALO-BLACK-20L", ProductID: "PROD-BALO-CITY", SkuName: "Balo", UnitPriceVND: price, EffectiveFrom: from, ChangedBy: "m",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	priceAt := func(at time.Time) int64 {
+		t.Helper()
+		repo.now = func() time.Time { return at }
+		sp, err := repo.GetSkuPrice(ctx, "SKU-BALO-BLACK-20L")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sp.UnitPriceVND
+	}
+
+	set(320000, now)
+	set(350000, now.Add(48*time.Hour))
+	if priceAt(now) != 320000 || priceAt(now.Add(47*time.Hour)) != 320000 || priceAt(now.Add(48*time.Hour)) != 350000 {
+		t.Fatal("periods are not applied by time")
+	}
+	history, _ := repo.SkuPriceHistory(ctx, "SKU-BALO-BLACK-20L")
+	if len(history) != 3 || history[0].UnitPriceVND != 350000 || history[1].EffectiveTo == nil || !history[1].EffectiveTo.Equal(now.Add(48*time.Hour)) {
+		t.Fatalf("history = %+v", history)
+	}
+
+	// A new price for an earlier moment supersedes the scheduled one.
+	repo.now = func() time.Time { return now }
+	set(330000, now.Add(24*time.Hour))
+	if priceAt(now.Add(72*time.Hour)) != 330000 {
+		t.Fatal("scheduled price must be superseded")
+	}
+	history, _ = repo.SkuPriceHistory(ctx, "SKU-BALO-BLACK-20L")
+	if len(history) != 3 {
+		t.Fatalf("history after superseding = %+v", history)
 	}
 }

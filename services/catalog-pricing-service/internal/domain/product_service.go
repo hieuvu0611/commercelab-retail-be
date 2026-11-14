@@ -199,6 +199,19 @@ func (s *ProductService) GetProduct(ctx context.Context, id string) (ProductView
 	return s.view(ctx, id)
 }
 
+// SKUWithProduct returns a SKU and the live product it belongs to (ErrSKUNotFound when the SKU is unknown).
+func (s *ProductService) SKUWithProduct(ctx context.Context, skuID string) (SKU, Product, error) {
+	sku, err := s.store.GetSKU(ctx, skuID)
+	if err != nil {
+		return SKU{}, Product{}, err
+	}
+	product, err := s.store.GetProduct(ctx, sku.ProductID)
+	if err != nil {
+		return SKU{}, Product{}, err
+	}
+	return sku, product, nil
+}
+
 // ListProducts returns one page of live products and the total number of matches.
 func (s *ProductService) ListProducts(ctx context.Context, f ProductFilter) ([]Product, int64, error) {
 	if f.Page < 1 {
