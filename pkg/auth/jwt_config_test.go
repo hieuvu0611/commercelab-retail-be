@@ -9,7 +9,7 @@ import (
 
 func TestTokensFailClosedWithoutSecrets(t *testing.T) {
 	Reset()
-	if _, err := SignAccessToken("u", "CUSTOMER", "NONE"); !errors.Is(err, ErrNotConfigured) {
+	if _, err := SignAccessToken(Identity{UserID: "u", Role: "CUSTOMER", WarehouseScope: "NONE"}); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("SignAccessToken err = %v, want ErrNotConfigured", err)
 	}
 	if _, err := SignRefreshToken("u", "CUSTOMER", "NONE", "tok-1"); !errors.Is(err, ErrNotConfigured) {
@@ -35,7 +35,7 @@ func TestLoadSecretsRequiresStrongSecretsOutsideDev(t *testing.T) {
 	if l.Err() == nil {
 		t.Fatal("weak or missing secrets must be reported")
 	}
-	if _, err := SignAccessToken("u", "CUSTOMER", "NONE"); !errors.Is(err, ErrNotConfigured) {
+	if _, err := SignAccessToken(Identity{UserID: "u", Role: "CUSTOMER", WarehouseScope: "NONE"}); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("invalid configuration must not configure the package, err = %v", err)
 	}
 }
@@ -52,7 +52,7 @@ func TestLoadSecretsConfiguresTokens(t *testing.T) {
 	if err := l.Err(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	tok, err := SignAccessToken("user-lan", "CUSTOMER", "NONE")
+	tok, err := SignAccessToken(Identity{UserID: "user-lan", Role: "CUSTOMER", WarehouseScope: "NONE", Roles: []string{"CUSTOMER"}})
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
@@ -67,11 +67,36 @@ func TestTokenSignedWithAnotherSecretIsRejected(t *testing.T) {
 	if err := Configure(Secrets{Access: "secret-one-secret-one-secret-one-12", Refresh: "refresh-one-refresh-one-refresh-12"}); err != nil {
 		t.Fatal(err)
 	}
-	tok, _ := SignAccessToken("u", "CUSTOMER", "NONE")
+	tok, _ := SignAccessToken(Identity{UserID: "u", Role: "CUSTOMER", WarehouseScope: "NONE"})
 	if err := Configure(Secrets{Access: "secret-two-secret-two-secret-two-12", Refresh: "refresh-one-refresh-one-refresh-12"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ParseAccessToken(tok); err == nil {
 		t.Fatal("a token signed with a different secret must be rejected")
+	}
+}
+
+func TestAccessTokenCarriesRolesAndWarehouseScopes(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	if err := Configure(Secrets{Access: "access-secret-0123456789abcdef-test", Refresh: "refresh-secret-0123456789abcdef-test"}); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := SignAccessToken(Identity{
+		UserID: "staff-1", Role: "WAREHOUSE_STAFF", WarehouseScope: "WH-HCM-01",
+		Roles: []string{"WAREHOUSE_STAFF", "SUPPORT_AGENT"}, WarehouseScopes: []string{"WH-HCM-01", "WH-HN-01"},
+	})
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	claims, err := ParseAccessToken(tok)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(claims.Roles) != 2 || !claims.HasRole("SUPPORT_AGENT") || claims.HasRole("ACCESS_ADMIN") {
+		t.Fatalf("roles = %v", claims.Roles)
+	}
+	if len(claims.WarehouseScopes) != 2 || claims.WarehouseScopes[1] != "WH-HN-01" {
+		t.Fatalf("scopes = %v", claims.WarehouseScopes)
 	}
 }

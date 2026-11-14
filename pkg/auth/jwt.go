@@ -65,15 +65,38 @@ func currentSecrets() (Secrets, error) {
 	return *s, nil
 }
 
+// Claims are the token claims. Role and WarehouseScope are the legacy single-role fields kept during the
+// transition to Roles and WarehouseScopes (P1-T05); new code must use the plural fields.
 type Claims struct {
-	UserID         string `json:"userId"`
-	Role           string `json:"role"`
-	WarehouseScope string `json:"warehouseScope"`
-	TokenType      string `json:"tokenType"`
+	UserID          string   `json:"userId"`
+	Role            string   `json:"role"`
+	WarehouseScope  string   `json:"warehouseScope"`
+	Roles           []string `json:"roles,omitempty"`
+	WarehouseScopes []string `json:"warehouseScopes,omitempty"`
+	TokenType       string   `json:"tokenType"`
 	jwt.RegisteredClaims
 }
 
-func SignAccessToken(userID, role, warehouseScope string) (string, error) {
+// Identity is what an access token states about its subject.
+type Identity struct {
+	UserID          string
+	Role            string // legacy single role
+	WarehouseScope  string // legacy single scope
+	Roles           []string
+	WarehouseScopes []string // warehouse ids; "ALL" means every warehouse
+}
+
+// HasRole reports whether the claims carry role.
+func (c *Claims) HasRole(role string) bool {
+	for _, r := range c.Roles {
+		if r == role {
+			return true
+		}
+	}
+	return false
+}
+
+func SignAccessToken(id Identity) (string, error) {
 	secrets, err := currentSecrets()
 	if err != nil {
 		return "", err
@@ -81,12 +104,14 @@ func SignAccessToken(userID, role, warehouseScope string) (string, error) {
 	secret := secrets.Access
 	now := time.Now().UTC()
 	claims := Claims{
-		UserID:         userID,
-		Role:           role,
-		WarehouseScope: warehouseScope,
-		TokenType:      "ACCESS",
+		UserID:          id.UserID,
+		Role:            id.Role,
+		WarehouseScope:  id.WarehouseScope,
+		Roles:           id.Roles,
+		WarehouseScopes: id.WarehouseScopes,
+		TokenType:       "ACCESS",
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID,
+			Subject:   id.UserID,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(15 * time.Minute)),
 		},

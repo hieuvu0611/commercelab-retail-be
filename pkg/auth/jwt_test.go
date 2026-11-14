@@ -8,7 +8,7 @@ func TestSignAndParseTokens(t *testing.T) {
 	if err := Configure(Secrets{Access: "access-secret-0123456789abcdef-test", Refresh: "refresh-secret-0123456789abcdef-test"}); err != nil {
 		t.Fatal(err)
 	}
-	accessTok, err := SignAccessToken("user-lan", "CUSTOMER", "NONE")
+	accessTok, err := SignAccessToken(Identity{UserID: "user-lan", Role: "CUSTOMER", WarehouseScope: "NONE", Roles: []string{"CUSTOMER"}})
 	if err != nil {
 		t.Fatalf("unexpected error signing access token: %v", err)
 	}
