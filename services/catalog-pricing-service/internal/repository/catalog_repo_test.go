@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -45,5 +47,31 @@ func TestProductDocFromBSONDropsSpecsWithCollidingKeys(t *testing.T) {
 	doc := productDocFromBSON(bson.M{"_id": "p", "specs": bson.M{"capacity_liters": 1, "capacityLiters": 2}})
 	if len(doc.Specs) != 0 {
 		t.Fatalf("specs = %#v", doc.Specs)
+	}
+}
+
+func TestMemoryPricingPortsOpenAndCloseSKUs(t *testing.T) {
+	repo := NewCatalogPricingRepository(nil, nil)
+	ctx := context.Background()
+
+	priced, err := repo.SKUsWithActivePrice(ctx, []string{"SKU-BALO-BLACK-20L", "SKU-UNKNOWN"})
+	if err != nil || !priced["SKU-BALO-BLACK-20L"] || priced["SKU-UNKNOWN"] {
+		t.Fatalf("priced = %v, %v", priced, err)
+	}
+	if err := repo.SetOrderable(ctx, "PROD-BALO-CITY", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetSkuPrice(ctx, "SKU-BALO-BLACK-20L"); !errors.Is(err, ErrSkuNotFound) {
+		t.Fatalf("closed SKU must not quote, err = %v", err)
+	}
+	if err := repo.SetOrderable(ctx, "PROD-BALO-CITY", []string{"SKU-BALO-BLACK-20L"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetSkuPrice(ctx, "SKU-BALO-BLACK-20L"); err != nil {
+		t.Fatalf("opened SKU must quote: %v", err)
+	}
+	// Other products are untouched.
+	if _, err := repo.GetSkuPrice(ctx, "SKU-BOTTLE-BLUE-500ML"); err != nil {
+		t.Fatalf("other product affected: %v", err)
 	}
 }

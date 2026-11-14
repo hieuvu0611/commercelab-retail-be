@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -232,5 +233,91 @@ func TestAdminProductList(t *testing.T) {
 	}
 	if rec = e.do(http.MethodGet, "/api/v1/admin/products?page=abc", staff, ""); rec.Code != 400 {
 		t.Fatalf("bad page: %d", rec.Code)
+	}
+}
+
+// fakePricing prices and gates SKUs in memory.
+type fakePricing struct{ priced map[string]bool }
+
+func (f *fakePricing) SKUsWithActivePrice(_ context.Context, ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, id := range ids {
+		if f.priced[id] {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+func (f *fakePricing) SetOrderable(context.Context, string, []string) error { return nil }
+
+func newWorkflowServer(t *testing.T, priced ...string) *productEnv {
+	t.Helper()
+	authtest.Configure(t)
+	catStore := domain.NewMemoryCategoryStore()
+	cats := domain.NewCategoryService(catStore)
+	pricing := &fakePricing{priced: map[string]bool{}}
+	for _, id := range priced {
+		pricing.priced[id] = true
+	}
+	prods := domain.NewProductService(domain.NewMemoryProductStore(), cats).WithPricing(pricing, pricing)
+	srv := NewServerWithDeps(repository.NewCatalogPricingRepository(nil, nil), false, false, Deps{Categories: cats, Products: prods})
+	env := &productEnv{categoryEnv: &categoryEnv{srv: srv, store: catStore}}
+	env.category = env.create(t, "", "City", "city")
+	return env
+}
+
+func TestWorkflowEndpointsRequireProductStaff(t *testing.T) {
+	e := newProductEnv(t)
+	p := e.createProduct(t, "city-backpack")
+	for _, action := range []string{"submit-review", "publish", "reject", "unpublish"} {
+		path := "/api/v1/admin/products/" + p.ID + "/" + action
+		if rec := e.do(http.MethodPost, path, "", `{"version":1}`); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s without token: %d", action, rec.Code)
+		}
+		if rec := e.do(http.MethodPost, path, token(t, "MARKETING"), `{"version":1}`); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s as MARKETING: %d", action, rec.Code)
+		}
+	}
+}
+
+func TestPublishFlowOverHTTP(t *testing.T) {
+	e := newWorkflowServer(t, "SKU-CITY-BLACK")
+	staff := token(t, "PRODUCT_STAFF")
+	p := e.createProduct(t, "city-backpack")
+	base := "/api/v1/admin/products/" + p.ID
+
+	// Submit, then publish while the product is still incomplete: every problem is listed with 422.
+	rec := e.doWith(http.MethodPost, base+"/submit-review", staff, "", `"1"`)
+	in := decode[productResp](t, rec).Data
+	if rec.Code != 200 || in.Status != domain.ProductInReview || in.Version != 2 {
+		t.Fatalf("submit: %d %s", rec.Code, rec.Body)
+	}
+	rec = e.doWith(http.MethodPost, base+"/publish", staff, "", "2")
+	problems := decode[errorBody](t, rec)
+	if rec.Code != http.StatusUnprocessableEntity || problems.Code != "PUBLISH_VALIDATION_FAILED" ||
+		len(problems.Errors["description"]) == 0 || len(problems.Errors["images"]) == 0 || len(problems.Errors["skus"]) == 0 {
+		t.Fatalf("publish validation: %d %s", rec.Code, rec.Body)
+	}
+
+	// Reject with a reason, fix the product, resubmit.
+	if rec = e.do(http.MethodPost, base+"/reject", staff, `{"reason":"","version":2}`); rec.Code != 400 {
+		t.Fatalf("blank reason: %d %s", rec.Code, rec.Body)
+	}
+	rec = e.do(http.MethodPost, base+"/reject", staff, `{"reason":"Needs a description","version":2}`)
+	rej := decode[productResp](t, rec).Data
+	if rec.Code != 200 || rej.Status != domain.ProductDraft || rej.RejectionReason != "Needs a description" || rej.Version != 3 {
+		t.Fatalf("reject: %d %s", rec.Code, rec.Body)
+	}
+	if rec = e.do(http.MethodPost, base+"/publish", staff, `{"version":3}`); rec.Code != 409 || decode[errorBody](t, rec).Code != "INVALID_STATUS_TRANSITION" {
+		t.Fatalf("publish a draft: %d %s", rec.Code, rec.Body)
+	}
+	if rec = e.do(http.MethodPost, base+"/submit-review", staff, ""); rec.Code != http.StatusPreconditionRequired {
+		t.Fatalf("missing version: %d", rec.Code)
+	}
+	if rec = e.do(http.MethodPost, base+"/submit-review", staff, `{"version":1}`); rec.Code != 409 || decode[errorBody](t, rec).Code != "VERSION_CONFLICT" {
+		t.Fatalf("stale version: %d %s", rec.Code, rec.Body)
+	}
+	if rec = e.do(http.MethodPost, "/api/v1/admin/products/nope/unpublish", staff, `{"version":1}`); rec.Code != 404 {
+		t.Fatalf("unknown product: %d", rec.Code)
 	}
 }

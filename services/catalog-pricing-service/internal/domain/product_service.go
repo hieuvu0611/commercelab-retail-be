@@ -47,6 +47,8 @@ type ProductStore interface {
 	// ErrProductNotFound, ErrVersionConflict or ErrProductSlugTaken.
 	SaveProduct(ctx context.Context, p Product, expectedVersion int64) error
 	ListProducts(ctx context.Context, f ProductFilter) ([]Product, int64, error)
+	// DeleteDraft removes the pending revision; a missing draft is not an error.
+	DeleteDraft(ctx context.Context, productID string) error
 	// GetDraft reports found=false when the product has no pending revision.
 	GetDraft(ctx context.Context, productID string) (ProductRevision, bool, error)
 	// SaveDraft stores the draft: expectedVersion 0 inserts a new one (ErrVersionConflict if it exists),
@@ -69,6 +71,8 @@ type CategoryLookup interface {
 type ProductService struct {
 	store      ProductStore
 	categories CategoryLookup
+	prices     PriceChecker
+	gate       OrderabilityGate
 	now        func() time.Time
 	newID      func() string
 }
@@ -172,6 +176,10 @@ func (s *ProductService) view(ctx context.Context, id string) (ProductView, erro
 	draft, hasDraft, err := s.store.GetDraft(ctx, id)
 	if err != nil {
 		return ProductView{}, err
+	}
+	// A draft that is not newer than the live product is left over from an interrupted publish; ignore it.
+	if hasDraft && draft.Product.Version <= p.Version {
+		hasDraft = false
 	}
 	if hasDraft {
 		p = draft.Product

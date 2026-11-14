@@ -4,6 +4,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -111,5 +112,48 @@ func TestMongoRejectsWrongCredentials(t *testing.T) {
 	defer cancel()
 	if _, _, err := db.ConnectMongo(ctx, parsed.String(), dbName); err == nil {
 		t.Fatal("connecting with a wrong password must fail; authentication is not being used")
+	}
+}
+
+func TestPostgresPricingPortsOpenAndCloseSKUs(t *testing.T) {
+	pgDSN := integrationEnv(t, "DATABASE_URL_PRICING")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := db.ConnectPostgres(ctx, pgDSN)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	repo := NewCatalogPricingRepository(pool, nil)
+
+	productID := fmt.Sprintf("IT-PORT-%d", time.Now().UnixNano())
+	skuA, skuB := productID+"-A", productID+"-B"
+	for _, sku := range []string{skuA, skuB} {
+		if _, err := pool.Exec(ctx, `INSERT INTO sku_prices (sku_id, product_id, sku_name, unit_price_vnd) VALUES ($1, $2, $1, 1000)`, sku, productID); err != nil {
+			t.Fatalf("insert price: %v", err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM sku_prices WHERE product_id = $1`, productID)
+	})
+
+	priced, err := repo.SKUsWithActivePrice(ctx, []string{skuA, skuB, "IT-MISSING"})
+	if err != nil || !priced[skuA] || !priced[skuB] || priced["IT-MISSING"] {
+		t.Fatalf("priced = %v, %v", priced, err)
+	}
+	if err := repo.SetOrderable(ctx, productID, []string{skuA}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetSkuPrice(ctx, skuA); err != nil {
+		t.Fatalf("A must quote: %v", err)
+	}
+	if _, err := repo.GetSkuPrice(ctx, skuB); !errors.Is(err, ErrSkuNotFound) {
+		t.Fatalf("B must be closed, err = %v", err)
+	}
+	if err := repo.SetOrderable(ctx, productID, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.GetSkuPrice(ctx, skuA); !errors.Is(err, ErrSkuNotFound) {
+		t.Fatalf("A must be closed, err = %v", err)
 	}
 }

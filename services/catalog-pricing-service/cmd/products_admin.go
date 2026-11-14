@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"log"
 	"math"
@@ -32,6 +33,10 @@ func registerProductAdminRoutes(mux *http.ServeMux, svc *domain.ProductService) 
 	mux.Handle("POST /api/v1/admin/products/{id}/skus", staff(api.createSKU))
 	mux.Handle("PATCH /api/v1/admin/products/{id}/skus/{skuId}", staff(api.updateSKU))
 	mux.Handle("DELETE /api/v1/admin/products/{id}/skus/{skuId}", staff(api.deleteSKU))
+	mux.Handle("POST /api/v1/admin/products/{id}/submit-review", staff(api.transition("Product submitted for review", api.svc.SubmitReview)))
+	mux.Handle("POST /api/v1/admin/products/{id}/publish", staff(api.transition("Product published", api.svc.Publish)))
+	mux.Handle("POST /api/v1/admin/products/{id}/unpublish", staff(api.transition("Product unpublished", api.svc.Unpublish)))
+	mux.Handle("POST /api/v1/admin/products/{id}/reject", staff(api.reject))
 }
 
 func actorOf(r *http.Request) string {
@@ -219,8 +224,51 @@ func (a *productAdminAPI) deleteSKU(w http.ResponseWriter, r *http.Request) {
 	writeView(w, http.StatusOK, "SKU deleted", v)
 }
 
+// transition serves a status change that needs nothing but the product version (header or optional body).
+func (a *productAdminAPI) transition(message string, do func(ctx context.Context, actor, id string, expectedVersion int64) (domain.ProductView, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Version *int64 `json:"version"`
+		}
+		if r.ContentLength != 0 && !request.DecodeJSON(w, r, &body) {
+			return
+		}
+		version, ok := expectedVersion(w, r, body.Version)
+		if !ok {
+			return
+		}
+		v, err := do(r.Context(), actorOf(r), r.PathValue("id"), version)
+		if err != nil {
+			writeProductError(w, r, err)
+			return
+		}
+		writeView(w, http.StatusOK, message, v)
+	}
+}
+
+func (a *productAdminAPI) reject(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Version *int64 `json:"version"`
+		Reason  string `json:"reason"`
+	}
+	if !request.DecodeJSON(w, r, &body) {
+		return
+	}
+	version, ok := expectedVersion(w, r, body.Version)
+	if !ok {
+		return
+	}
+	v, err := a.svc.Reject(r.Context(), actorOf(r), r.PathValue("id"), version, body.Reason)
+	if err != nil {
+		writeProductError(w, r, err)
+		return
+	}
+	writeView(w, http.StatusOK, "Product rejected", v)
+}
+
 func writeProductError(w http.ResponseWriter, r *http.Request, err error) {
 	var validation *domain.ValidationError
+	var publish *domain.PublishError
 	switch {
 	case errors.As(err, &validation):
 		response.Error(w, r, http.StatusBadRequest, "VALIDATION_FAILED", "The request has invalid fields", validation.Fields)
@@ -239,6 +287,10 @@ func writeProductError(w http.ResponseWriter, r *http.Request, err error) {
 		response.Error(w, r, http.StatusConflict, "VERSION_CONFLICT", "The product changed since you loaded it; reload and retry", nil)
 	case errors.Is(err, domain.ErrProductNotEditable):
 		response.Error(w, r, http.StatusConflict, "PRODUCT_NOT_EDITABLE", err.Error(), nil)
+	case errors.As(err, &publish):
+		response.Error(w, r, http.StatusUnprocessableEntity, "PUBLISH_VALIDATION_FAILED", "The product is not ready to be published", publish.Fields)
+	case errors.Is(err, domain.ErrInvalidTransition):
+		response.Error(w, r, http.StatusConflict, "INVALID_STATUS_TRANSITION", err.Error(), nil)
 	case errors.Is(err, domain.ErrAxesLocked):
 		response.Error(w, r, http.StatusConflict, "VARIANT_AXES_LOCKED", err.Error(), nil)
 	case dependency.IsUnavailable(err):

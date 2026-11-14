@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"slices"
 	"sync"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
@@ -308,4 +309,58 @@ func (r *CatalogPricingRepository) GetQuoteByID(ctx context.Context, quoteID str
 	}
 	cp := *q
 	return &cp, nil
+}
+
+// SKUsWithActivePrice returns the given SKU ids that have a price row.
+func (r *CatalogPricingRepository) SKUsWithActivePrice(ctx context.Context, skuIDs []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if len(skuIDs) == 0 {
+		return out, nil
+	}
+	if r.pgPool != nil {
+		rows, err := r.pgPool.Query(ctx, `SELECT sku_id FROM sku_prices WHERE sku_id = ANY($1)`, skuIDs)
+		if err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return nil, dependency.Wrap(err)
+			}
+			out[id] = true
+		}
+		return out, dependency.Wrap(rows.Err())
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, id := range skuIDs {
+		if _, ok := r.skuPrices[id]; ok {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+// SetOrderable makes exactly the listed SKUs of the product orderable (quotes only accept published SKU
+// rows); every other SKU of the product is closed. An empty list closes the whole product.
+func (r *CatalogPricingRepository) SetOrderable(ctx context.Context, productID string, orderableSKUIDs []string) error {
+	if orderableSKUIDs == nil {
+		orderableSKUIDs = []string{}
+	}
+	if r.pgPool != nil {
+		_, err := r.pgPool.Exec(ctx, `
+			UPDATE sku_prices SET is_published = (sku_id = ANY($2)), updated_at = NOW()
+			WHERE product_id = $1`, productID, orderableSKUIDs)
+		return dependency.Wrap(err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, sp := range r.skuPrices {
+		if sp.ProductID == productID {
+			sp.IsPublished = slices.Contains(orderableSKUIDs, id)
+			r.skuPrices[id] = sp
+		}
+	}
+	return nil
 }
