@@ -27,6 +27,7 @@ type User struct {
 	PasswordHash   string      `json:"-"`
 	Role           string      `json:"role"`
 	WarehouseScope string      `json:"warehouseScope"`
+	Phone          string      `json:"phone"`
 	IsActive       bool        `json:"isActive"`
 	Grants         []RoleGrant `json:"-"`
 }
@@ -123,7 +124,7 @@ func newUserID() (string, error) {
 	return "usr-" + hex.EncodeToString(buf), nil
 }
 
-const selectUser = `SELECT id, email, full_name, password_hash, role, warehouse_scope, is_active FROM users`
+const selectUser = `SELECT id, email, full_name, password_hash, role, warehouse_scope, is_active, COALESCE(phone, '') FROM users`
 
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (User, error) {
 	return r.findOne(ctx, selectUser+` WHERE email = $1`, NormalizeEmail(email))
@@ -136,7 +137,7 @@ func (r *UserRepository) FindByID(ctx context.Context, id string) (User, error) 
 func (r *UserRepository) findOne(ctx context.Context, query string, arg string) (User, error) {
 	var u User
 	err := r.pool.QueryRow(ctx, query, arg).
-		Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.WarehouseScope, &u.IsActive)
+		Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.WarehouseScope, &u.IsActive, &u.Phone)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrUserNotFound
 	}
@@ -164,4 +165,56 @@ func (r *UserRepository) loadGrants(ctx context.Context, userID string) ([]RoleG
 		grants = append(grants, g)
 	}
 	return grants, dependency.Wrap(rows.Err())
+}
+
+// ProfileUpdate holds the profile fields a user may change; nil means "leave as is".
+// A pointer to an empty Phone clears the phone number.
+type ProfileUpdate struct {
+	FullName *string
+	Phone    *string
+}
+
+// UpdateProfile changes the given fields and returns the updated user.
+func (r *UserRepository) UpdateProfile(ctx context.Context, userID string, update ProfileUpdate) (User, error) {
+	tag, err := r.pool.Exec(ctx, `
+		UPDATE users
+		SET full_name = COALESCE($2, full_name),
+		    phone = CASE WHEN $3::boolean THEN NULLIF($4, '') ELSE phone END
+		WHERE id = $1
+	`, userID, update.FullName, update.Phone != nil, deref(update.Phone))
+	if err != nil {
+		return User{}, dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return User{}, ErrUserNotFound
+	}
+	return r.FindByID(ctx, userID)
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// ChangePassword replaces the password after checking the current one. It returns ErrInvalidCredentials
+// when the current password is wrong. Revoking sessions is the caller's job.
+func (r *UserRepository) ChangePassword(ctx context.Context, userID, current, next string) error {
+	u, err := r.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	ok, verr := password.Verify(current, u.PasswordHash)
+	if verr != nil || !ok {
+		return ErrInvalidCredentials
+	}
+	hash, err := password.Hash(next)
+	if err != nil {
+		return err
+	}
+	if _, err := r.pool.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, userID, hash); err != nil {
+		return dependency.Wrap(err)
+	}
+	return nil
 }

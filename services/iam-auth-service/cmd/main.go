@@ -24,6 +24,7 @@ type UserProfile struct {
 	ID              string   `json:"id"`
 	Name            string   `json:"name"`
 	Email           string   `json:"email"`
+	Phone           string   `json:"phone,omitempty"`
 	Role            string   `json:"role"`
 	WarehouseScope  string   `json:"warehouseScope"`
 	AccessToken     string   `json:"accessToken,omitempty"`
@@ -37,6 +38,8 @@ type UserStore interface {
 	Authenticate(ctx context.Context, email, password string) (repository.User, error)
 	FindByID(ctx context.Context, id string) (repository.User, error)
 	Register(ctx context.Context, email, password, fullName string) (repository.User, error)
+	UpdateProfile(ctx context.Context, userID string, update repository.ProfileUpdate) (repository.User, error)
+	ChangePassword(ctx context.Context, userID, current, next string) error
 }
 
 // issueSession starts a new refresh-token family for u, signs an access token and returns the profile
@@ -84,6 +87,7 @@ type TokenStore interface {
 	Create(ctx context.Context, rec repository.RefreshTokenRecord, tokenHash string) error
 	Rotate(ctx context.Context, presentedHash string, next repository.RefreshTokenRecord, nextHash string) (repository.RefreshTokenRecord, error)
 	RevokeFamilyOf(ctx context.Context, tokenHash string) error
+	RevokeAllForUser(ctx context.Context, userID string) error
 }
 
 // refreshTokenTTL is how long a refresh token stays valid (D-03: 7 days).
@@ -275,38 +279,136 @@ func NewServer(repo UserStore, tokens TokenStore, dbConnected bool) http.Handler
 		response.JSON(w, http.StatusOK, "Signed out", map[string]bool{"revoked": true}, nil)
 	})
 
-	// GET /api/v1/auth/me: trả về thông tin người dùng hiện tại kèm role & warehouseScope (I08)
-	mux.HandleFunc("GET /api/v1/auth/me", func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		if tokenStr == "" || tokenStr == authHeader {
-			response.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Thiếu Bearer token trong Authorization header", nil)
-			return
+	profileOf := func(u repository.User) UserProfile {
+		id := u.Identity()
+		return UserProfile{
+			ID:              u.ID,
+			Name:            u.Name,
+			Email:           u.Email,
+			Phone:           u.Phone,
+			Role:            u.Role,
+			WarehouseScope:  u.WarehouseScope,
+			Roles:           id.Roles,
+			WarehouseScopes: id.WarehouseScopes,
 		}
-		claims, err := auth.ParseAccessToken(tokenStr)
-		if err != nil {
-			response.Error(w, r, http.StatusUnauthorized, "INVALID_ACCESS_TOKEN", "Access token không hợp lệ hoặc đã hết hạn", nil)
-			return
-		}
-		u, err := repo.FindByID(r.Context(), claims.UserID)
+	}
+
+	// writeLookupError answers for a failed user lookup of the authenticated subject.
+	writeLookupError := func(w http.ResponseWriter, r *http.Request, err error) {
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
 		}
+		response.Error(w, r, http.StatusNotFound, "USER_NOT_FOUND", "The account does not exist", nil)
+	}
+
+	// GET /api/v1/auth/me: the signed-in user's profile with roles and warehouse scopes (I08).
+	mux.Handle("GET /api/v1/auth/me", auth.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFrom(r.Context())
+		u, err := repo.FindByID(r.Context(), claims.UserID)
 		if err != nil {
-			response.Error(w, r, http.StatusNotFound, "USER_NOT_FOUND", err.Error(), nil)
+			writeLookupError(w, r, err)
 			return
 		}
-		response.JSON(w, http.StatusOK, "Lấy thông tin người dùng thành công", UserProfile{
-			ID:              u.ID,
-			Name:            u.Name,
-			Email:           u.Email,
-			Role:            u.Role,
-			WarehouseScope:  u.WarehouseScope,
-			Roles:           u.Identity().Roles,
-			WarehouseScopes: u.Identity().WarehouseScopes,
-		}, nil)
-	})
+		response.JSON(w, http.StatusOK, "Profile retrieved", profileOf(u), nil)
+	})))
+
+	// PATCH /api/v1/auth/me: the user may change only their own full name and phone number.
+	mux.Handle("PATCH /api/v1/auth/me", auth.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFrom(r.Context())
+		var req struct {
+			FullName *string `json:"fullName"`
+			Phone    *string `json:"phone"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		fieldErrors := map[string][]string{}
+		update := repository.ProfileUpdate{}
+		if req.FullName != nil {
+			name := strings.TrimSpace(*req.FullName)
+			if problems := validateName(name); len(problems) != 0 {
+				fieldErrors["fullName"] = problems
+			}
+			update.FullName = &name
+		}
+		if req.Phone != nil {
+			phone := normalizePhone(*req.Phone)
+			if phone != "" && !validPhone(phone) {
+				fieldErrors["phone"] = []string{"Phone must be an international number of 7 to 15 digits"}
+			}
+			update.Phone = &phone
+		}
+		if req.FullName == nil && req.Phone == nil {
+			fieldErrors["fullName"] = []string{"Send at least one of fullName or phone"}
+		}
+		if len(fieldErrors) != 0 {
+			response.Error(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Request validation failed", fieldErrors)
+			return
+		}
+		u, err := repo.UpdateProfile(r.Context(), claims.UserID, update)
+		if err != nil {
+			writeLookupError(w, r, err)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Profile updated", profileOf(u), nil)
+	})))
+
+	// POST /api/v1/auth/change-password: needs the current password, signs every other session out and
+	// returns a fresh session for this device.
+	mux.Handle("POST /api/v1/auth/change-password", auth.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFrom(r.Context())
+		var req struct {
+			CurrentPassword string `json:"currentPassword"`
+			NewPassword     string `json:"newPassword"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		u, err := repo.FindByID(r.Context(), claims.UserID)
+		if err != nil {
+			writeLookupError(w, r, err)
+			return
+		}
+		fieldErrors := map[string][]string{}
+		if req.CurrentPassword == "" {
+			fieldErrors["currentPassword"] = []string{"Current password is required"}
+		}
+		if problems := validatePassword(req.NewPassword, u.Email); len(problems) != 0 {
+			fieldErrors["newPassword"] = problems
+		} else if req.NewPassword == req.CurrentPassword {
+			fieldErrors["newPassword"] = []string{"New password must differ from the current password"}
+		}
+		if len(fieldErrors) != 0 {
+			response.Error(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Request validation failed", fieldErrors)
+			return
+		}
+		err = repo.ChangePassword(r.Context(), u.ID, req.CurrentPassword, req.NewPassword)
+		switch {
+		case dependency.IsUnavailable(err):
+			dependency.WriteUnavailable(w, r, err)
+			return
+		case errors.Is(err, repository.ErrInvalidCredentials):
+			response.Error(w, r, http.StatusForbidden, "INVALID_CURRENT_PASSWORD", "The current password is incorrect", nil)
+			return
+		case err != nil:
+			response.Error(w, r, http.StatusInternalServerError, "CHANGE_PASSWORD_FAILED", "Could not change the password", nil)
+			return
+		}
+		if err := tokens.RevokeAllForUser(r.Context(), u.ID); err != nil {
+			if dependency.IsUnavailable(err) {
+				dependency.WriteUnavailable(w, r, err)
+				return
+			}
+			response.Error(w, r, http.StatusInternalServerError, "CHANGE_PASSWORD_FAILED", "Could not sign out other sessions", nil)
+			return
+		}
+		profile, ok := issueSession(w, r, tokens, u)
+		if !ok {
+			return
+		}
+		response.JSON(w, http.StatusOK, "Password changed; other sessions were signed out", profile, nil)
+	})))
 
 	return middleware.Chain(mux)
 }

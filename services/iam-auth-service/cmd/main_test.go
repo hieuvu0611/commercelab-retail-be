@@ -136,6 +136,38 @@ func (f *fakeStore) Register(_ context.Context, email, plain, fullName string) (
 	return u, nil
 }
 
+func (f *fakeStore) UpdateProfile(_ context.Context, userID string, update repository.ProfileUpdate) (repository.User, error) {
+	u, ok := f.byID[userID]
+	if !ok {
+		return repository.User{}, repository.ErrUserNotFound
+	}
+	if update.FullName != nil {
+		u.Name = *update.FullName
+	}
+	if update.Phone != nil {
+		u.Phone = *update.Phone
+	}
+	f.byID[userID] = u
+	return u, nil
+}
+
+func (f *fakeStore) ChangePassword(_ context.Context, userID, current, next string) error {
+	u, ok := f.byID[userID]
+	if !ok {
+		return repository.ErrUserNotFound
+	}
+	if ok, _ := password.Verify(current, u.PasswordHash); !ok {
+		return repository.ErrInvalidCredentials
+	}
+	hash, err := password.Hash(next)
+	if err != nil {
+		return err
+	}
+	u.PasswordHash = hash
+	f.byID[userID] = u
+	return nil
+}
+
 func (f *fakeStore) FindByID(_ context.Context, id string) (repository.User, error) {
 	if u, ok := f.byID[id]; ok {
 		return u, nil
@@ -205,6 +237,17 @@ func (f *fakeTokens) RevokeFamilyOf(_ context.Context, hash string) error {
 	for id, fam := range f.family {
 		if fam == cur.FamilyID {
 			f.revoked[id] = true
+		}
+	}
+	return nil
+}
+
+func (f *fakeTokens) RevokeAllForUser(_ context.Context, userID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, rec := range f.byHash {
+		if rec.UserID == userID {
+			f.revoked[rec.ID] = true
 		}
 	}
 	return nil
