@@ -314,6 +314,35 @@ func (r *InventoryRepository) ReleaseOrderReservation(ctx context.Context, order
 	return &cp, nil
 }
 
+// GetReservation returns the reservation of an order without changing it.
+func (r *InventoryRepository) GetReservation(ctx context.Context, orderID string) (*ReservationRecord, error) {
+	if r.pool != nil {
+		var rec ReservationRecord
+		var rawLines []byte
+		err := r.pool.QueryRow(ctx, `
+			SELECT reservation_id, order_id, warehouse_id, status, lines_json, expires_at
+			FROM reservations
+			WHERE order_id = $1
+		`, orderID).Scan(&rec.ReservationID, &rec.OrderID, &rec.WarehouseID, &rec.Status, &rawLines, &rec.ExpiresAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrReservationNotFound
+		}
+		if err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		_ = json.Unmarshal(rawLines, &rec.Lines)
+		return &rec, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec, ok := r.reservations[orderID]
+	if !ok {
+		return nil, ErrReservationNotFound
+	}
+	cp := *rec
+	return &cp, nil
+}
+
 func (r *InventoryRepository) HandoverOrderShipment(ctx context.Context, orderID string) (*ReservationRecord, error) {
 	if r.pool != nil {
 		tx, err := r.pool.Begin(ctx)

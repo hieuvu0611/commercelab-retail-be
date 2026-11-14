@@ -232,7 +232,7 @@ services:
       args:
         SERVICE_NAME: inventory-warehouse-service
     environment:
-      <<: *go-env
+      <<: [*go-env, *jwt-env]
       INVENTORY_WAREHOUSE_PORT: 8082
       DATABASE_URL_INVENTORY: postgres://inventory_svc_user:inventory_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=inventory
       MIGRATE_ON_START: "true"

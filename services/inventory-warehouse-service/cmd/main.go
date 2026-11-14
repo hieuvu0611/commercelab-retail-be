@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
@@ -110,13 +111,29 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 		response.JSON(w, http.StatusOK, "Nhả giữ tồn kho về Khả dụng thành công", rec, nil)
 	})
 
-	// SC02, I08, SC12: Kho bàn giao kiện hàng cho bưu tá (kiểm tra phạm vi kho X-Warehouse-Scope)
-	mux.HandleFunc("POST /api/v1/inventory/shipments/handover", middleware.RequireWarehouseScope("WH-HCM-01", func(w http.ResponseWriter, r *http.Request) {
+	// SC02, I08, SC12: the warehouse hands the parcel to the courier. Only warehouse staff and managers may do it,
+	// and only in a warehouse their token covers. The warehouse is the one the reservation was made in;
+	// it never comes from a client-supplied header or a hard-coded value.
+	handover := func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			OrderID string `json:"orderId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrderID == "" {
-			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "Thiếu orderId khi bàn giao xuất kho", nil)
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "orderId is required for handover", nil)
+			return
+		}
+		reservation, err := repo.GetReservation(r.Context(), req.OrderID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusConflict, "HANDOVER_FAILED", err.Error(), nil)
+			return
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, reservation.WarehouseID) {
+			auth.ForbiddenWarehouse(w, r)
 			return
 		}
 		rec, err := repo.HandoverOrderShipment(r.Context(), req.OrderID)
@@ -129,14 +146,37 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 			return
 		}
 		response.JSON(w, http.StatusOK, "Bàn giao vận chuyển và trừ tồn thực tế thành công (SC02)", rec, nil)
-	}))
+	}
+	mux.Handle("POST /api/v1/inventory/shipments/handover",
+		auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(http.HandlerFunc(handover))))
 
 	return middleware.Chain(mux)
 }
 
+// Config is the typed start-up configuration of the inventory service.
+type Config struct {
+	Port        string
+	DatabaseURL string
+}
+
+// loadConfig reads and validates the environment, including the mandatory JWT secrets (needed to verify
+// access tokens). It also installs the secrets into pkg/auth. Every problem is reported in one error.
+func loadConfig() (Config, error) {
+	l := config.NewLoader()
+	auth.LoadSecrets(l)
+	cfg := Config{
+		Port:        l.Optional("INVENTORY_WAREHOUSE_PORT", "8082"),
+		DatabaseURL: l.Optional("DATABASE_URL_INVENTORY", "postgres://inventory_svc_user:inventory_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=inventory"),
+	}
+	return cfg, l.Err()
+}
+
 func main() {
-	port := config.EnvOrDefault("INVENTORY_WAREHOUSE_PORT", "8082")
-	pgURL := config.EnvOrDefault("DATABASE_URL_INVENTORY", "postgres://inventory_svc_user:inventory_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=inventory")
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("[inventory-warehouse-service] %v", err)
+	}
+	port, pgURL := cfg.Port, cfg.DatabaseURL
 
 	if migrate.EnabledOnStart() {
 		if _, err := migrate.Up(context.Background(), pgURL, migrations.FS); err != nil {
