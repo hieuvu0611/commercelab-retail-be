@@ -6,7 +6,6 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 )
@@ -47,21 +46,11 @@ func NewRouter(targets ServiceTargets) *Router {
 }
 
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Chống giả mạo header nội bộ từ phía Client (I08, SC12):
-	// Xóa mọi header X-User-* / X-Warehouse-Scope do client tự truyền và chỉ ghi đè từ JWT hợp lệ.
+	// Identity headers are never trusted: services verify the Bearer token themselves, so the gateway
+	// removes any X-User-* / X-Warehouse-Scope header a client sends and does not add its own.
 	r.Header.Del("X-User-ID")
 	r.Header.Del("X-User-Role")
 	r.Header.Del("X-Warehouse-Scope")
-
-	authHeader := r.Header.Get("Authorization")
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-		if claims, err := auth.ParseAccessToken(tokenStr); err == nil {
-			r.Header.Set("X-User-ID", claims.UserID)
-			r.Header.Set("X-User-Role", claims.Role)
-			r.Header.Set("X-Warehouse-Scope", claims.WarehouseScope)
-		}
-	}
 
 	targetBase := rt.resolveTarget(r.URL.Path)
 	if targetBase == "" {
@@ -94,7 +83,7 @@ func (rt *Router) resolveTarget(path string) string {
 	switch {
 	case path == "/auth/refresh" || strings.HasPrefix(path, "/api/v1/auth"):
 		return rt.targets.IAM
-	case strings.HasPrefix(path, "/api/v1/products") || strings.HasPrefix(path, "/api/v1/quotes"):
+	case strings.HasPrefix(path, "/api/v1/products") || strings.HasPrefix(path, "/api/v1/categories") || strings.HasPrefix(path, "/api/v1/quotes"):
 		return rt.targets.Catalog
 	case strings.HasPrefix(path, "/api/v1/inventory"):
 		return rt.targets.Inventory
