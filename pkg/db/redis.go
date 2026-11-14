@@ -20,12 +20,14 @@ func ConnectRedis(ctx context.Context, addr, password string) (*redis.Client, er
 		WriteTimeout: 2 * time.Second,
 	})
 
-	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	if err := client.Ping(pingCtx).Err(); err != nil {
+	pingErr := retryStartup(ctx, startupAttempts, startupRetryDelay, func() error {
+		pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return client.Ping(pingCtx).Err()
+	})
+	if pingErr != nil {
 		_ = client.Close()
-		return nil, err
+		return nil, pingErr
 	}
 	return client, nil
 }
