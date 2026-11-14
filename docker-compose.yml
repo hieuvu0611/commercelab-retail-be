@@ -129,6 +129,26 @@ services:
       timeout: 3s
       retries: 10
 
+  # S3-compatible object storage for development (decision D-11). The official MinIO images are no longer
+  # published, so a drop-in S3 server is used; the application only speaks the S3 API, so any S3-compatible
+  # image works via S3_DEV_IMAGE. Dev-only credentials, like the other infrastructure services.
+  object-storage:
+    <<: *low-resource-limits
+    image: ${S3_DEV_IMAGE:-rustfs/rustfs:1.0.5}
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_DEV_ACCESS_KEY:-devstorage}
+      RUSTFS_SECRET_KEY: ${S3_DEV_SECRET_KEY:-devstorage-secret}
+    ports:
+      - "${S3_HOST_PORT:-9000}:9000"
+    volumes:
+      - object_storage_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   redpanda:
     <<: *low-resource-limits
     image: docker.redpanda.com/redpandadata/redpanda:v24.1.4
@@ -214,6 +234,11 @@ services:
     environment:
       <<: [*go-env, *store-env, *jwt-env]
       CATALOG_PRICING_PORT: 8081
+      S3_ENDPOINT: http://object-storage:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:${S3_HOST_PORT:-9000}
+      S3_AUTO_CREATE_BUCKET: "true"
+      AWS_ACCESS_KEY_ID: ${S3_DEV_ACCESS_KEY:-devstorage}
+      AWS_SECRET_ACCESS_KEY: ${S3_DEV_SECRET_KEY:-devstorage-secret}
       DATABASE_URL_PRICING: postgres://pricing_svc_user:pricing_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=pricing
       MIGRATE_ON_START: "true"
     depends_on: *infra-healthy
@@ -379,4 +404,5 @@ volumes:
   postgres_data:
   mongo_data:
   redis_data:
+  object_storage_data:
   redpanda_data:

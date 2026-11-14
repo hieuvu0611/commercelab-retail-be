@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -289,3 +290,5 @@ func serve(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 }
 
 func nilCtx() context.Context { return context.Background() }
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }

@@ -43,8 +43,13 @@ var (
 
 // ProductImage is a picture of a product; its position in Product.Images is its display order.
 type ProductImage struct {
-	Key string `json:"key" bson:"key"`
-	Alt string `json:"alt" bson:"alt"`
+	ID          string `json:"id" bson:"id"`
+	Key         string `json:"key" bson:"key"`
+	Alt         string `json:"alt" bson:"alt"`
+	ContentType string `json:"contentType,omitempty" bson:"contentType,omitempty"`
+	SizeBytes   int64  `json:"sizeBytes,omitempty" bson:"sizeBytes,omitempty"`
+	// URL is a time-limited download link added to API responses; it is never stored.
+	URL string `json:"url,omitempty" bson:"-"`
 }
 
 // Product is a catalog product. Variants (SKUs) are stored separately and described by VariantAxes, for example
@@ -110,6 +115,9 @@ func ValidateProduct(p Product) error {
 			add("variantAxes", fmt.Sprintf("axis %q is listed twice", axis))
 		}
 		seenAxis[axis] = true
+	}
+	if len(p.Images) > MaxProductImages {
+		add("images", fmt.Sprintf("a product can have at most %d images", MaxProductImages))
 	}
 	seenCategory := map[string]bool{}
 	for _, id := range p.CategoryIDs {
