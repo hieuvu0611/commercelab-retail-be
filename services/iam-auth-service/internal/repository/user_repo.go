@@ -2,18 +2,22 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"strings"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/password"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
 	ErrUserNotFound       = errors.New("user not found")
 	ErrInvalidCredentials = errors.New("email or password is incorrect")
+	ErrEmailTaken         = errors.New("email is already registered")
 )
 
 type User struct {
@@ -39,7 +43,7 @@ func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
 // decoyHash is verified when the email is unknown so that unknown and wrong-password logins cost the same.
 var decoyHash, _ = password.Hash("decoy-password-for-timing")
 
-func normalizeEmail(email string) string {
+func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
@@ -72,10 +76,44 @@ func (r *UserRepository) upgradeHash(ctx context.Context, userID, plain string) 
 	_, _ = r.pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, hash, userID)
 }
 
+// Register creates a CUSTOMER account. The caller has already validated and normalized the input.
+// It returns ErrEmailTaken when the email exists (emails are unique case-insensitively because they are stored lower-cased).
+func (r *UserRepository) Register(ctx context.Context, email, plain, fullName string) (User, error) {
+	hash, err := password.Hash(plain)
+	if err != nil {
+		return User{}, err
+	}
+	id, err := newUserID()
+	if err != nil {
+		return User{}, err
+	}
+	u := User{ID: id, Email: NormalizeEmail(email), Name: fullName, PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true}
+	_, err = r.pool.Exec(ctx, `
+		INSERT INTO users (id, email, full_name, password_hash, role, warehouse_scope, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+	`, u.ID, u.Email, u.Name, u.PasswordHash, u.Role, u.WarehouseScope)
+	if err == nil {
+		return u, nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return User{}, ErrEmailTaken
+	}
+	return User{}, dependency.Wrap(err)
+}
+
+func newUserID() (string, error) {
+	buf := make([]byte, 12)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return "usr-" + hex.EncodeToString(buf), nil
+}
+
 const selectUser = `SELECT id, email, full_name, password_hash, role, warehouse_scope, is_active FROM users`
 
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (User, error) {
-	return r.findOne(ctx, selectUser+` WHERE email = $1`, normalizeEmail(email))
+	return r.findOne(ctx, selectUser+` WHERE email = $1`, NormalizeEmail(email))
 }
 
 func (r *UserRepository) FindByID(ctx context.Context, id string) (User, error) {

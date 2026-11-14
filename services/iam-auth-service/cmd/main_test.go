@@ -109,7 +109,7 @@ func newFakeStore(t *testing.T) *fakeStore {
 
 func (f *fakeStore) Authenticate(_ context.Context, email, plain string) (repository.User, error) {
 	for _, u := range f.byID {
-		if u.Email != email {
+		if u.Email != normalizeEmail(email) {
 			continue
 		}
 		if ok, _ := password.Verify(plain, u.PasswordHash); ok && u.IsActive {
@@ -117,6 +117,21 @@ func (f *fakeStore) Authenticate(_ context.Context, email, plain string) (reposi
 		}
 	}
 	return repository.User{}, repository.ErrInvalidCredentials
+}
+
+func (f *fakeStore) Register(_ context.Context, email, plain, fullName string) (repository.User, error) {
+	for _, u := range f.byID {
+		if u.Email == email {
+			return repository.User{}, repository.ErrEmailTaken
+		}
+	}
+	hash, err := password.Hash(plain)
+	if err != nil {
+		return repository.User{}, err
+	}
+	u := repository.User{ID: "usr-" + email, Email: email, Name: fullName, PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true}
+	f.byID[u.ID] = u
+	return u, nil
 }
 
 func (f *fakeStore) FindByID(_ context.Context, id string) (repository.User, error) {
