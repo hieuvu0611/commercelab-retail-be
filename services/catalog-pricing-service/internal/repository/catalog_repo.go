@@ -7,6 +7,7 @@ import (
 	"log"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
@@ -19,6 +20,9 @@ import (
 var (
 	ErrQuoteNotFound = errors.New("không tìm thấy báo giá")
 	ErrSkuNotFound   = errors.New("không tìm thấy mã SKU trong bảng giá")
+	// ErrSkuNotOrderable means the SKU exists but cannot be bought now: its product is not published or it has
+	// no price in effect.
+	ErrSkuNotOrderable = errors.New("SKU is not orderable")
 )
 
 type ProductCatalogDoc struct {
@@ -93,6 +97,8 @@ type CatalogPricingRepository struct {
 	mongoStore *db.MongoStore
 	mu         sync.RWMutex
 	skuPrices  map[string]SkuPrice
+	history    map[string][]domain.PricePeriod // memory mode only: periods per SKU, newest first
+	now        func() time.Time
 	quotes     map[string]*domain.Quote
 }
 
@@ -100,7 +106,7 @@ type CatalogPricingRepository struct {
 // seeded in-memory data for that part, which is only meant for development and tests
 // (ALLOW_MEMORY_FALLBACK=true). A configured store never falls back to seeds on failure.
 func NewCatalogPricingRepository(pgPool *pgxpool.Pool, mongoStore *db.MongoStore) *CatalogPricingRepository {
-	return &CatalogPricingRepository{
+	r := &CatalogPricingRepository{
 		pgPool:     pgPool,
 		mongoStore: mongoStore,
 		skuPrices: map[string]SkuPrice{
@@ -121,32 +127,56 @@ func NewCatalogPricingRepository(pgPool *pgxpool.Pool, mongoStore *db.MongoStore
 				IsPublished:  true,
 			},
 		},
-		quotes: make(map[string]*domain.Quote),
+		quotes:  make(map[string]*domain.Quote),
+		history: map[string][]domain.PricePeriod{},
+		now:     func() time.Time { return time.Now().UTC() },
 	}
+	for id, sp := range r.skuPrices {
+		r.history[id] = []domain.PricePeriod{{UnitPriceVND: sp.UnitPriceVND, EffectiveFrom: time.Unix(0, 0).UTC(), ChangedBy: "seed"}}
+	}
+	return r
 }
 
+// GetSkuPrice returns the price in effect now for an orderable SKU. It returns ErrSkuNotFound for an unknown SKU
+// and ErrSkuNotOrderable when the SKU is closed (unpublished product) or has no price in effect.
 func (r *CatalogPricingRepository) GetSkuPrice(ctx context.Context, skuID string) (SkuPrice, error) {
+	now := r.now()
 	if r.pgPool != nil {
 		var sp SkuPrice
+		var price *int64
 		err := r.pgPool.QueryRow(ctx, `
-			SELECT sku_id, product_id, sku_name, unit_price_vnd, vat_rate_pct, is_published
-			FROM sku_prices
-			WHERE sku_id = $1 AND is_published = TRUE
-		`, skuID).Scan(&sp.SkuID, &sp.ProductID, &sp.SkuName, &sp.UnitPriceVND, &sp.VatRatePct, &sp.IsPublished)
-		if err == nil {
-			return sp, nil
-		}
+			SELECT p.sku_id, p.product_id, p.sku_name, p.vat_rate_pct, p.is_published, h.unit_price_vnd
+			FROM sku_prices p
+			LEFT JOIN LATERAL (
+				SELECT unit_price_vnd FROM sku_price_history
+				WHERE sku_id = p.sku_id AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)
+				ORDER BY effective_from DESC LIMIT 1
+			) h ON TRUE
+			WHERE p.sku_id = $1
+		`, skuID, now).Scan(&sp.SkuID, &sp.ProductID, &sp.SkuName, &sp.VatRatePct, &sp.IsPublished, &price)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return SkuPrice{}, ErrSkuNotFound
 		}
-		return SkuPrice{}, dependency.Wrap(err)
+		if err != nil {
+			return SkuPrice{}, dependency.Wrap(err)
+		}
+		if !sp.IsPublished || price == nil {
+			return SkuPrice{}, ErrSkuNotOrderable
+		}
+		sp.UnitPriceVND = *price
+		return sp, nil
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	sp, ok := r.skuPrices[skuID]
-	if !ok || !sp.IsPublished {
+	if !ok {
 		return SkuPrice{}, ErrSkuNotFound
 	}
+	period, active := effectivePeriod(r.history[skuID], now)
+	if !sp.IsPublished || !active {
+		return SkuPrice{}, ErrSkuNotOrderable
+	}
+	sp.UnitPriceVND = period.UnitPriceVND
 	return sp, nil
 }
 
@@ -309,37 +339,6 @@ func (r *CatalogPricingRepository) GetQuoteByID(ctx context.Context, quoteID str
 	}
 	cp := *q
 	return &cp, nil
-}
-
-// SKUsWithActivePrice returns the given SKU ids that have a price row.
-func (r *CatalogPricingRepository) SKUsWithActivePrice(ctx context.Context, skuIDs []string) (map[string]bool, error) {
-	out := map[string]bool{}
-	if len(skuIDs) == 0 {
-		return out, nil
-	}
-	if r.pgPool != nil {
-		rows, err := r.pgPool.Query(ctx, `SELECT sku_id FROM sku_prices WHERE sku_id = ANY($1)`, skuIDs)
-		if err != nil {
-			return nil, dependency.Wrap(err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				return nil, dependency.Wrap(err)
-			}
-			out[id] = true
-		}
-		return out, dependency.Wrap(rows.Err())
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, id := range skuIDs {
-		if _, ok := r.skuPrices[id]; ok {
-			out[id] = true
-		}
-	}
-	return out, nil
 }
 
 // SetOrderable makes exactly the listed SKUs of the product orderable (quotes only accept published SKU

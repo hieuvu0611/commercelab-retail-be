@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -29,6 +30,7 @@ var quoteSeq uint64 = 1
 type Deps struct {
 	Categories *domain.CategoryService
 	Products   *domain.ProductService
+	Prices     *domain.PriceService
 	Cache      cache.Cache
 }
 
@@ -46,6 +48,10 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	}
 	registerCategoryRoutes(mux, deps.Categories, deps.Cache)
 	registerProductAdminRoutes(mux, deps.Products)
+	if deps.Prices == nil {
+		deps.Prices = domain.NewPriceService(deps.Products, repo)
+	}
+	registerPriceRoutes(mux, deps.Prices)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "catalog-pricing-service healthy", map[string]any{
@@ -78,33 +84,42 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 
 	// P02, P08, SC01: Tạo báo giá có hiệu lực 5 phút & lưu vào pricing.quotes
 	mux.HandleFunc("POST /api/v1/quotes", func(w http.ResponseWriter, r *http.Request) {
+		// Prices and names are never taken from the client: any unitPriceVnd or skuName it sends is ignored.
 		var req struct {
-			QuoteID     string                  `json:"quoteId"`
-			UserID      string                  `json:"userId"`
-			VoucherCode string                  `json:"voucherCode"`
-			Items       []domain.QuoteLineInput `json:"items"`
+			QuoteID     string `json:"quoteId"`
+			UserID      string `json:"userId"`
+			VoucherCode string `json:"voucherCode"`
+			Items       []struct {
+				SkuID    string `json:"skuId"`
+				Quantity int64  `json:"quantity"`
+			} `json:"items"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			response.Error(w, r, http.StatusBadRequest, "INVALID_REQUEST", "Dữ liệu yêu cầu báo giá không hợp lệ", nil)
+			response.Error(w, r, http.StatusBadRequest, "INVALID_REQUEST", "The quote request is invalid", nil)
 			return
 		}
 		if req.UserID == "" {
 			req.UserID = "user-lan"
 		}
-		for i := range req.Items {
-			if req.Items[i].UnitPriceVND <= 0 || req.Items[i].SkuName == "" {
-				sp, err := repo.GetSkuPrice(r.Context(), req.Items[i].SkuID)
-				if dependency.IsUnavailable(err) {
-					dependency.WriteUnavailable(w, r, err)
-					return
-				}
-				if err != nil {
-					response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", err.Error()+": "+req.Items[i].SkuID, nil)
-					return
-				}
-				req.Items[i].UnitPriceVND = sp.UnitPriceVND
-				req.Items[i].SkuName = sp.SkuName
+		lines := make([]domain.QuoteLineInput, len(req.Items))
+		for i, item := range req.Items {
+			sp, err := repo.GetSkuPrice(r.Context(), item.SkuID)
+			switch {
+			case dependency.IsUnavailable(err):
+				dependency.WriteUnavailable(w, r, err)
+				return
+			case errors.Is(err, repository.ErrSkuNotFound):
+				response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", "SKU not found: "+item.SkuID, nil)
+				return
+			case errors.Is(err, repository.ErrSkuNotOrderable):
+				response.Error(w, r, http.StatusConflict, "SKU_NOT_ORDERABLE", "SKU cannot be ordered right now: "+item.SkuID, nil)
+				return
+			case err != nil:
+				log.Printf("[catalog] quote price lookup failed: %v", err)
+				response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error", nil)
+				return
 			}
+			lines[i] = domain.QuoteLineInput{SkuID: sp.SkuID, SkuName: sp.SkuName, Quantity: item.Quantity, UnitPriceVND: sp.UnitPriceVND}
 		}
 
 		var discountPct int64
@@ -116,7 +131,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 			seq := atomic.AddUint64(&quoteSeq, 1)
 			quoteID = fmt.Sprintf("Q-%s-%03d", time.Now().UTC().Format("150405"), seq)
 		}
-		quote, err := domain.CalculateQuote(quoteID, req.UserID, req.VoucherCode, discountPct, req.Items, time.Now().UTC())
+		quote, err := domain.CalculateQuote(quoteID, req.UserID, req.VoucherCode, discountPct, lines, time.Now().UTC())
 		if err != nil {
 			response.Error(w, r, http.StatusBadRequest, "QUOTE_CALCULATION_FAILED", err.Error(), nil)
 			return
@@ -218,6 +233,7 @@ func main() {
 	repo := repository.NewCatalogPricingRepository(pgPool, mongoStore)
 	if deps.Products != nil {
 		deps.Products.WithPricing(repo, repo)
+		deps.Prices = domain.NewPriceService(deps.Products, repo)
 	}
 	log.Printf("[catalog-pricing-service] listening on :%s (schema: pricing, mongo: catalog_products)", port)
 	log.Fatal(http.ListenAndServe(":"+port, NewServerWithDeps(repo, pgPool != nil, mongoStore != nil, deps)))

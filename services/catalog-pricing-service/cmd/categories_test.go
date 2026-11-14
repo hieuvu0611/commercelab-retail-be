@@ -275,3 +275,17 @@ func TestCacheFailureDoesNotBreakCategoryEndpoints(t *testing.T) {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 }
+
+func newJSONRequest(method, path, body string) *http.Request {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+func serve(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func nilCtx() context.Context { return context.Background() }
