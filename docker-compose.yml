@@ -212,7 +212,7 @@ services:
       args:
         SERVICE_NAME: catalog-pricing-service
     environment:
-      <<: [*go-env, *store-env]
+      <<: [*go-env, *store-env, *jwt-env]
       CATALOG_PRICING_PORT: 8081
       DATABASE_URL_PRICING: postgres://pricing_svc_user:pricing_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=pricing
       MIGRATE_ON_START: "true"

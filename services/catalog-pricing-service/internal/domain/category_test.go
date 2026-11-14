@@ -283,3 +283,68 @@ func TestDeleteOnlyWithoutChildrenAndProducts(t *testing.T) {
 		t.Fatalf("delete twice: %v", err)
 	}
 }
+
+func TestUpdateAppliesPatchFields(t *testing.T) {
+	svc, store := newTestCategoryService()
+	a := mustCreate(t, svc, "", "a")
+	b := mustCreate(t, svc, a.ID, "b")
+	order, off, name := 7, false, "Renamed"
+
+	got, err := svc.Update(context.Background(), a.ID, CategoryPatch{Name: &name, SortOrder: &order, IsActive: &off})
+	if err != nil || got.Name != name || got.SortOrder != 7 || got.IsActive || got.Path != "/a" {
+		t.Fatalf("got = %+v, %v", got, err)
+	}
+
+	on := true
+	if _, err := svc.Update(context.Background(), b.ID, CategoryPatch{IsActive: &on}); err != nil {
+		t.Fatalf("child of inactive parent that is already active: %v", err)
+	}
+	if _, err := svc.Deactivate(context.Background(), b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Update(context.Background(), b.ID, CategoryPatch{IsActive: &on}); !errors.Is(err, ErrCategoryConflict) {
+		t.Fatalf("activate under inactive parent: %v", err)
+	}
+	if _, err := svc.Update(context.Background(), a.ID, CategoryPatch{IsActive: &on}); err != nil {
+		t.Fatal(err)
+	}
+	gotB, _ := store.Get(context.Background(), b.ID)
+	if gotB.IsActive {
+		t.Fatal("activating a parent must not activate its children")
+	}
+}
+
+func TestBuildCategoryTreeSkipsInactiveSubtreesAndSorts(t *testing.T) {
+	svc, store := newTestCategoryService()
+	b := mustCreate(t, svc, "", "bottles")
+	a := mustCreate(t, svc, "", "backpacks")
+	city := mustCreate(t, svc, a.ID, "city")
+	hidden := mustCreate(t, svc, a.ID, "hidden")
+	mustCreate(t, svc, hidden.ID, "inner")
+	if _, err := svc.Deactivate(context.Background(), hidden.ID); err != nil {
+		t.Fatal(err)
+	}
+	first := 1
+	if _, err := svc.Update(context.Background(), b.ID, CategoryPatch{SortOrder: &first}); err != nil {
+		t.Fatal(err)
+	}
+
+	all, _ := store.List(context.Background())
+	tree := BuildCategoryTree(all)
+	if len(tree) != 2 || tree[0].Slug != "backpacks" || tree[1].Slug != "bottles" {
+		// sortOrder 0 (backpacks) sorts before 1 (bottles)
+		t.Fatalf("tree = %+v", tree)
+	}
+	if len(tree[0].Children) != 1 || tree[0].Children[0].ID != city.ID {
+		t.Fatalf("children = %+v", tree[0].Children)
+	}
+	if _, ok := FindCategoryNode(tree, "/backpacks/city"); !ok {
+		t.Fatal("city not found")
+	}
+	if _, ok := FindCategoryNode(tree, "/backpacks/hidden"); ok {
+		t.Fatal("inactive category must not be found")
+	}
+	if _, ok := FindCategoryNode(tree, "/backpack"); ok {
+		t.Fatal("prefix must not match")
+	}
+}

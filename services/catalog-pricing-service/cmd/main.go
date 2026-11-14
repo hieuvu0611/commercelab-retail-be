@@ -9,12 +9,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cache"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/migrations"
@@ -22,8 +24,23 @@ import (
 
 var quoteSeq uint64 = 1
 
+// Deps are the optional collaborators of the catalog handler. Without Categories the category endpoints
+// use an in-memory store (development and tests); without Cache nothing is cached.
+type Deps struct {
+	Categories *domain.CategoryService
+	Cache      cache.Cache
+}
+
 func NewServer(repo *repository.CatalogPricingRepository, pgConnected, mongoConnected bool) http.Handler {
+	return NewServerWithDeps(repo, pgConnected, mongoConnected, Deps{})
+}
+
+func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, mongoConnected bool, deps Deps) http.Handler {
 	mux := http.NewServeMux()
+	if deps.Categories == nil {
+		deps.Categories = domain.NewCategoryService(domain.NewMemoryCategoryStore())
+	}
+	registerCategoryRoutes(mux, deps.Categories, deps.Cache)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "catalog-pricing-service healthy", map[string]any{
@@ -138,6 +155,15 @@ func main() {
 	mongoURI := config.EnvOrDefault("MONGO_URI", "mongodb://mongo_admin:mongo_password@localhost:27017/commerce_lab_doc?authSource=admin")
 	mongoDB := config.EnvOrDefault("MONGO_DATABASE", "commerce_lab_doc")
 
+	redisAddr := config.EnvOrDefault("REDIS_ADDR", "localhost:6379")
+	redisPass := config.EnvOrDefault("REDIS_PASSWORD", "")
+
+	secretsLoader := config.NewLoader()
+	auth.LoadSecrets(secretsLoader)
+	if err := secretsLoader.Err(); err != nil {
+		log.Fatalf("[catalog-pricing-service] %v", err)
+	}
+
 	ctx := context.Background()
 	if migrate.EnabledOnStart() {
 		if _, err := migrate.Up(ctx, pgURL, migrations.FS); err != nil {
@@ -161,7 +187,25 @@ func main() {
 		defer func() { _ = mongoStore.Close(context.Background()) }()
 	}
 
+	deps := Deps{}
+	if mongoStore != nil {
+		categoryStore, err := repository.NewMongoCategoryStore(ctx, mongoStore)
+		if err != nil {
+			log.Fatalf("[catalog-pricing-service] category store: %v", err)
+		}
+		deps.Categories = domain.NewCategoryService(categoryStore)
+	}
+	// The category cache is an optimisation: without Redis (dev/test fallback only) nothing is cached.
+	redisClient, redisErr := db.ConnectRedis(ctx, redisAddr, redisPass)
+	if err := dependency.CheckStartup("catalog-pricing-service", "redis", redisErr); err != nil {
+		log.Fatal(err)
+	}
+	if redisClient != nil {
+		defer func() { _ = redisClient.Close() }()
+		deps.Cache = cache.NewRedis(redisClient)
+	}
+
 	repo := repository.NewCatalogPricingRepository(pgPool, mongoStore)
 	log.Printf("[catalog-pricing-service] listening on :%s (schema: pricing, mongo: catalog_products)", port)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, pgPool != nil, mongoStore != nil)))
+	log.Fatal(http.ListenAndServe(":"+port, NewServerWithDeps(repo, pgPool != nil, mongoStore != nil, deps)))
 }
