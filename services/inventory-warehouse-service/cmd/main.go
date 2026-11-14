@@ -9,9 +9,11 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/migrations"
 )
 
 func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Handler {
@@ -114,6 +116,12 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 func main() {
 	port := config.EnvOrDefault("INVENTORY_WAREHOUSE_PORT", "8082")
 	pgURL := config.EnvOrDefault("DATABASE_URL_INVENTORY", "postgres://inventory_svc_user:inventory_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=inventory")
+
+	if migrate.EnabledOnStart() {
+		if _, err := migrate.Up(context.Background(), pgURL, migrations.FS); err != nil {
+			log.Fatalf("[inventory-warehouse-service] migrations failed: %v", err)
+		}
+	}
 
 	pgPool, err := db.ConnectPostgres(context.Background(), pgURL)
 	if err != nil {

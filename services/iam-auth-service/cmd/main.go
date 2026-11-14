@@ -11,9 +11,11 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/migrations"
 )
 
 type UserProfile struct {
@@ -143,6 +145,12 @@ func NewServer(repo *repository.UserRepository, dbConnected bool) http.Handler {
 func main() {
 	port := config.EnvOrDefault("IAM_AUTH_PORT", "8087")
 	dbURL := config.EnvOrDefault("DATABASE_URL_IAM", "postgres://iam_svc_user:iam_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=iam")
+
+	if migrate.EnabledOnStart() {
+		if _, err := migrate.Up(context.Background(), dbURL, migrations.FS); err != nil {
+			log.Fatalf("[iam-auth-service] migrations failed: %v", err)
+		}
+	}
 
 	pool, err := db.ConnectPostgres(context.Background(), dbURL)
 	if err != nil {

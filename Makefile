@@ -1,4 +1,4 @@
-.PHONY: infra-up infra-down benchmark-up benchmark-down benchmark-stats build test run-gateway run-iam run-catalog run-inventory run-order run-payment run-fulfillment run-ledger run-notification run-backoffice
+.PHONY: migrate infra-up infra-down benchmark-up benchmark-down benchmark-stats build test run-gateway run-iam run-catalog run-inventory run-order run-payment run-fulfillment run-ledger run-notification run-backoffice
 
 infra-up:
 	docker compose up -d
@@ -21,6 +21,10 @@ GO_ENV = PATH="$$(GOTOOLCHAIN=local go env GOROOT)/bin:$$PATH" GOTOOLCHAIN=local
 
 build:
 	$(GO_ENV) go build ./...
+
+# Apply the versioned SQL migrations of every service (or `make migrate SERVICE=iam`) to Postgres.
+migrate:
+	$(GO_ENV) go run ./cmd/migrate $(SERVICE)
 
 test:
 	$(GO_ENV) go test -v -race ./...
