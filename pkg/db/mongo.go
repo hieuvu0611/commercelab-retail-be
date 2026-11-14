@@ -80,6 +80,9 @@ func (m *MongoStore) FindAll(ctx context.Context, collection string, filter bson
 	return docs, nil
 }
 
+// Database returns the underlying driver database for stores that need more than FindAll.
+func (m *MongoStore) Database() *mongo.Database { return m.db }
+
 // Close releases the driver's connections.
 func (m *MongoStore) Close(ctx context.Context) error {
 	return m.client.Disconnect(ctx)
