@@ -194,3 +194,20 @@ func TestCartBelongsToTheTokenSubject(t *testing.T) {
 		t.Fatalf("bob's write changed alice's cart: %+v", aliceCart)
 	}
 }
+
+func TestClientForwardedForIsReplacedByTheRealPeerAddress(t *testing.T) {
+	gw := newGateway(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "203.0.113.7:4444"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4, 5.6.7.8")
+	rec := httptest.NewRecorder()
+	gw.handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK || gw.last == nil {
+		t.Fatalf("status = %d; the login call must be proxied", rec.Code)
+	}
+	if got := gw.last.Header.Get("X-Forwarded-For"); got != "203.0.113.7" {
+		t.Fatalf("upstream X-Forwarded-For = %q; want only the real peer 203.0.113.7", got)
+	}
+}

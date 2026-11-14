@@ -325,6 +325,7 @@ services:
         SERVICE_NAME: iam-auth-service
     environment:
       <<: [*go-env, *jwt-env]
+      REDIS_ADDR: redis:6379
       IAM_AUTH_PORT: 8087
       DATABASE_URL_IAM: postgres://iam_svc_user:iam_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=iam
       MIGRATE_ON_START: "true"

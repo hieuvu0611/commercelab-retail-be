@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/audit"
+	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/ratelimit"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/repository"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/migrations"
 )
@@ -37,6 +41,7 @@ type UserProfile struct {
 type UserStore interface {
 	Authenticate(ctx context.Context, email, password string) (repository.User, error)
 	FindByID(ctx context.Context, id string) (repository.User, error)
+	FindByEmail(ctx context.Context, email string) (repository.User, error)
 	Register(ctx context.Context, email, password, fullName string) (repository.User, error)
 	UpdateProfile(ctx context.Context, userID string, update repository.ProfileUpdate) (repository.User, error)
 	ChangePassword(ctx context.Context, userID, current, next string) error
@@ -104,13 +109,85 @@ func signRefresh(u repository.User, tokenID, familyID string) (string, repositor
 	}, nil
 }
 
-// NewServer builds the IAM handler without the administration API.
+// Deps are the collaborators of the IAM handler. Admin, Limiter and Audit are optional: without a Limiter
+// nothing is rate limited, without Audit nothing is recorded, without Admin the administration API is absent.
+type Deps struct {
+	Users       UserStore
+	Tokens      TokenStore
+	Admin       AdminStore
+	Limiter     ratelimit.Limiter
+	Audit       audit.Recorder
+	DBConnected bool
+}
+
+// NewServer builds the IAM handler without the administration API, rate limiting or auditing.
 func NewServer(repo UserStore, tokens TokenStore, dbConnected bool) http.Handler {
-	return NewServerWithAdmin(repo, tokens, nil, dbConnected)
+	return NewServerFromDeps(Deps{Users: repo, Tokens: tokens, DBConnected: dbConnected})
 }
 
 // NewServerWithAdmin also serves the ACCESS_ADMIN staff administration API when admin is not nil.
 func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbConnected bool) http.Handler {
+	return NewServerFromDeps(Deps{Users: repo, Tokens: tokens, Admin: admin, DBConnected: dbConnected})
+}
+
+// clientIP identifies the caller. The gateway removes any client-supplied X-Forwarded-For and appends the
+// real peer address, so the LAST entry is trustworthy and earlier ones are not. Without the header
+// (direct access) the peer address is used.
+func clientIP(r *http.Request) string {
+	if parts := strings.Split(r.Header.Get("X-Forwarded-For"), ","); len(parts) > 0 {
+		for i := len(parts) - 1; i >= 0; i-- {
+			if ip := strings.TrimSpace(parts[i]); ip != "" {
+				return ip
+			}
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// NewServerFromDeps builds the IAM HTTP handler.
+func NewServerFromDeps(d Deps) http.Handler {
+	repo, tokens, admin, dbConnected := d.Users, d.Tokens, d.Admin, d.DBConnected
+	recorder := d.Audit
+	if recorder == nil {
+		recorder = audit.Noop{}
+	}
+	record := func(r *http.Request, name, outcome, userID string, detail map[string]any) {
+		recorder.Record(r.Context(), audit.Event{
+			Name: name, UserID: userID, IP: clientIP(r), UserAgent: r.UserAgent(), Outcome: outcome, Detail: detail,
+		})
+	}
+	// blockedByLimiter answers 429 (or 503 when the limiter store is down) and reports whether it did.
+	blockedByLimiter := func(w http.ResponseWriter, r *http.Request, key, event, userID string) bool {
+		if d.Limiter == nil {
+			return false
+		}
+		blocked, retryAfter, err := d.Limiter.Blocked(r.Context(), key)
+		if err != nil {
+			dependency.WriteUnavailable(w, r, err)
+			return true
+		}
+		if !blocked {
+			return false
+		}
+		record(r, event, audit.OutcomeBlocked, userID, nil)
+		seconds := int(retryAfter.Seconds()) + 1
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		response.Error(w, r, http.StatusTooManyRequests, "TOO_MANY_ATTEMPTS", "Too many failed attempts; try again later", nil)
+		return true
+	}
+	recordFailure := func(r *http.Request, key string) {
+		if d.Limiter != nil {
+			_ = d.Limiter.RecordFailure(r.Context(), key)
+		}
+	}
+	resetFailures := func(r *http.Request, key string) {
+		if d.Limiter != nil {
+			_ = d.Limiter.Reset(r.Context(), key)
+		}
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -141,12 +218,23 @@ func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbC
 			response.Error(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Request validation failed", fieldErrors)
 			return
 		}
-		u, err := repo.Authenticate(r.Context(), req.Email, req.Password)
+		email := normalizeEmail(req.Email)
+		limiterKey := ratelimit.KeyFor("login", email, clientIP(r))
+		if blockedByLimiter(w, r, limiterKey, audit.LoginBlocked, "") {
+			return
+		}
+		u, err := repo.Authenticate(r.Context(), email, req.Password)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
 		}
 		if err != nil {
+			recordFailure(r, limiterKey)
+			knownID := ""
+			if known, lookupErr := repo.FindByEmail(r.Context(), email); lookupErr == nil {
+				knownID = known.ID
+			}
+			record(r, audit.LoginFailed, audit.OutcomeFailure, knownID, map[string]any{"email": audit.RedactEmail(email)})
 			response.Error(w, r, http.StatusUnauthorized, "INVALID_CREDENTIALS", err.Error(), nil)
 			return
 		}
@@ -154,6 +242,8 @@ func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbC
 		if !ok {
 			return
 		}
+		resetFailures(r, limiterKey)
+		record(r, audit.LoginSuccess, audit.OutcomeSuccess, u.ID, nil)
 		response.JSON(w, http.StatusOK, "Đăng nhập thành công", profile, nil)
 	})
 
@@ -189,6 +279,7 @@ func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbC
 		if !ok {
 			return
 		}
+		record(r, audit.Registered, audit.OutcomeSuccess, u.ID, nil)
 		response.JSON(w, http.StatusCreated, "Account created", profile, nil)
 	})
 
@@ -235,6 +326,7 @@ func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbC
 			dependency.WriteUnavailable(w, r, err)
 			return
 		case errors.Is(err, repository.ErrRefreshReused):
+			record(r, audit.RefreshReuseDetected, audit.OutcomeFailure, u.ID, nil)
 			response.Error(w, r, http.StatusUnauthorized, "REFRESH_TOKEN_REUSED", "Refresh token was already used; sign in again", nil)
 			return
 		case errors.Is(err, repository.ErrRefreshExpired):
@@ -282,6 +374,11 @@ func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbC
 			response.Error(w, r, http.StatusInternalServerError, "LOGOUT_FAILED", "Could not sign out", nil)
 			return
 		}
+		userID := ""
+		if claims, err := auth.ParseRefreshToken(req.RefreshToken); err == nil {
+			userID = claims.UserID
+		}
+		record(r, audit.Logout, audit.OutcomeSuccess, userID, nil)
 		response.JSON(w, http.StatusOK, "Signed out", map[string]bool{"revoked": true}, nil)
 	})
 
@@ -389,12 +486,18 @@ func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbC
 			response.Error(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Request validation failed", fieldErrors)
 			return
 		}
+		limiterKey := ratelimit.KeyFor("change-password", u.ID, clientIP(r))
+		if blockedByLimiter(w, r, limiterKey, audit.PasswordChangeFailed, u.ID) {
+			return
+		}
 		err = repo.ChangePassword(r.Context(), u.ID, req.CurrentPassword, req.NewPassword)
 		switch {
 		case dependency.IsUnavailable(err):
 			dependency.WriteUnavailable(w, r, err)
 			return
 		case errors.Is(err, repository.ErrInvalidCredentials):
+			recordFailure(r, limiterKey)
+			record(r, audit.PasswordChangeFailed, audit.OutcomeFailure, u.ID, nil)
 			response.Error(w, r, http.StatusForbidden, "INVALID_CURRENT_PASSWORD", "The current password is incorrect", nil)
 			return
 		case err != nil:
@@ -413,6 +516,8 @@ func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbC
 		if !ok {
 			return
 		}
+		resetFailures(r, limiterKey)
+		record(r, audit.PasswordChanged, audit.OutcomeSuccess, u.ID, nil)
 		response.JSON(w, http.StatusOK, "Password changed; other sessions were signed out", profile, nil)
 	})))
 
@@ -427,6 +532,8 @@ func NewServerWithAdmin(repo UserStore, tokens TokenStore, admin AdminStore, dbC
 type Config struct {
 	Port        string
 	DatabaseURL string
+	RedisAddr   string
+	RedisPass   string
 }
 
 // loadConfig reads and validates the environment, including the mandatory JWT secrets.
@@ -437,6 +544,8 @@ func loadConfig() (Config, error) {
 	cfg := Config{
 		Port:        l.Optional("IAM_AUTH_PORT", "8087"),
 		DatabaseURL: l.Optional("DATABASE_URL_IAM", "postgres://iam_svc_user:iam_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=iam"),
+		RedisAddr:   l.Optional("REDIS_ADDR", "localhost:6379"),
+		RedisPass:   l.Optional("REDIS_PASSWORD", ""),
 	}
 	return cfg, l.Err()
 }
@@ -462,7 +571,22 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Sign-in rate limiting needs Redis; like Postgres it has no in-memory fallback.
+	redisClient, err := db.ConnectRedis(context.Background(), cfg.RedisAddr, cfg.RedisPass)
+	if err != nil {
+		log.Fatalf("[iam-auth-service] redis is required and unavailable: %v", err)
+	}
+	defer func() { _ = redisClient.Close() }()
+
 	repo := repository.NewUserRepository(pool)
+	handler := NewServerFromDeps(Deps{
+		Users:       repo,
+		Tokens:      repository.NewRefreshRepository(repo),
+		Admin:       repository.NewAdminRepository(repo),
+		Limiter:     ratelimit.NewRedis(redisClient, ratelimit.MaxFailures, ratelimit.Window),
+		Audit:       audit.NewPostgres(pool),
+		DBConnected: true,
+	})
 	log.Printf("[iam-auth-service] listening on :%s (schema: iam)", port)
-	log.Fatal(http.ListenAndServe(":"+port, NewServerWithAdmin(repo, repository.NewRefreshRepository(repo), repository.NewAdminRepository(repo), true)))
+	log.Fatal(http.ListenAndServe(":"+port, handler))
 }

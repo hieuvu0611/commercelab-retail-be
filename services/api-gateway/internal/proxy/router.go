@@ -51,6 +51,9 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del("X-User-ID")
 	r.Header.Del("X-User-Role")
 	r.Header.Del("X-Warehouse-Scope")
+	// The reverse proxy appends the real peer address to X-Forwarded-For; anything a client put there is dropped
+	// first so services can trust the last entry (sign-in rate limiting relies on it).
+	r.Header.Del("X-Forwarded-For")
 
 	targetBase := rt.resolveTarget(r.URL.Path)
 	if targetBase == "" {

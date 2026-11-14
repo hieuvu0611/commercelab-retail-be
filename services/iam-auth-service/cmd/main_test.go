@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -131,7 +132,7 @@ func (f *fakeStore) Register(_ context.Context, email, plain, fullName string) (
 	if err != nil {
 		return repository.User{}, err
 	}
-	u := repository.User{ID: "usr-" + email, Email: email, Name: fullName, PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true, Grants: []repository.RoleGrant{{Role: "CUSTOMER"}}}
+	u := repository.User{ID: fmt.Sprintf("usr-new-%d", len(f.byID)), Email: email, Name: fullName, PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true, Grants: []repository.RoleGrant{{Role: "CUSTOMER"}}}
 	f.byID[u.ID] = u
 	return u, nil
 }
@@ -166,6 +167,15 @@ func (f *fakeStore) ChangePassword(_ context.Context, userID, current, next stri
 	u.PasswordHash = hash
 	f.byID[userID] = u
 	return nil
+}
+
+func (f *fakeStore) FindByEmail(_ context.Context, email string) (repository.User, error) {
+	for _, u := range f.byID {
+		if u.Email == normalizeEmail(email) {
+			return u, nil
+		}
+	}
+	return repository.User{}, repository.ErrUserNotFound
 }
 
 func (f *fakeStore) FindByID(_ context.Context, id string) (repository.User, error) {
