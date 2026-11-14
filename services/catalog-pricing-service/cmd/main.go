@@ -157,6 +157,9 @@ func main() {
 	if err := dependency.CheckStartup("catalog-pricing-service", "mongodb", mongoErr); err != nil {
 		log.Fatal(err)
 	}
+	if mongoStore != nil {
+		defer func() { _ = mongoStore.Close(context.Background()) }()
+	}
 
 	repo := repository.NewCatalogPricingRepository(pgPool, mongoStore)
 	log.Printf("[catalog-pricing-service] listening on :%s (schema: pricing, mongo: catalog_products)", port)
