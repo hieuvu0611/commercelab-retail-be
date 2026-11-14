@@ -161,9 +161,30 @@ func NewServer(repo UserStore, dbConnected bool) http.Handler {
 	return middleware.Chain(mux)
 }
 
+// Config is the typed start-up configuration of the IAM service.
+type Config struct {
+	Port        string
+	DatabaseURL string
+}
+
+// loadConfig reads and validates the environment, including the mandatory JWT secrets.
+// It also installs the secrets into pkg/auth. Every problem is reported in one error.
+func loadConfig() (Config, error) {
+	l := config.NewLoader()
+	auth.LoadSecrets(l)
+	cfg := Config{
+		Port:        l.Optional("IAM_AUTH_PORT", "8087"),
+		DatabaseURL: l.Optional("DATABASE_URL_IAM", "postgres://iam_svc_user:iam_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=iam"),
+	}
+	return cfg, l.Err()
+}
+
 func main() {
-	port := config.EnvOrDefault("IAM_AUTH_PORT", "8087")
-	dbURL := config.EnvOrDefault("DATABASE_URL_IAM", "postgres://iam_svc_user:iam_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=iam")
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("[iam-auth-service] %v", err)
+	}
+	port, dbURL := cfg.Port, cfg.DatabaseURL
 
 	if migrate.EnabledOnStart() {
 		if _, err := migrate.Up(context.Background(), dbURL, migrations.FS); err != nil {
