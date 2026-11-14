@@ -124,6 +124,11 @@ func mapPathErr(err error) error {
 	return err
 }
 
+// List returns every category, including inactive ones.
+func (s *CategoryService) List(ctx context.Context) ([]Category, error) {
+	return s.store.List(ctx)
+}
+
 // Create adds a category under a parent (or at the root).
 func (s *CategoryService) Create(ctx context.Context, in CreateCategoryInput) (Category, error) {
 	fields := map[string][]string{}
@@ -179,12 +184,33 @@ func maxDepth(cats []Category) int {
 	return deepest
 }
 
+// CategoryPatch lists the fields to change; nil fields stay as they are.
+type CategoryPatch struct {
+	Name      *string
+	Slug      *string
+	SortOrder *int
+	IsActive  *bool
+}
+
 // Rename changes the name and, when slug is not empty, the slug. A new slug re-computes the subtree paths.
 func (s *CategoryService) Rename(ctx context.Context, id, name, slug string) (Category, error) {
-	fields := map[string][]string{}
-	name = validateName(name, fields)
+	patch := CategoryPatch{Name: &name}
 	if slug != "" {
-		validateSlug(slug, fields)
+		patch.Slug = &slug
+	}
+	return s.Update(ctx, id, patch)
+}
+
+// Update applies patch. A new slug re-computes the paths of the whole subtree; activating a category needs
+// an active parent.
+func (s *CategoryService) Update(ctx context.Context, id string, patch CategoryPatch) (Category, error) {
+	fields := map[string][]string{}
+	if patch.Name != nil {
+		trimmed := validateName(*patch.Name, fields)
+		patch.Name = &trimmed
+	}
+	if patch.Slug != nil {
+		validateSlug(*patch.Slug, fields)
 	}
 	if len(fields) > 0 {
 		return Category{}, &ValidationError{Fields: fields}
@@ -193,20 +219,41 @@ func (s *CategoryService) Rename(ctx context.Context, id, name, slug string) (Ca
 	if err != nil {
 		return Category{}, err
 	}
-	if slug == "" {
-		slug = c.Slug
+	if patch.IsActive != nil && *patch.IsActive && !c.IsActive && c.ParentID != "" {
+		parent, err := s.store.Get(ctx, c.ParentID)
+		if err != nil {
+			return Category{}, err
+		}
+		if !parent.IsActive {
+			return Category{}, fmt.Errorf("%w: parent category is inactive", ErrCategoryConflict)
+		}
 	}
 	subtree, err := s.store.Subtree(ctx, c.Path)
 	if err != nil {
 		return Category{}, err
 	}
-	newPath := c.Path[:len(c.Path)-len(c.Slug)] + slug
+	newPath := c.Path
+	if patch.Slug != nil {
+		newPath = c.Path[:len(c.Path)-len(c.Slug)] + *patch.Slug
+	}
 	updated := repath(subtree, c.Path, newPath, 0, s.now())
 	for i := range updated {
-		if updated[i].ID == c.ID {
-			updated[i].Name, updated[i].Slug = name, slug
-			c = updated[i]
+		if updated[i].ID != c.ID {
+			continue
 		}
+		if patch.Name != nil {
+			updated[i].Name = *patch.Name
+		}
+		if patch.Slug != nil {
+			updated[i].Slug = *patch.Slug
+		}
+		if patch.SortOrder != nil {
+			updated[i].SortOrder = *patch.SortOrder
+		}
+		if patch.IsActive != nil {
+			updated[i].IsActive = *patch.IsActive
+		}
+		c = updated[i]
 	}
 	if err := s.store.SaveAll(ctx, updated); err != nil {
 		return Category{}, mapPathErr(err)
