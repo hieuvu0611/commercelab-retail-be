@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
@@ -37,17 +37,31 @@ type UserStore interface {
 	Register(ctx context.Context, email, password, fullName string) (repository.User, error)
 }
 
-// issueSession signs an access and a refresh token for u and returns the profile the clients receive.
-// It writes the error response itself and returns false when signing fails.
-func issueSession(w http.ResponseWriter, r *http.Request, u repository.User) (UserProfile, bool) {
+// issueSession starts a new refresh-token family for u, signs an access token and returns the profile
+// the clients receive. It writes the error response itself and returns false on failure.
+func issueSession(w http.ResponseWriter, r *http.Request, tokens TokenStore, u repository.User) (UserProfile, bool) {
 	accessTok, err := auth.SignAccessToken(u.ID, u.Role, u.WarehouseScope)
 	if err != nil {
 		response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the access token", nil)
 		return UserProfile{}, false
 	}
-	refreshTok, err := auth.SignRefreshToken(u.ID, u.Role, u.WarehouseScope)
+	tokenID, errID := repository.NewTokenID("rt-")
+	familyID, errFam := repository.NewTokenID("fam-")
+	if errID != nil || errFam != nil {
+		response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the refresh token", nil)
+		return UserProfile{}, false
+	}
+	refreshTok, rec, err := signRefresh(u, tokenID, familyID)
 	if err != nil {
 		response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the refresh token", nil)
+		return UserProfile{}, false
+	}
+	if err := tokens.Create(r.Context(), rec, repository.HashToken(refreshTok)); err != nil {
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+		} else {
+			response.Error(w, r, http.StatusInternalServerError, "TOKEN_STORE_ERROR", "Could not create the session", nil)
+		}
 		return UserProfile{}, false
 	}
 	return UserProfile{
@@ -61,7 +75,28 @@ func issueSession(w http.ResponseWriter, r *http.Request, u repository.User) (Us
 	}, true
 }
 
-func NewServer(repo UserStore, dbConnected bool) http.Handler {
+// TokenStore persists hashed refresh tokens (implemented by repository.RefreshRepository).
+type TokenStore interface {
+	Create(ctx context.Context, rec repository.RefreshTokenRecord, tokenHash string) error
+	Rotate(ctx context.Context, presentedHash string, next repository.RefreshTokenRecord, nextHash string) (repository.RefreshTokenRecord, error)
+	RevokeFamilyOf(ctx context.Context, tokenHash string) error
+}
+
+// refreshTokenTTL is how long a refresh token stays valid (D-03: 7 days).
+const refreshTokenTTL = 7 * 24 * time.Hour
+
+// signRefresh signs a refresh token for u with the given token id and returns it with its stored record.
+func signRefresh(u repository.User, tokenID, familyID string) (string, repository.RefreshTokenRecord, error) {
+	token, err := auth.SignRefreshToken(u.ID, u.Role, u.WarehouseScope, tokenID)
+	if err != nil {
+		return "", repository.RefreshTokenRecord{}, err
+	}
+	return token, repository.RefreshTokenRecord{
+		ID: tokenID, UserID: u.ID, FamilyID: familyID, ExpiresAt: time.Now().UTC().Add(refreshTokenTTL),
+	}, nil
+}
+
+func NewServer(repo UserStore, tokens TokenStore, dbConnected bool) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -101,7 +136,7 @@ func NewServer(repo UserStore, dbConnected bool) http.Handler {
 			response.Error(w, r, http.StatusUnauthorized, "INVALID_CREDENTIALS", err.Error(), nil)
 			return
 		}
-		profile, ok := issueSession(w, r, u)
+		profile, ok := issueSession(w, r, tokens, u)
 		if !ok {
 			return
 		}
@@ -136,25 +171,28 @@ func NewServer(repo UserStore, dbConnected bool) http.Handler {
 			response.Error(w, r, http.StatusInternalServerError, "REGISTER_FAILED", "Could not create the account", nil)
 			return
 		}
-		profile, ok := issueSession(w, r, u)
+		profile, ok := issueSession(w, r, tokens, u)
 		if !ok {
 			return
 		}
 		response.JSON(w, http.StatusCreated, "Account created", profile, nil)
 	})
 
-	// Khớp 100% với fe/src/configs/axios-config.ts (POST /auth/refresh)
-	mux.HandleFunc("POST /auth/refresh", func(w http.ResponseWriter, r *http.Request) {
+	// Refresh rotates the refresh token (D-03). Reusing an already-rotated token revokes the whole family.
+	refresh := func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			RefreshToken string `json:"refreshToken"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
-			response.Error(w, r, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Refresh token không hợp lệ", nil)
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		if req.RefreshToken == "" {
+			response.Error(w, r, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Refresh token is invalid", nil)
 			return
 		}
 		claims, err := auth.ParseRefreshToken(req.RefreshToken)
 		if err != nil {
-			response.Error(w, r, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Refresh token hết hạn hoặc không hợp lệ", nil)
+			response.Error(w, r, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Refresh token is invalid or expired", nil)
 			return
 		}
 		u, err := repo.FindByID(r.Context(), claims.UserID)
@@ -163,15 +201,74 @@ func NewServer(repo UserStore, dbConnected bool) http.Handler {
 			return
 		}
 		if err != nil || !u.IsActive {
-			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "Tài khoản không tồn tại hoặc đã khóa", nil)
+			_ = tokens.RevokeFamilyOf(r.Context(), repository.HashToken(req.RefreshToken))
+			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "The account does not exist or is disabled", nil)
 			return
 		}
-		accessTok, _ := auth.SignAccessToken(u.ID, u.Role, u.WarehouseScope)
-		refreshTok, _ := auth.SignRefreshToken(u.ID, u.Role, u.WarehouseScope)
-		response.JSON(w, http.StatusOK, "Làm mới token thành công", map[string]string{
+		nextID, err := repository.NewTokenID("rt-")
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the refresh token", nil)
+			return
+		}
+		nextToken, nextRec, err := signRefresh(u, nextID, "")
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the refresh token", nil)
+			return
+		}
+		_, err = tokens.Rotate(r.Context(), repository.HashToken(req.RefreshToken), nextRec, repository.HashToken(nextToken))
+		switch {
+		case dependency.IsUnavailable(err):
+			dependency.WriteUnavailable(w, r, err)
+			return
+		case errors.Is(err, repository.ErrRefreshReused):
+			response.Error(w, r, http.StatusUnauthorized, "REFRESH_TOKEN_REUSED", "Refresh token was already used; sign in again", nil)
+			return
+		case errors.Is(err, repository.ErrRefreshExpired):
+			response.Error(w, r, http.StatusUnauthorized, "REFRESH_TOKEN_EXPIRED", "Refresh token has expired; sign in again", nil)
+			return
+		case err != nil:
+			response.Error(w, r, http.StatusUnauthorized, "INVALID_REFRESH_TOKEN", "Refresh token is invalid", nil)
+			return
+		}
+		accessTok, err := auth.SignAccessToken(u.ID, u.Role, u.WarehouseScope)
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "TOKEN_SIGN_ERROR", "Could not create the access token", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Token refreshed", map[string]string{
 			"accessToken":  accessTok,
-			"refreshToken": refreshTok,
+			"refreshToken": nextToken,
 		}, nil)
+	}
+	mux.HandleFunc("POST /api/v1/auth/refresh", refresh)
+	// Deprecated alias kept for one phase: the frontend contract (docs/04 6.3) still calls POST /auth/refresh.
+	mux.HandleFunc("POST /auth/refresh", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Deprecation", "true")
+		refresh(w, r)
+	})
+
+	// Logout revokes the whole refresh-token family of the presented token. It is idempotent.
+	mux.HandleFunc("POST /api/v1/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RefreshToken string `json:"refreshToken"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		if req.RefreshToken == "" {
+			response.Error(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Request validation failed",
+				map[string][]string{"refreshToken": {"Refresh token is required"}})
+			return
+		}
+		if err := tokens.RevokeFamilyOf(r.Context(), repository.HashToken(req.RefreshToken)); err != nil {
+			if dependency.IsUnavailable(err) {
+				dependency.WriteUnavailable(w, r, err)
+				return
+			}
+			response.Error(w, r, http.StatusInternalServerError, "LOGOUT_FAILED", "Could not sign out", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Signed out", map[string]bool{"revoked": true}, nil)
 	})
 
 	// GET /api/v1/auth/me: trả về thông tin người dùng hiện tại kèm role & warehouseScope (I08)
@@ -249,5 +346,5 @@ func main() {
 
 	repo := repository.NewUserRepository(pool)
 	log.Printf("[iam-auth-service] listening on :%s (schema: iam)", port)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, true)))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, repository.NewRefreshRepository(repo), true)))
 }

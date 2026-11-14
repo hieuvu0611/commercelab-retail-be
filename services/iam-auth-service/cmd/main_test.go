@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
@@ -18,7 +19,7 @@ import (
 
 func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(newFakeStore(t), true)
+	srv := newTestServer(t)
 
 	// 1. Đăng nhập với tài khoản Nhân viên Kho HCM (I08: WarehouseScope = WH-HCM-01)
 	loginBody := []byte(`{"email":"wh.hcm@commercelab.vn","password":"Dev-Passw0rd-2026"}`)
@@ -54,6 +55,7 @@ func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
 	// 3. Làm mới token qua POST /auth/refresh
 	refBody, _ := json.Marshal(map[string]string{"refreshToken": loginResp.Data.RefreshToken})
 	refReq := httptest.NewRequest(http.MethodPost, "/auth/refresh", bytes.NewReader(refBody))
+	refReq.Header.Set("Content-Type", "application/json")
 	refRec := httptest.NewRecorder()
 	srv.ServeHTTP(refRec, refReq)
 
@@ -64,7 +66,7 @@ func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
 
 func TestLoginValidationResponse(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(newFakeStore(t), true)
+	srv := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"email":""}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -141,9 +143,87 @@ func (f *fakeStore) FindByID(_ context.Context, id string) (repository.User, err
 	return repository.User{}, repository.ErrUserNotFound
 }
 
+// fakeTokens mimics repository.RefreshRepository in memory (the real one is covered by integration tests).
+type fakeTokens struct {
+	mu      sync.Mutex
+	byHash  map[string]*repository.RefreshTokenRecord
+	revoked map[string]bool // token id -> revoked
+	family  map[string]string
+	expired map[string]bool // token id -> treated as expired
+}
+
+func newFakeTokens() *fakeTokens {
+	return &fakeTokens{
+		byHash:  map[string]*repository.RefreshTokenRecord{},
+		revoked: map[string]bool{},
+		family:  map[string]string{},
+		expired: map[string]bool{},
+	}
+}
+
+func (f *fakeTokens) Create(_ context.Context, rec repository.RefreshTokenRecord, hash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := rec
+	f.byHash[hash] = &cp
+	f.family[rec.ID] = rec.FamilyID
+	return nil
+}
+
+func (f *fakeTokens) Rotate(_ context.Context, presented string, next repository.RefreshTokenRecord, nextHash string) (repository.RefreshTokenRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.byHash[presented]
+	if !ok {
+		return repository.RefreshTokenRecord{}, repository.ErrRefreshInvalid
+	}
+	if f.revoked[cur.ID] {
+		for id, fam := range f.family {
+			if fam == cur.FamilyID {
+				f.revoked[id] = true
+			}
+		}
+		return repository.RefreshTokenRecord{}, repository.ErrRefreshReused
+	}
+	if f.expired[cur.ID] {
+		return repository.RefreshTokenRecord{}, repository.ErrRefreshExpired
+	}
+	f.revoked[cur.ID] = true
+	next.UserID, next.FamilyID = cur.UserID, cur.FamilyID
+	f.byHash[nextHash] = &next
+	f.family[next.ID] = next.FamilyID
+	return next, nil
+}
+
+func (f *fakeTokens) RevokeFamilyOf(_ context.Context, hash string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.byHash[hash]
+	if !ok {
+		return nil
+	}
+	for id, fam := range f.family {
+		if fam == cur.FamilyID {
+			f.revoked[id] = true
+		}
+	}
+	return nil
+}
+
+func newTestServer(t *testing.T) http.Handler {
+	t.Helper()
+	return NewServer(newFakeStore(t), newFakeTokens(), true)
+}
+
+func newOutageServer(t *testing.T) http.Handler {
+	t.Helper()
+	users := repository.NewUserRepository(unreachablePool(t))
+	return NewServer(users, repository.NewRefreshRepository(users), true)
+}
+
 func TestLoginRejectsWrongPasswordUnknownEmailAndInactiveUser(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(newFakeStore(t), true)
+	srv := newTestServer(t)
 	for name, body := range map[string]string{
 		"wrong password": `{"email":"lan@example.com","password":"not-the-password"}`,
 		"unknown email":  `{"email":"nobody@example.com","password":"` + testPassword + `"}`,
@@ -174,9 +254,9 @@ func unreachablePool(t *testing.T) *pgxpool.Pool {
 
 func TestStoreOutageAnswers503InsteadOfSeededUser(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewUserRepository(unreachablePool(t)), true)
+	srv := newOutageServer(t)
 
-	refreshToken, err := auth.SignRefreshToken("user-lan", "CUSTOMER", "NONE")
+	refreshToken, err := auth.SignRefreshToken("user-lan", "CUSTOMER", "NONE", "rt-1")
 	if err != nil {
 		t.Fatalf("sign refresh token: %v", err)
 	}
