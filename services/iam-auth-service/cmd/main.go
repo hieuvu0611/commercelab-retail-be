@@ -29,7 +29,13 @@ type UserProfile struct {
 	RefreshToken   string `json:"refreshToken,omitempty"`
 }
 
-func NewServer(repo *repository.UserRepository, dbConnected bool) http.Handler {
+// UserStore is what the HTTP handlers need from the user repository.
+type UserStore interface {
+	Authenticate(ctx context.Context, email, password string) (repository.User, error)
+	FindByID(ctx context.Context, id string) (repository.User, error)
+}
+
+func NewServer(repo UserStore, dbConnected bool) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -165,15 +171,15 @@ func main() {
 		}
 	}
 
+	// IAM has no in-memory fallback: it never serves users that are not in Postgres,
+	// so ALLOW_MEMORY_FALLBACK does not apply here.
 	pool, err := db.ConnectPostgres(context.Background(), dbURL)
-	if err := dependency.CheckStartup("iam-auth-service", "postgres", err); err != nil {
-		log.Fatal(err)
+	if err != nil {
+		log.Fatalf("[iam-auth-service] postgres is required and unavailable: %v", err)
 	}
-	if pool != nil {
-		defer pool.Close()
-	}
+	defer pool.Close()
 
 	repo := repository.NewUserRepository(pool)
-	log.Printf("[iam-auth-service] listening on :%s (schema: iam, dbConnected: %v)", port, pool != nil)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, pool != nil)))
+	log.Printf("[iam-auth-service] listening on :%s (schema: iam)", port)
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, true)))
 }

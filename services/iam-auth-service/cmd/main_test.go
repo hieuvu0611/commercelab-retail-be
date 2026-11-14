@@ -10,15 +10,16 @@ import (
 	"testing"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/password"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/repository"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
-	srv := NewServer(repository.NewUserRepository(nil), false)
+	srv := NewServer(newFakeStore(t), true)
 
 	// 1. Đăng nhập với tài khoản Nhân viên Kho HCM (I08: WarehouseScope = WH-HCM-01)
-	loginBody := []byte(`{"email":"wh.hcm@commercelab.vn","password":"123456"}`)
+	loginBody := []byte(`{"email":"wh.hcm@commercelab.vn","password":"Dev-Passw0rd-2026"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginBody))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -60,7 +61,7 @@ func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
 }
 
 func TestLoginValidationResponse(t *testing.T) {
-	srv := NewServer(repository.NewUserRepository(nil), false)
+	srv := NewServer(newFakeStore(t), true)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"email":""}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -75,6 +76,69 @@ func TestLoginValidationResponse(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnprocessableEntity || body.Code != "VALIDATION_FAILED" || len(body.Errors["email"]) == 0 || len(body.Errors["password"]) == 0 || body.CorrelationID == "" {
 		t.Fatalf("unexpected validation response: %d %+v", rec.Code, body)
+	}
+}
+
+// fakeStore is an in-memory UserStore for handler tests; production code has no in-memory users.
+type fakeStore struct {
+	byID map[string]repository.User
+}
+
+const testPassword = "Dev-Passw0rd-2026"
+
+func newFakeStore(t *testing.T) *fakeStore {
+	t.Helper()
+	hash, err := password.Hash(testPassword)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	users := []repository.User{
+		{ID: "user-lan", Email: "lan@example.com", Name: "Lan", PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true},
+		{ID: "staff-wh-hcm", Email: "wh.hcm@commercelab.vn", Name: "Warehouse HCM", PasswordHash: hash, Role: "WAREHOUSE_STAFF", WarehouseScope: "WH-HCM-01", IsActive: true},
+		{ID: "user-off", Email: "off@example.com", Name: "Off", PasswordHash: hash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: false},
+	}
+	store := &fakeStore{byID: map[string]repository.User{}}
+	for _, u := range users {
+		store.byID[u.ID] = u
+	}
+	return store
+}
+
+func (f *fakeStore) Authenticate(_ context.Context, email, plain string) (repository.User, error) {
+	for _, u := range f.byID {
+		if u.Email != email {
+			continue
+		}
+		if ok, _ := password.Verify(plain, u.PasswordHash); ok && u.IsActive {
+			return u, nil
+		}
+	}
+	return repository.User{}, repository.ErrInvalidCredentials
+}
+
+func (f *fakeStore) FindByID(_ context.Context, id string) (repository.User, error) {
+	if u, ok := f.byID[id]; ok {
+		return u, nil
+	}
+	return repository.User{}, repository.ErrUserNotFound
+}
+
+func TestLoginRejectsWrongPasswordUnknownEmailAndInactiveUser(t *testing.T) {
+	srv := NewServer(newFakeStore(t), true)
+	for name, body := range map[string]string{
+		"wrong password": `{"email":"lan@example.com","password":"not-the-password"}`,
+		"unknown email":  `{"email":"nobody@example.com","password":"` + testPassword + `"}`,
+		"inactive user":  `{"email":"off@example.com","password":"` + testPassword + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "INVALID_CREDENTIALS") {
+				t.Fatalf("status = %d, body = %s; want 401 INVALID_CREDENTIALS", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -108,7 +172,7 @@ func TestStoreOutageAnswers503InsteadOfSeededUser(t *testing.T) {
 		body   string
 		bearer string
 	}{
-		{name: "login", method: http.MethodPost, path: "/api/v1/auth/login", body: `{"email":"lan@example.com","password":"123456"}`},
+		{name: "login", method: http.MethodPost, path: "/api/v1/auth/login", body: `{"email":"lan@example.com","password":"x"}`},
 		{name: "refresh", method: http.MethodPost, path: "/auth/refresh", body: `{"refreshToken":"` + refreshToken + `"}`},
 		{name: "me", method: http.MethodGet, path: "/api/v1/auth/me", bearer: accessToken},
 	}

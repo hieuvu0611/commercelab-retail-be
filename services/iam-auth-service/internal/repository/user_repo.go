@@ -2,19 +2,18 @@ package repository
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"sync"
+	"strings"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/password"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
-	ErrUserNotFound       = errors.New("không tìm thấy tài khoản")
-	ErrInvalidCredentials = errors.New("email hoặc mật khẩu không chính xác")
+	ErrUserNotFound       = errors.New("user not found")
+	ErrInvalidCredentials = errors.New("email or password is incorrect")
 )
 
 type User struct {
@@ -27,103 +26,71 @@ type User struct {
 	IsActive       bool   `json:"isActive"`
 }
 
+// UserRepository reads users from the iam schema in Postgres. There is no in-memory fallback:
+// when Postgres fails, callers receive an error marked with dependency.ErrUnavailable.
 type UserRepository struct {
-	pool     *pgxpool.Pool
-	mu       sync.RWMutex
-	byEmail  map[string]User
-	byUserID map[string]User
+	pool *pgxpool.Pool
 }
 
-func HashPassword(raw string) string {
-	sum := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(sum[:])
-}
-
-// NewUserRepository returns a repository backed by pool. A nil pool selects the seeded in-memory
-// users, which is only meant for development and tests (ALLOW_MEMORY_FALLBACK=true).
 func NewUserRepository(pool *pgxpool.Pool) *UserRepository {
-	defaultHash := HashPassword("123456")
-	seeds := []User{
-		{ID: "user-lan", Email: "lan@example.com", Name: "Khách hàng Lan", PasswordHash: defaultHash, Role: "CUSTOMER", WarehouseScope: "NONE", IsActive: true},
-		{ID: "staff-wh-hcm", Email: "wh.hcm@commercelab.vn", Name: "Nhân viên Kho HCM", PasswordHash: defaultHash, Role: "WAREHOUSE_STAFF", WarehouseScope: "WH-HCM-01", IsActive: true},
-		{ID: "staff-wh-hn", Email: "wh.hn@commercelab.vn", Name: "Nhân viên Kho HN", PasswordHash: defaultHash, Role: "WAREHOUSE_STAFF", WarehouseScope: "WH-HN-01", IsActive: true},
-		{ID: "staff-cskh", Email: "cskh@commercelab.vn", Name: "Chuyên viên CSKH", PasswordHash: defaultHash, Role: "CSKH", WarehouseScope: "ALL", IsActive: true},
-		{ID: "staff-finance", Email: "finance@commercelab.vn", Name: "Kế toán Đối soát", PasswordHash: defaultHash, Role: "FINANCE", WarehouseScope: "ALL", IsActive: true},
-		{ID: "mgr-ops", Email: "ops.mgr@commercelab.vn", Name: "Quản lý Vận hành", PasswordHash: defaultHash, Role: "OPS_MGR", WarehouseScope: "ALL", IsActive: true},
-	}
-	byEmail := make(map[string]User, len(seeds))
-	byID := make(map[string]User, len(seeds))
-	for _, u := range seeds {
-		byEmail[u.Email] = u
-		byID[u.ID] = u
-	}
-	return &UserRepository{
-		pool:     pool,
-		byEmail:  byEmail,
-		byUserID: byID,
-	}
+	return &UserRepository{pool: pool}
 }
 
-func (r *UserRepository) Authenticate(ctx context.Context, email, password string) (User, error) {
+// decoyHash is verified when the email is unknown so that unknown and wrong-password logins cost the same.
+var decoyHash, _ = password.Hash("decoy-password-for-timing")
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// Authenticate returns the active user whose password matches. It never reveals whether the email exists.
+func (r *UserRepository) Authenticate(ctx context.Context, email, plain string) (User, error) {
 	u, err := r.FindByEmail(ctx, email)
 	if dependency.IsUnavailable(err) {
 		return User{}, err
 	}
 	if err != nil {
+		_, _ = password.Verify(plain, decoyHash)
 		return User{}, ErrInvalidCredentials
 	}
-	if !u.IsActive || u.PasswordHash != HashPassword(password) {
+	ok, verr := password.Verify(plain, u.PasswordHash)
+	if verr != nil || !ok || !u.IsActive {
 		return User{}, ErrInvalidCredentials
+	}
+	if password.NeedsRehash(u.PasswordHash) {
+		r.upgradeHash(ctx, u.ID, plain)
 	}
 	return u, nil
 }
 
+// upgradeHash re-hashes a password with the current parameters. It is best effort: login already succeeded.
+func (r *UserRepository) upgradeHash(ctx context.Context, userID, plain string) {
+	hash, err := password.Hash(plain)
+	if err != nil {
+		return
+	}
+	_, _ = r.pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = $2`, hash, userID)
+}
+
+const selectUser = `SELECT id, email, full_name, password_hash, role, warehouse_scope, is_active FROM users`
+
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (User, error) {
-	if r.pool != nil {
-		var u User
-		err := r.pool.QueryRow(ctx, `
-			SELECT id, email, full_name, password_hash, role, warehouse_scope, is_active
-			FROM users
-			WHERE email = $1
-		`, email).Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.WarehouseScope, &u.IsActive)
-		if err == nil {
-			return u, nil
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			return User{}, ErrUserNotFound
-		}
-		return User{}, dependency.Wrap(err)
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	u, ok := r.byEmail[email]
-	if !ok {
-		return User{}, ErrUserNotFound
-	}
-	return u, nil
+	return r.findOne(ctx, selectUser+` WHERE email = $1`, normalizeEmail(email))
 }
 
 func (r *UserRepository) FindByID(ctx context.Context, id string) (User, error) {
-	if r.pool != nil {
-		var u User
-		err := r.pool.QueryRow(ctx, `
-			SELECT id, email, full_name, password_hash, role, warehouse_scope, is_active
-			FROM users
-			WHERE id = $1
-		`, id).Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.WarehouseScope, &u.IsActive)
-		if err == nil {
-			return u, nil
-		}
-		if errors.Is(err, pgx.ErrNoRows) {
-			return User{}, ErrUserNotFound
-		}
-		return User{}, dependency.Wrap(err)
+	return r.findOne(ctx, selectUser+` WHERE id = $1`, id)
+}
+
+func (r *UserRepository) findOne(ctx context.Context, query string, arg string) (User, error) {
+	var u User
+	err := r.pool.QueryRow(ctx, query, arg).
+		Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.WarehouseScope, &u.IsActive)
+	if err == nil {
+		return u, nil
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	u, ok := r.byUserID[id]
-	if !ok {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return User{}, ErrUserNotFound
 	}
-	return u, nil
+	return User{}, dependency.Wrap(err)
 }
