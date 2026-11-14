@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"sync"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
@@ -20,12 +21,61 @@ var (
 )
 
 type ProductCatalogDoc struct {
-	ProductID    string           `json:"productId"`
-	Name         string           `json:"name"`
-	CategoryType string           `json:"categoryType"`
-	Status       string           `json:"status"`
-	Specs        map[string]any   `json:"specs"`
-	Skus         []map[string]any `json:"skus"`
+	ProductID         string           `json:"productId"`
+	Name              string           `json:"name"`
+	PrimaryCategoryID string           `json:"primaryCategoryId"`
+	CategoryIDs       []string         `json:"categoryIds"`
+	VariantAxes       []string         `json:"variantAxes"`
+	Status            string           `json:"status"`
+	Specs             map[string]any   `json:"specs"`
+	Skus              []map[string]any `json:"skus"`
+}
+
+// productDocFromBSON maps a stored product document (without SKUs) to the API shape. The id is the document id
+// (documents written before the product model have it in "product_id"); spec keys are normalized to camelCase
+// so legacy snake_case specs read the same as new ones.
+func productDocFromBSON(d bson.M) ProductCatalogDoc {
+	id, _ := d["_id"].(string)
+	if id == "" {
+		id, _ = d["product_id"].(string)
+	}
+	name, _ := d["name"].(string)
+	status, _ := d["status"].(string)
+	primary, _ := d["primaryCategoryId"].(string)
+	specs, err := domain.NormalizeSpecs(asStringMap(d["specs"]))
+	if err != nil {
+		log.Printf("[catalog] product %s has invalid specs, serving none: %v", id, err)
+		specs = map[string]any{}
+	}
+	return ProductCatalogDoc{
+		ProductID: id, Name: name, PrimaryCategoryID: primary, Status: status, Specs: specs,
+		CategoryIDs: stringList(d["categoryIds"]), VariantAxes: stringList(d["variantAxes"]),
+	}
+}
+
+func asStringMap(v any) map[string]any {
+	switch m := v.(type) {
+	case bson.M:
+		return m
+	case map[string]any:
+		return m
+	}
+	return nil
+}
+
+func stringList(v any) []string {
+	out := []string{}
+	switch list := v.(type) {
+	case bson.A:
+		for _, item := range list {
+			if s, ok := item.(string); ok {
+				out = append(out, s)
+			}
+		}
+	case []string:
+		out = append(out, list...)
+	}
+	return out
 }
 
 type SkuPrice struct {
@@ -107,33 +157,23 @@ func (r *CatalogPricingRepository) ListPublishedProducts(ctx context.Context) ([
 		}
 		out := make([]ProductCatalogDoc, 0, len(docs))
 		for _, d := range docs {
-			prodID, _ := d["product_id"].(string)
-			name, _ := d["name"].(string)
-			cat, _ := d["category_type"].(string)
-			status, _ := d["status"].(string)
-			specs, _ := d["specs"].(bson.M)
-			skus, err := r.loadProductSkus(ctx, prodID)
+			doc := productDocFromBSON(d)
+			skus, err := r.loadProductSkus(ctx, doc.ProductID)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, ProductCatalogDoc{
-				ProductID:    prodID,
-				Name:         name,
-				CategoryType: cat,
-				Status:       status,
-				Specs:        specs,
-				Skus:         skus,
-			})
+			doc.Skus = skus
+			out = append(out, doc)
 		}
 		return out, nil
 	}
 
 	return []ProductCatalogDoc{
 		{
-			ProductID:    "PROD-BALO-CITY",
-			Name:         "Balo City Chống Nước Đa Năng",
-			CategoryType: "BACKPACK",
-			Status:       "PUBLISHED",
+			ProductID:   "PROD-BALO-CITY",
+			Name:        "Balo City Chống Nước Đa Năng",
+			VariantAxes: []string{"color", "capacity"},
+			Status:      "PUBLISHED",
 			Specs: map[string]any{
 				"capacityLiters":        20,
 				"laptopCompartmentInch": 15.6,
@@ -145,10 +185,10 @@ func (r *CatalogPricingRepository) ListPublishedProducts(ctx context.Context) ([
 			},
 		},
 		{
-			ProductID:    "PROD-BOTTLE-ECO",
-			Name:         "Bình Nước Giữ Nhiệt Eco",
-			CategoryType: "THERMOS_BOTTLE",
-			Status:       "PUBLISHED",
+			ProductID:   "PROD-BOTTLE-ECO",
+			Name:        "Bình Nước Giữ Nhiệt Eco",
+			VariantAxes: []string{"color", "capacity"},
+			Status:      "PUBLISHED",
 			Specs: map[string]any{
 				"volumeMl":          500,
 				"keepHotHours":      12,

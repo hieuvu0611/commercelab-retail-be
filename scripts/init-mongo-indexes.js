@@ -6,8 +6,10 @@
 const dbRef = db.getSiblingDB('commerce_lab_doc');
 
 // 1. Catalog Products (B01 — Thông số kỹ thuật đa ngành hàng)
-dbRef.catalog_products.createIndex({ product_id: 1 }, { unique: true });
-dbRef.catalog_products.createIndex({ category_type: 1, status: 1 });
+dbRef.catalog_products.createIndex({ slug: 1 }, { unique: true });
+dbRef.catalog_products.createIndex({ status: 1, primaryCategoryId: 1 });
+dbRef.catalog_products.createIndex({ categoryIds: 1 });
+dbRef.catalog_sku_specs.createIndex({ productId: 1 });
 
 // 2. Order Commercial Snapshots (I04 — Hợp đồng đóng băng lúc mua)
 dbRef.order_commercial_snapshots.createIndex({ order_id: 1 }, { unique: true });
@@ -27,58 +29,91 @@ dbRef.payment_raw_webhooks.createIndex({ received_at: 1 }, { expireAfterSeconds:
 dbRef.notify_user_inboxes.createIndex({ recipient_id: 1, is_read: 1, created_at: -1 });
 dbRef.notify_user_inboxes.createIndex({ created_at: 1 }, { expireAfterSeconds: 7776000 });
 
-// Seed 2 sản phẩm chuẩn SC01 (Balo City & Bình nước) với cấu trúc thông số khác nhau
+// Seed 2 sản phẩm chuẩn SC01 (Balo City & Bình nước). Product model of P2-T03: camelCase fields, variant axes,
+// SKUs in catalog_sku_specs (their prices live in Postgres pricing.sku_prices).
 dbRef.catalog_products.updateOne(
-  { product_id: 'PROD-BALO-CITY' },
+  { _id: 'PROD-BALO-CITY' },
   {
     $setOnInsert: {
-      product_id: 'PROD-BALO-CITY',
+      _id: 'PROD-BALO-CITY',
+      slug: 'city-backpack',
       name: 'Balo City Chống Nước Đa Năng',
-      category_type: 'BACKPACK',
+      description: '',
+      brand: '',
+      primaryCategoryId: '',
+      categoryIds: [],
+      variantAxes: ['color', 'capacity'],
       status: 'PUBLISHED',
       specs: {
-        capacity_liters: 20,
-        laptop_compartment_inch: 15.6,
+        capacityLiters: 20,
+        laptopCompartmentInch: 15.6,
         material: 'Cordura Ballistic Nylon',
-        water_resistance: 'IPX4',
+        waterResistance: 'IPX4',
       },
-      skus: [
-        {
-          sku_id: 'SKU-BALO-BLACK-20L',
-          color: 'Đen',
-          size: '20L',
-          unit_price_vnd: 300000,
-        },
-      ],
-      created_at: new Date(),
+      images: [],
+      version: 1,
+      createdBy: 'seed',
+      updatedBy: 'seed',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+  },
+  { upsert: true }
+);
+dbRef.catalog_sku_specs.updateOne(
+  { _id: 'SKU-BALO-BLACK-20L' },
+  {
+    $setOnInsert: {
+      _id: 'SKU-BALO-BLACK-20L',
+      productId: 'PROD-BALO-CITY',
+      attributes: { color: 'Đen', capacity: '20L' },
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     },
   },
   { upsert: true }
 );
 
 dbRef.catalog_products.updateOne(
-  { product_id: 'PROD-BOTTLE-ECO' },
+  { _id: 'PROD-BOTTLE-ECO' },
   {
     $setOnInsert: {
-      product_id: 'PROD-BOTTLE-ECO',
+      _id: 'PROD-BOTTLE-ECO',
+      slug: 'eco-insulated-bottle',
       name: 'Bình Nước Giữ Nhiệt Eco',
-      category_type: 'THERMOS_BOTTLE',
+      description: '',
+      brand: '',
+      primaryCategoryId: '',
+      categoryIds: [],
+      variantAxes: ['color', 'capacity'],
       status: 'PUBLISHED',
       specs: {
-        volume_ml: 500,
-        keep_hot_hours: 12,
-        keep_cold_hours: 24,
-        inner_core_material: 'Inox 316',
+        volumeMl: 500,
+        keepHotHours: 12,
+        keepColdHours: 24,
+        innerCoreMaterial: 'Inox 316',
       },
-      skus: [
-        {
-          sku_id: 'SKU-BOTTLE-BLUE-500ML',
-          color: 'Xanh',
-          size: '500ml',
-          unit_price_vnd: 100000,
-        },
-      ],
-      created_at: new Date(),
+      images: [],
+      version: 1,
+      createdBy: 'seed',
+      updatedBy: 'seed',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+  },
+  { upsert: true }
+);
+dbRef.catalog_sku_specs.updateOne(
+  { _id: 'SKU-BOTTLE-BLUE-500ML' },
+  {
+    $setOnInsert: {
+      _id: 'SKU-BOTTLE-BLUE-500ML',
+      productId: 'PROD-BOTTLE-ECO',
+      attributes: { color: 'Xanh', capacity: '500ml' },
+      isActive: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     },
   },
   { upsert: true }
