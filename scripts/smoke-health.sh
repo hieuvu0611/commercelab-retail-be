@@ -13,6 +13,11 @@ free_port() {
   python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
 }
 
+# The services refuse to start without JWT secrets; these exist only for this throw-away project.
+JWT_ACCESS_SECRET="$(openssl rand -hex 32)"
+JWT_REFRESH_SECRET="$(openssl rand -hex 32)"
+export JWT_ACCESS_SECRET JWT_REFRESH_SECRET
+
 # Use free host ports so the smoke run never collides with a stack that is already running.
 export POSTGRES_HOST_PORT="$(free_port)" MONGO_HOST_PORT="$(free_port)" REDIS_HOST_PORT="$(free_port)"
 export REDPANDA_KAFKA_HOST_PORT="$(free_port)" REDPANDA_ADMIN_HOST_PORT="$(free_port)"

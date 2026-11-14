@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
@@ -156,10 +157,32 @@ func NewServer(cartStorage *CartStorage, proxyRouter *proxy.Router, redisConnect
 	return middleware.Chain(mux)
 }
 
+// Config is the typed start-up configuration of the API gateway.
+type Config struct {
+	Port      string
+	RedisAddr string
+	RedisPass string
+}
+
+// loadConfig reads and validates the environment, including the mandatory JWT secrets.
+// It also installs the secrets into pkg/auth. Every problem is reported in one error.
+func loadConfig() (Config, error) {
+	l := config.NewLoader()
+	auth.LoadSecrets(l)
+	cfg := Config{
+		Port:      l.Optional("API_GATEWAY_PORT", "8080"),
+		RedisAddr: l.Optional("REDIS_ADDR", "localhost:6379"),
+		RedisPass: l.Optional("REDIS_PASSWORD", ""),
+	}
+	return cfg, l.Err()
+}
+
 func main() {
-	port := config.EnvOrDefault("API_GATEWAY_PORT", "8080")
-	redisAddr := config.EnvOrDefault("REDIS_ADDR", "localhost:6379")
-	redisPass := config.EnvOrDefault("REDIS_PASSWORD", "")
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("[api-gateway] %v", err)
+	}
+	port, redisAddr, redisPass := cfg.Port, cfg.RedisAddr, cfg.RedisPass
 
 	redisClient, err := db.ConnectRedis(context.Background(), redisAddr, redisPass)
 	if err := dependency.CheckStartup("api-gateway", "redis", err); err != nil {

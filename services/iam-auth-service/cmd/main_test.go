@@ -10,12 +10,14 @@ import (
 	"testing"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/password"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/repository"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
+	authtest.Configure(t)
 	srv := NewServer(newFakeStore(t), true)
 
 	// 1. Đăng nhập với tài khoản Nhân viên Kho HCM (I08: WarehouseScope = WH-HCM-01)
@@ -61,6 +63,7 @@ func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
 }
 
 func TestLoginValidationResponse(t *testing.T) {
+	authtest.Configure(t)
 	srv := NewServer(newFakeStore(t), true)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBufferString(`{"email":""}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -124,6 +127,7 @@ func (f *fakeStore) FindByID(_ context.Context, id string) (repository.User, err
 }
 
 func TestLoginRejectsWrongPasswordUnknownEmailAndInactiveUser(t *testing.T) {
+	authtest.Configure(t)
 	srv := NewServer(newFakeStore(t), true)
 	for name, body := range map[string]string{
 		"wrong password": `{"email":"lan@example.com","password":"not-the-password"}`,
@@ -154,6 +158,7 @@ func unreachablePool(t *testing.T) *pgxpool.Pool {
 }
 
 func TestStoreOutageAnswers503InsteadOfSeededUser(t *testing.T) {
+	authtest.Configure(t)
 	srv := NewServer(repository.NewUserRepository(unreachablePool(t)), true)
 
 	refreshToken, err := auth.SignRefreshToken("user-lan", "CUSTOMER", "NONE")
@@ -193,5 +198,41 @@ func TestStoreOutageAnswers503InsteadOfSeededUser(t *testing.T) {
 				t.Fatalf("missing DEPENDENCY_UNAVAILABLE code: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestLoadConfigFailsWithoutJWTSecrets(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("JWT_ACCESS_SECRET", "")
+	t.Setenv("JWT_REFRESH_SECRET", "short")
+	auth.Reset()
+	t.Cleanup(auth.Reset)
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected a configuration error")
+	}
+	for _, want := range []string{"JWT_ACCESS_SECRET is required", "JWT_REFRESH_SECRET must be at least 32 bytes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+	if _, signErr := auth.SignAccessToken("u", "CUSTOMER", "NONE"); signErr == nil {
+		t.Fatal("tokens must not work when the configuration is invalid")
+	}
+}
+
+func TestLoadConfigAcceptsStrongSecrets(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("JWT_ACCESS_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("JWT_REFRESH_SECRET", "fedcba9876543210fedcba9876543210")
+	auth.Reset()
+	t.Cleanup(auth.Reset)
+
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := auth.SignAccessToken("u", "CUSTOMER", "NONE"); err != nil {
+		t.Fatalf("tokens must work after a valid configuration: %v", err)
 	}
 }

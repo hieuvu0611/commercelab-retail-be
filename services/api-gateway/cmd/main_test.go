@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
 	"github.com/hieuvu0611/commercelab-retail-be/services/api-gateway/internal/proxy"
 )
 
@@ -21,6 +22,7 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestProxiedResponseContainsOnlyGatewayCorrelationID(t *testing.T) {
+	authtest.Configure(t)
 	for _, upstreamID := range []string{"req-test", "different-id", ""} {
 		t.Run("upstream_"+upstreamID, func(t *testing.T) {
 			rt := proxy.NewRouter(proxy.DefaultTargetsFromEnv())
@@ -48,6 +50,7 @@ func TestProxiedResponseContainsOnlyGatewayCorrelationID(t *testing.T) {
 }
 
 func TestGatewayCartAndAuthenticatedReverseProxy(t *testing.T) {
+	authtest.Configure(t)
 	var capturedUserID, capturedRole, capturedWarehouseScope, capturedHost string
 
 	rt := proxy.NewRouter(proxy.DefaultTargetsFromEnv())
@@ -111,6 +114,7 @@ func TestGatewayCartAndAuthenticatedReverseProxy(t *testing.T) {
 }
 
 func TestCartStoreOutageAnswers503(t *testing.T) {
+	authtest.Configure(t)
 	redisClient := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: time.Second, MaxRetries: -1})
 	t.Cleanup(func() { _ = redisClient.Close() })
 	srv := NewServer(NewCartStorage(redisClient), proxy.NewRouter(proxy.ServiceTargets{}), true)
@@ -135,5 +139,41 @@ func TestCartStoreOutageAnswers503(t *testing.T) {
 				t.Fatalf("missing DEPENDENCY_UNAVAILABLE code: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestLoadConfigFailsWithoutJWTSecrets(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("JWT_ACCESS_SECRET", "")
+	t.Setenv("JWT_REFRESH_SECRET", "short")
+	auth.Reset()
+	t.Cleanup(auth.Reset)
+
+	_, err := loadConfig()
+	if err == nil {
+		t.Fatal("expected a configuration error")
+	}
+	for _, want := range []string{"JWT_ACCESS_SECRET is required", "JWT_REFRESH_SECRET must be at least 32 bytes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+	if _, signErr := auth.SignAccessToken("u", "CUSTOMER", "NONE"); signErr == nil {
+		t.Fatal("tokens must not work when the configuration is invalid")
+	}
+}
+
+func TestLoadConfigAcceptsStrongSecrets(t *testing.T) {
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("JWT_ACCESS_SECRET", "0123456789abcdef0123456789abcdef")
+	t.Setenv("JWT_REFRESH_SECRET", "fedcba9876543210fedcba9876543210")
+	auth.Reset()
+	t.Cleanup(auth.Reset)
+
+	if _, err := loadConfig(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := auth.SignAccessToken("u", "CUSTOMER", "NONE"); err != nil {
+		t.Fatalf("tokens must work after a valid configuration: %v", err)
 	}
 }

@@ -18,6 +18,12 @@ x-go-env: &go-env
   GOMAXPROCS: "1"
   GOMEMLIMIT: "220MiB"
 
+# JWT signing secrets come from the environment or a local .env file (see .env.example). They are mandatory:
+# a service that needs them exits with a clear message when they are missing or shorter than 32 bytes.
+x-jwt-env: &jwt-env
+  JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-}
+  JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-}
+
 x-store-env: &store-env
   MONGO_URI: mongodb://mongo_admin:mongo_password@mongodb:27017/commerce_lab_doc?authSource=admin
   MONGO_DATABASE: commerce_lab_doc
@@ -156,7 +162,7 @@ services:
       args:
         SERVICE_NAME: api-gateway
     environment:
-      <<: *go-env
+      <<: [*go-env, *jwt-env]
       API_GATEWAY_PORT: "8080"
       REDIS_ADDR: redis:6379
       IAM_SERVICE_URL: http://iam-auth-service:8087
@@ -318,7 +324,7 @@ services:
       args:
         SERVICE_NAME: iam-auth-service
     environment:
-      <<: *go-env
+      <<: [*go-env, *jwt-env]
       IAM_AUTH_PORT: 8087
       DATABASE_URL_IAM: postgres://iam_svc_user:iam_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=iam
       MIGRATE_ON_START: "true"
