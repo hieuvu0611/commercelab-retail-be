@@ -22,6 +22,9 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/migrations"
 )
 
+// minWebhookSecretBytes is the shortest carrier webhook signing secret accepted outside APP_ENV=dev.
+const minWebhookSecretBytes = 32
+
 // consumerGroup is the consumer group of this service on the order topic.
 const consumerGroup = "fulfillment-shipping-service"
 
@@ -35,6 +38,8 @@ type Deps struct {
 	Shipments shipment.Store
 	// Stock hands the order's stock over in inventory.
 	Stock StockHandover
+	// WebhookSecret signs carrier webhook bodies (HMAC-SHA256, hex, X-Signature); empty rejects every notice.
+	WebhookSecret string
 	// Now is the clock (default: UTC wall clock).
 	Now func() time.Time
 }
@@ -57,6 +62,7 @@ func NewServer(d Deps) http.Handler {
 		}, nil)
 	})
 	registerStaffRoutes(mux, d)
+	registerWebhookRoutes(mux, d)
 	return middleware.Chain(mux)
 }
 
@@ -66,6 +72,7 @@ func main() {
 
 	secrets := config.NewLoader()
 	auth.LoadSecrets(secrets)
+	webhookSecret := secrets.Secret("CARRIER_WEBHOOK_SECRET", minWebhookSecretBytes)
 	if err := secrets.Err(); err != nil {
 		log.Fatalf("[fulfillment-shipping-service] %v", err)
 	}
@@ -100,5 +107,5 @@ func main() {
 	}()
 
 	log.Printf("[fulfillment-shipping-service] listening on :%s (schema: fulfillment, brokers: %s)", port, brokers)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(Deps{Shipments: store, Stock: stock})))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(Deps{Shipments: store, Stock: stock, WebhookSecret: webhookSecret})))
 }

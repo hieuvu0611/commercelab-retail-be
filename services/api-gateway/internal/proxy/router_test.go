@@ -50,6 +50,7 @@ func TestResolveTargetRoutesEveryPublicPrefixToItsService(t *testing.T) {
 		{"/api/v1/vouchers/WELCOME10/eligibility", "order"},
 		{"/api/v1/payments/o-1/refund-reservations", "payment"},
 		{"/api/v1/shipments/s-1/handover", "fulfillment"},
+		{"/api/v1/shipments/webhooks/carrier", "fulfillment"},
 		{"/api/v1/shipments/s-1/stop-for-cancel", "fulfillment"},
 		{"/api/v1/reconciliations/evaluate", "ledger"},
 		{"/api/v1/backoffice/exception-cases", "backoffice"},

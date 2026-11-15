@@ -26,6 +26,8 @@ var publicAllowlist = []publicEndpoint{
 	{method: http.MethodGet, path: "/api/v1/inventory/availability"},
 	// The payment provider cannot hold an access token; the payment service verifies the HMAC signature of the body.
 	{method: http.MethodPost, path: "/api/v1/payments/webhooks/simulator"},
+	// The carrier cannot hold an access token; the fulfillment service verifies the HMAC signature of the body.
+	{method: http.MethodPost, path: "/api/v1/shipments/webhooks/carrier"},
 	{method: http.MethodPost, path: "/api/v1/auth/login"},
 	{method: http.MethodPost, path: "/api/v1/auth/register"},
 	{method: http.MethodPost, path: "/api/v1/auth/refresh"},

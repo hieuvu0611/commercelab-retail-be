@@ -19,7 +19,7 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, status, version, handed_over_at, created_at, updated_at`
+const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, created_at, updated_at`
 
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -29,21 +29,21 @@ type querier interface {
 func load(ctx context.Context, q querier, where string, arg string) (Shipment, error) {
 	var s Shipment
 	err := q.QueryRow(ctx, `SELECT `+shipmentColumns+` FROM fulfillment.shipments WHERE `+where+` = $1`, arg).
-		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.Status, &s.Version, &s.HandedOverAt, &s.CreatedAt, &s.UpdatedAt)
+		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Shipment{}, ErrNotFound
 	}
 	if err != nil {
 		return Shipment{}, dependency.Wrap(err)
 	}
-	rows, err := q.Query(ctx, `SELECT sku_id, quantity, picked_quantity FROM fulfillment.shipment_items WHERE shipment_id = $1 ORDER BY sku_id`, s.ShipmentID)
+	rows, err := q.Query(ctx, `SELECT sku_id, quantity, picked_quantity, delivered_quantity FROM fulfillment.shipment_items WHERE shipment_id = $1 ORDER BY sku_id`, s.ShipmentID)
 	if err != nil {
 		return Shipment{}, dependency.Wrap(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var it Item
-		if err := rows.Scan(&it.SkuID, &it.Quantity, &it.PickedQuantity); err != nil {
+		if err := rows.Scan(&it.SkuID, &it.Quantity, &it.PickedQuantity, &it.DeliveredQuantity); err != nil {
 			return Shipment{}, dependency.Wrap(err)
 		}
 		s.Items = append(s.Items, it)
@@ -140,13 +140,28 @@ func (p *PostgresStore) List(ctx context.Context, f Filter) ([]Shipment, int, er
 }
 
 func (p *PostgresStore) Save(ctx context.Context, s Shipment, expectedVersion int64, ev ...events.DomainEvent) error {
+	return p.SaveCarrierEvent(ctx, s, expectedVersion, "", ev...)
+}
+
+func (p *PostgresStore) SaveCarrierEvent(ctx context.Context, s Shipment, expectedVersion int64, carrierEventID string, ev ...events.DomainEvent) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return dependency.Wrap(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	tag, err := tx.Exec(ctx, `UPDATE fulfillment.shipments SET status = $3, version = $4, updated_at = $5, handed_over_at = $6 WHERE shipment_id = $1 AND version = $2`,
-		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt, s.HandedOverAt)
+	if carrierEventID != "" {
+		// The primary key makes a concurrent copy of the same notice wait here and then see 0 rows.
+		tag, err := tx.Exec(ctx, `INSERT INTO fulfillment.carrier_events (event_id, shipment_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, carrierEventID, s.ShipmentID)
+		if err != nil {
+			return dependency.Wrap(err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrDuplicateEvent
+		}
+	}
+	tag, err := tx.Exec(ctx, `UPDATE fulfillment.shipments SET status = $3, version = $4, updated_at = $5, handed_over_at = $6,
+		delivered_at = $7, return_window_ends_at = $8, failure_reason = $9 WHERE shipment_id = $1 AND version = $2`,
+		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt, s.HandedOverAt, s.DeliveredAt, s.ReturnWindowEndsAt, s.FailureReason)
 	if err != nil {
 		return dependency.Wrap(err)
 	}
@@ -161,8 +176,8 @@ func (p *PostgresStore) Save(ctx context.Context, s Shipment, expectedVersion in
 		return ErrStaleVersion
 	}
 	for _, it := range s.Items {
-		if _, err := tx.Exec(ctx, `UPDATE fulfillment.shipment_items SET picked_quantity = $3 WHERE shipment_id = $1 AND sku_id = $2`,
-			s.ShipmentID, it.SkuID, it.PickedQuantity); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE fulfillment.shipment_items SET picked_quantity = $3, delivered_quantity = $4 WHERE shipment_id = $1 AND sku_id = $2`,
+			s.ShipmentID, it.SkuID, it.PickedQuantity, it.DeliveredQuantity); err != nil {
 			return dependency.Wrap(err)
 		}
 	}

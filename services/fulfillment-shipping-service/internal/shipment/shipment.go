@@ -14,10 +14,13 @@ import (
 type Status string
 
 const (
-	StatusPendingPick Status = "PENDING_PICK"
-	StatusPicking     Status = "PICKING"
-	StatusPacked      Status = "PACKED"
-	StatusHandedOver  Status = "HANDED_OVER"
+	StatusPendingPick    Status = "PENDING_PICK"
+	StatusPicking        Status = "PICKING"
+	StatusPacked         Status = "PACKED"
+	StatusHandedOver     Status = "HANDED_OVER"
+	StatusInTransit      Status = "IN_TRANSIT"
+	StatusDelivered      Status = "DELIVERED"
+	StatusDeliveryFailed Status = "DELIVERY_FAILED"
 )
 
 var (
@@ -25,15 +28,18 @@ var (
 	ErrNotFound = errors.New("shipment not found")
 	// ErrStaleVersion means the shipment changed since it was read, so nothing was stored.
 	ErrStaleVersion = errors.New("shipment was changed by someone else")
+	// ErrDuplicateEvent means the carrier event id was already applied, so nothing was stored.
+	ErrDuplicateEvent = errors.New("carrier event was already applied")
 	// ErrInvalid means a shipment cannot be built from the given data.
 	ErrInvalid = errors.New("invalid shipment")
 )
 
 // Item is one line of the pick list.
 type Item struct {
-	SkuID          string `json:"skuId"`
-	Quantity       int64  `json:"quantity"`
-	PickedQuantity int64  `json:"pickedQuantity"`
+	SkuID             string `json:"skuId"`
+	Quantity          int64  `json:"quantity"`
+	PickedQuantity    int64  `json:"pickedQuantity"`
+	DeliveredQuantity int64  `json:"deliveredQuantity"`
 }
 
 // Shipment is one parcel of an order. Version grows with every change (optimistic locking).
@@ -46,8 +52,12 @@ type Shipment struct {
 	Items        []Item     `json:"items"`
 	Version      int64      `json:"version"`
 	HandedOverAt *time.Time `json:"handedOverAt,omitempty"`
-	CreatedAt    time.Time  `json:"createdAt"`
-	UpdatedAt    time.Time  `json:"updatedAt"`
+	DeliveredAt  *time.Time `json:"deliveredAt,omitempty"`
+	// ReturnWindowEndsAt is DeliveredAt plus ReturnWindow (P07); nil until delivered.
+	ReturnWindowEndsAt *time.Time `json:"returnWindowEndsAt,omitempty"`
+	FailureReason      string     `json:"failureReason,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
 }
 
 // ID is the shipment id of an order: derived, so a repeated event always maps to the same parcel.
@@ -74,6 +84,9 @@ func New(orderID, userID, warehouseID string, items []Item, now time.Time) (Ship
 	return Shipment{ShipmentID: ID(orderID), OrderID: orderID, UserID: userID, WarehouseID: warehouseID,
 		Status: StatusPendingPick, Items: merged, Version: 1, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}, nil
 }
+
+// ReturnWindow is how long after delivery a customer may request a return.
+const ReturnWindow = 7 * 24 * time.Hour
 
 // DefaultLimit is the page size of List when Filter.Limit is 0; MaxLimit caps it.
 const (
@@ -104,4 +117,7 @@ type Store interface {
 	// Save stores s (status, version and line quantities) when the stored version is expectedVersion, together
 	// with ev in one step; ErrStaleVersion when it is not, ErrNotFound when the shipment does not exist.
 	Save(ctx context.Context, s Shipment, expectedVersion int64, ev ...events.DomainEvent) error
+	// SaveCarrierEvent is Save plus recording the carrier's event id in the same step; ErrDuplicateEvent (and
+	// nothing stored) when that id was applied before, so a repeated notice never dispatches or delivers twice.
+	SaveCarrierEvent(ctx context.Context, s Shipment, expectedVersion int64, carrierEventID string, ev ...events.DomainEvent) error
 }

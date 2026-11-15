@@ -14,11 +14,12 @@ type MemoryStore struct {
 	mu        sync.Mutex
 	byID      map[string]Shipment
 	processed map[string]bool
+	carrier   map[string]bool
 	events    map[string][]events.DomainEvent
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{byID: map[string]Shipment{}, processed: map[string]bool{}, events: map[string][]events.DomainEvent{}}
+	return &MemoryStore{byID: map[string]Shipment{}, processed: map[string]bool{}, carrier: map[string]bool{}, events: map[string][]events.DomainEvent{}}
 }
 
 func clone(s Shipment) Shipment {
@@ -81,15 +82,25 @@ func (m *MemoryStore) List(_ context.Context, f Filter) ([]Shipment, int, error)
 	return all[from:min(from+limit, total)], total, nil
 }
 
-func (m *MemoryStore) Save(_ context.Context, s Shipment, expectedVersion int64, ev ...events.DomainEvent) error {
+func (m *MemoryStore) Save(ctx context.Context, s Shipment, expectedVersion int64, ev ...events.DomainEvent) error {
+	return m.SaveCarrierEvent(ctx, s, expectedVersion, "", ev...)
+}
+
+func (m *MemoryStore) SaveCarrierEvent(_ context.Context, s Shipment, expectedVersion int64, carrierEventID string, ev ...events.DomainEvent) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if carrierEventID != "" && m.carrier[carrierEventID] {
+		return ErrDuplicateEvent
+	}
 	cur, ok := m.byID[s.ShipmentID]
 	if !ok {
 		return ErrNotFound
 	}
 	if cur.Version != expectedVersion {
 		return ErrStaleVersion
+	}
+	if carrierEventID != "" {
+		m.carrier[carrierEventID] = true
 	}
 	m.byID[s.ShipmentID] = clone(s)
 	m.events[s.ShipmentID] = append(m.events[s.ShipmentID], ev...)
