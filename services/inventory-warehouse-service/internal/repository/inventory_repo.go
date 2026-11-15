@@ -32,19 +32,27 @@ type InventoryRepository struct {
 	engine       *domain.LedgerEngine
 	mu           sync.Mutex
 	reservations map[string]*ReservationRecord
+	movements    []domain.Movement // memory mode only; guarded by mu
 }
 
 func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
-	engine := domain.NewLedgerEngine([]domain.StockItem{
+	seed := []domain.StockItem{
 		{SkuID: "SKU-BALO-BLACK-20L", WarehouseID: "WH-HCM-01", OnHand: 10, Unsellable: 0, Reserved: 0, Committed: 0, Version: 1},
 		{SkuID: "SKU-BOTTLE-BLUE-500ML", WarehouseID: "WH-HCM-01", OnHand: 20, Unsellable: 0, Reserved: 0, Committed: 0, Version: 1},
 		{SkuID: "SKU-BALO-BLACK-20L", WarehouseID: "WH-HN-01", OnHand: 5, Unsellable: 0, Reserved: 0, Committed: 0, Version: 1},
-	})
-	return &InventoryRepository{
+	}
+	repo := &InventoryRepository{
 		pool:         pool,
-		engine:       engine,
+		engine:       domain.NewLedgerEngine(seed),
 		reservations: make(map[string]*ReservationRecord),
 	}
+	for _, it := range seed { // the memory ledger explains the seeded stock like the migration does for Postgres
+		repo.appendMovement(domain.Movement{
+			SkuID: it.SkuID, WarehouseID: it.WarehouseID, Type: domain.MovementOpening, Qty: it.OnHand,
+			ActorID: "system:seed", Reason: "memory seed",
+		})
+	}
+	return repo
 }
 
 func (r *InventoryRepository) GetStock(ctx context.Context, warehouseID, skuID string) (domain.StockItem, bool, error) {
@@ -131,6 +139,9 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 				`, line.Quantity, line.SkuID, warehouseID); err != nil {
 					return nil, dependency.Wrap(err)
 				}
+				if err := insertMovement(ctx, tx, lineMovement(domain.MovementReserve, warehouseID, orderID, line, "order reservation")); err != nil {
+					return nil, err
+				}
 			}
 
 			resID := "RES-" + orderID
@@ -165,6 +176,7 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 	if err := r.engine.ReserveAllOrNothing(warehouseID, lines); err != nil {
 		return nil, err
 	}
+	r.logLines(domain.MovementReserve, warehouseID, orderID, lines, "order reservation")
 	rec := &ReservationRecord{
 		ReservationID: "RES-" + orderID,
 		OrderID:       orderID,
@@ -213,6 +225,9 @@ func (r *InventoryRepository) CommitOrderReservation(ctx context.Context, orderI
 				`, line.Quantity, line.SkuID, rec.WarehouseID); err != nil {
 					return nil, dependency.Wrap(err)
 				}
+				if err := insertMovement(ctx, tx, lineMovement(domain.MovementCommit, rec.WarehouseID, orderID, line, "payment confirmed")); err != nil {
+					return nil, err
+				}
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE reservations SET status = 'COMMITTED', version = version + 1 WHERE order_id = $1
@@ -241,6 +256,7 @@ func (r *InventoryRepository) CommitOrderReservation(ctx context.Context, orderI
 	if err := r.engine.CommitReservation(rec.WarehouseID, rec.Lines); err != nil {
 		return nil, err
 	}
+	r.logLines(domain.MovementCommit, rec.WarehouseID, orderID, rec.Lines, "payment confirmed")
 	rec.Status = "COMMITTED"
 	cp := *rec
 	return &cp, nil
@@ -281,6 +297,9 @@ func (r *InventoryRepository) ReleaseOrderReservation(ctx context.Context, order
 				`, line.Quantity, line.SkuID, rec.WarehouseID); err != nil {
 					return nil, dependency.Wrap(err)
 				}
+				if err := insertMovement(ctx, tx, lineMovement(domain.MovementRelease, rec.WarehouseID, orderID, line, "reservation released")); err != nil {
+					return nil, err
+				}
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE reservations SET status = 'RELEASED', version = version + 1 WHERE order_id = $1
@@ -313,6 +332,7 @@ func (r *InventoryRepository) ReleaseOrderReservation(ctx context.Context, order
 	if err := r.engine.ReleaseReservation(rec.WarehouseID, rec.Lines); err != nil {
 		return nil, err
 	}
+	r.logLines(domain.MovementRelease, rec.WarehouseID, orderID, rec.Lines, "reservation released")
 	rec.Status = "RELEASED"
 	cp := *rec
 	return &cp, nil
@@ -378,6 +398,9 @@ func (r *InventoryRepository) HandoverOrderShipment(ctx context.Context, orderID
 				`, line.Quantity, line.SkuID, rec.WarehouseID); err != nil {
 					return nil, dependency.Wrap(err)
 				}
+				if err := insertMovement(ctx, tx, lineMovement(domain.MovementHandover, rec.WarehouseID, orderID, line, "handed over to courier")); err != nil {
+					return nil, err
+				}
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE reservations SET status = 'HANDED_OVER', version = version + 1 WHERE order_id = $1
@@ -405,6 +428,7 @@ func (r *InventoryRepository) HandoverOrderShipment(ctx context.Context, orderID
 	if err := r.engine.HandoverShipment(rec.WarehouseID, rec.Lines); err != nil {
 		return nil, err
 	}
+	r.logLines(domain.MovementHandover, rec.WarehouseID, orderID, rec.Lines, "handed over to courier")
 	rec.Status = "HANDED_OVER"
 	cp := *rec
 	return &cp, nil

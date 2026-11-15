@@ -29,10 +29,12 @@ migrate:
 test:
 	$(GO_ENV) go test -v -race ./...
 
-# Load the demo catalog (categories, ~30 products with variants, prices, placeholder images). Idempotent.
+# Load the demo catalog (categories, ~30 products with variants, prices, placeholder images) and its opening stock
+# (mixed in stock / low / out) into the inventory schema. Idempotent.
 # Needs the migrated Postgres and MongoDB (see DATABASE_URL_PRICING, MONGO_URI, MONGO_DATABASE).
 seed:
 	$(GO_ENV) go run ./services/catalog-pricing-service/cmd/seed
+	$(GO_ENV) go run ./services/catalog-pricing-service/cmd/seed-stock
 
 # Run the integration tests against disposable Postgres, Mongo and Redis (own Compose project, always cleaned up).
 test-integration:

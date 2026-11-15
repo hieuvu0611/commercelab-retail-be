@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sort"
 	"sync"
+	"time"
 )
 
 // DefaultWarehouseID is the warehouse that read endpoints use when the caller names none.
@@ -32,6 +33,35 @@ type StockItem struct {
 // Khả dụng = Tồn thực tế - Không bán được - Giữ tạm - Cam kết chưa xuất
 func (s StockItem) Available() int64 {
 	return s.OnHand - s.Unsellable - s.Reserved - s.Committed
+}
+
+// Movement types of the stock ledger (I06): every change of a stock bucket has one record.
+const (
+	MovementOpening       = "OPENING"
+	MovementReserve       = "RESERVE"
+	MovementCommit        = "COMMIT"
+	MovementRelease       = "RELEASE"
+	MovementHandover      = "HANDOVER"
+	MovementReturnReceive = "RETURN_RECEIVE"
+	MovementQCPass        = "QC_PASS"
+	MovementAdjust        = "ADJUST"
+)
+
+// SystemActor is the actor of movements that no signed-in user caused (order flow, workers).
+const SystemActor = "system"
+
+// Movement is one ledger record: who changed which bucket of which SKU in which warehouse, why and when.
+type Movement struct {
+	ID          int64     `json:"id"`
+	SkuID       string    `json:"skuId"`
+	WarehouseID string    `json:"warehouseId"`
+	Type        string    `json:"type"`
+	Qty         int64     `json:"qty"`
+	RefType     string    `json:"refType,omitempty"`
+	RefID       string    `json:"refId,omitempty"`
+	ActorID     string    `json:"actorId"`
+	Reason      string    `json:"reason"`
+	At          time.Time `json:"at"`
 }
 
 type ReserveLine struct {
@@ -188,6 +218,38 @@ func (e *LedgerEngine) ApproveReturnQC(warehouseID, skuID string, qty int64) err
 		return ErrInvalidReservationState
 	}
 	st.Unsellable -= qty
+	st.Version++
+	return nil
+}
+
+// List returns the stock records of one warehouse sorted by SKU id.
+func (e *LedgerEngine) List(warehouseID string) []StockItem {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]StockItem, 0)
+	for k, it := range e.stocks {
+		if k.warehouse == warehouseID {
+			out = append(out, *it)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SkuID < out[j].SkuID })
+	return out
+}
+
+// AddOpening adds opening stock to on hand (creating the record when needed).
+func (e *LedgerEngine) AddOpening(warehouseID, skuID string, qty int64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if qty <= 0 {
+		return ErrInvalidLines
+	}
+	k := stockKey{skuID, warehouseID}
+	st, ok := e.stocks[k]
+	if !ok {
+		st = &StockItem{SkuID: skuID, WarehouseID: warehouseID, Version: 1}
+		e.stocks[k] = st
+	}
+	st.OnHand += qty
 	st.Version++
 	return nil
 }

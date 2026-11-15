@@ -155,3 +155,67 @@ func TestOppositeLineOrdersDoNotDeadlockAgainstPostgres(t *testing.T) {
 		t.Fatalf("reserved = %d, want %d", got.Reserved, workers)
 	}
 }
+
+func movementTypes(t *testing.T, repo *InventoryRepository, sku string) []string {
+	t.Helper()
+	rows, total, err := repo.ListMovements(context.Background(), MovementFilter{WarehouseID: testWarehouse, SkuID: sku, Page: 1, Limit: 50})
+	if err != nil || int(total) != len(rows) {
+		t.Fatalf("ListMovements(%s): total %d, rows %d, err %v", sku, total, len(rows), err)
+	}
+	var types []string
+	for i := len(rows) - 1; i >= 0; i-- { // oldest first
+		types = append(types, rows[i].Type)
+	}
+	return types
+}
+
+func TestOpeningStockIsOnceAndLedgerFollowsTheOrderLifecycleAgainstPostgres(t *testing.T) {
+	pool := integrationPool(t)
+	repo := NewInventoryRepository(pool)
+	ctx := context.Background()
+	sku := fmt.Sprintf("IT-OPEN-%d", time.Now().UnixNano())
+	other := sku + "-B"
+
+	if err := repo.RecordOpeningStock(ctx, testWarehouse, "mgr-1", "initial count", []domain.ReserveLine{{SkuID: sku, Quantity: 10}}); err != nil {
+		t.Fatalf("opening stock: %v", err)
+	}
+	var exists *OpeningStockExistsError
+	err := repo.RecordOpeningStock(ctx, testWarehouse, "mgr-1", "again", []domain.ReserveLine{{SkuID: other, Quantity: 1}, {SkuID: sku, Quantity: 1}})
+	if !errors.As(err, &exists) || exists.SkuID != sku {
+		t.Fatalf("second opening = %v, want OpeningStockExistsError for %s", err, sku)
+	}
+	if _, ok, _ := repo.GetStock(ctx, testWarehouse, other); ok {
+		t.Fatal("a rejected opening call must apply nothing")
+	}
+
+	orderID := "IT-ORDER-" + sku
+	steps := []func() error{
+		func() error {
+			_, e := repo.ReserveForOrder(ctx, orderID, testWarehouse, []domain.ReserveLine{{SkuID: sku, Quantity: 2}})
+			return e
+		},
+		func() error { _, e := repo.CommitOrderReservation(ctx, orderID); return e },
+		func() error { _, e := repo.HandoverOrderShipment(ctx, orderID); return e },
+	}
+	for i, step := range steps {
+		if err := step(); err != nil {
+			t.Fatalf("step %d: %v", i, err)
+		}
+	}
+	if got := stockOf(t, repo, sku); got.OnHand != 8 || got.Available() != 8 {
+		t.Fatalf("after handover: %+v, want on hand 8 and available 8", got)
+	}
+	got := movementTypes(t, repo, sku)
+	want := []string{"OPENING", "RESERVE", "COMMIT", "HANDOVER"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ledger = %v, want %v", got, want)
+	}
+
+	// A failed (all-or-nothing) reservation leaves no movement behind.
+	if _, err := repo.ReserveForOrder(ctx, orderID+"-X", testWarehouse, []domain.ReserveLine{{SkuID: sku, Quantity: 99}}); !errors.Is(err, domain.ErrInsufficientStock) {
+		t.Fatalf("over-reserve = %v", err)
+	}
+	if n := len(movementTypes(t, repo, sku)); n != 4 {
+		t.Fatalf("ledger rows = %d, want 4", n)
+	}
+}
