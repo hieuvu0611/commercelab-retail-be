@@ -15,19 +15,24 @@ type Status string
 
 const (
 	StatusPendingPick Status = "PENDING_PICK"
+	StatusPicking     Status = "PICKING"
+	StatusPacked      Status = "PACKED"
 )
 
 var (
 	// ErrNotFound means no shipment matches.
 	ErrNotFound = errors.New("shipment not found")
+	// ErrStaleVersion means the shipment changed since it was read, so nothing was stored.
+	ErrStaleVersion = errors.New("shipment was changed by someone else")
 	// ErrInvalid means a shipment cannot be built from the given data.
 	ErrInvalid = errors.New("invalid shipment")
 )
 
 // Item is one line of the pick list.
 type Item struct {
-	SkuID    string `json:"skuId"`
-	Quantity int64  `json:"quantity"`
+	SkuID          string `json:"skuId"`
+	Quantity       int64  `json:"quantity"`
+	PickedQuantity int64  `json:"pickedQuantity"`
 }
 
 // Shipment is one parcel of an order. Version grows with every change (optimistic locking).
@@ -68,6 +73,20 @@ func New(orderID, userID, warehouseID string, items []Item, now time.Time) (Ship
 		Status: StatusPendingPick, Items: merged, Version: 1, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}, nil
 }
 
+// DefaultLimit is the page size of List when Filter.Limit is 0; MaxLimit caps it.
+const (
+	DefaultLimit = 50
+	MaxLimit     = 100
+)
+
+// Filter selects shipments for List. Zero values mean "any"; Limit 0 means 50.
+type Filter struct {
+	Status        Status
+	Warehouses    []string // only these warehouses
+	AllWarehouses bool     // ignore Warehouses (a token scoped to ALL)
+	Offset, Limit int
+}
+
 // Store persists shipments. Implementations must be safe for concurrent use.
 type Store interface {
 	// Create stores s, the lines and ev in one step, and records eventID as processed. When the event was already
@@ -78,4 +97,9 @@ type Store interface {
 	Get(ctx context.Context, shipmentID string) (Shipment, error)
 	// GetByOrder returns the shipment of an order or ErrNotFound.
 	GetByOrder(ctx context.Context, orderID string) (Shipment, error)
+	// List returns shipments oldest first and the number of matches ignoring paging.
+	List(ctx context.Context, f Filter) ([]Shipment, int, error)
+	// Save stores s (status, version and line quantities) when the stored version is expectedVersion, together
+	// with ev in one step; ErrStaleVersion when it is not, ErrNotFound when the shipment does not exist.
+	Save(ctx context.Context, s Shipment, expectedVersion int64, ev ...events.DomainEvent) error
 }

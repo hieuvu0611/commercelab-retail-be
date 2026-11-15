@@ -78,6 +78,8 @@ func TestAnonymousCallsToProtectedEndpointsAreRejectedBeforeReachingAnyService(t
 		{http.MethodGet, "/api/v1/admin/vouchers"},
 		{http.MethodGet, "/api/v1/admin/orders"},
 		{http.MethodGet, "/api/v1/admin/orders/O-1"},
+		{http.MethodGet, "/api/v1/admin/shipments"},
+		{http.MethodPost, "/api/v1/admin/shipments/SHP-O-1/scan"},
 		{http.MethodGet, "/api/v1/orders"},
 		{http.MethodGet, "/api/v1/carts/me"},
 		{http.MethodPut, "/api/v1/carts/me/items/SKU-1"},

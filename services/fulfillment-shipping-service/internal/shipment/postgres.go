@@ -36,14 +36,14 @@ func load(ctx context.Context, q querier, where string, arg string) (Shipment, e
 	if err != nil {
 		return Shipment{}, dependency.Wrap(err)
 	}
-	rows, err := q.Query(ctx, `SELECT sku_id, quantity FROM fulfillment.shipment_items WHERE shipment_id = $1 ORDER BY sku_id`, s.ShipmentID)
+	rows, err := q.Query(ctx, `SELECT sku_id, quantity, picked_quantity FROM fulfillment.shipment_items WHERE shipment_id = $1 ORDER BY sku_id`, s.ShipmentID)
 	if err != nil {
 		return Shipment{}, dependency.Wrap(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var it Item
-		if err := rows.Scan(&it.SkuID, &it.Quantity); err != nil {
+		if err := rows.Scan(&it.SkuID, &it.Quantity, &it.PickedQuantity); err != nil {
 			return Shipment{}, dependency.Wrap(err)
 		}
 		s.Items = append(s.Items, it)
@@ -94,4 +94,82 @@ func (p *PostgresStore) Create(ctx context.Context, s Shipment, eventID string, 
 		return Shipment{}, false, err
 	}
 	return stored, created, dependency.Wrap(tx.Commit(ctx))
+}
+
+func (p *PostgresStore) List(ctx context.Context, f Filter) ([]Shipment, int, error) {
+	warehouses := f.Warehouses
+	if warehouses == nil {
+		warehouses = []string{}
+	}
+	const where = `WHERE ($1 = '' OR status = $1) AND ($2 OR warehouse_id = ANY($3))`
+	var total int
+	if err := p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM fulfillment.shipments `+where, string(f.Status), f.AllWarehouses, warehouses).Scan(&total); err != nil {
+		return nil, 0, dependency.Wrap(err)
+	}
+	limit := f.Limit
+	if limit <= 0 {
+		limit = DefaultLimit
+	}
+	rows, err := p.pool.Query(ctx, `SELECT shipment_id FROM fulfillment.shipments `+where+` ORDER BY created_at, shipment_id LIMIT $4 OFFSET $5`,
+		string(f.Status), f.AllWarehouses, warehouses, limit, max(f.Offset, 0))
+	if err != nil {
+		return nil, 0, dependency.Wrap(err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, 0, dependency.Wrap(err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, dependency.Wrap(err)
+	}
+	out := make([]Shipment, 0, len(ids))
+	for _, id := range ids {
+		s, err := load(ctx, p.pool, "shipment_id", id)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, s)
+	}
+	return out, total, nil
+}
+
+func (p *PostgresStore) Save(ctx context.Context, s Shipment, expectedVersion int64, ev ...events.DomainEvent) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `UPDATE fulfillment.shipments SET status = $3, version = $4, updated_at = $5 WHERE shipment_id = $1 AND version = $2`,
+		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt)
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 0 {
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM fulfillment.shipments WHERE shipment_id = $1)`, s.ShipmentID).Scan(&exists); err != nil {
+			return dependency.Wrap(err)
+		}
+		if !exists {
+			return ErrNotFound
+		}
+		return ErrStaleVersion
+	}
+	for _, it := range s.Items {
+		if _, err := tx.Exec(ctx, `UPDATE fulfillment.shipment_items SET picked_quantity = $3 WHERE shipment_id = $1 AND sku_id = $2`,
+			s.ShipmentID, it.SkuID, it.PickedQuantity); err != nil {
+			return dependency.Wrap(err)
+		}
+	}
+	for _, e := range ev {
+		if err := outbox.Insert(ctx, tx, OutboxTable, e); err != nil {
+			return dependency.Wrap(err)
+		}
+	}
+	return dependency.Wrap(tx.Commit(ctx))
 }
