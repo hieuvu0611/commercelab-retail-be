@@ -86,6 +86,11 @@ func (f *fakePayments) AttemptState(context.Context, string) (checkout.PaymentSt
 
 func (f *fakePayments) CloseAttempt(context.Context, string) error { f.closes.Add(1); return nil }
 
+func (f *fakePayments) CloseAttemptForCancel(context.Context, string) error {
+	f.closes.Add(1)
+	return nil
+}
+
 type fakeAddresses struct{ err error }
 
 func (f *fakeAddresses) Get(context.Context, string, string) (snapshot.Address, error) {

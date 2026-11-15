@@ -31,3 +31,12 @@ func EventsFor(cur, next Attempt, ch Change, at time.Time) []events.DomainEvent 
 	}
 	return out
 }
+
+// RefundedEvent announces a completed payout. The totals let the order service store absolute values, so a
+// repeated or reordered event changes nothing. Payloads carry ids and amounts only.
+func RefundedEvent(o Obligation, sum Summary, at time.Time) events.DomainEvent {
+	return outbox.NewEvent(events.EventPaymentRefunded, aggregatePayment, o.OrderID, at, map[string]any{
+		"orderId": o.OrderID, "attemptId": o.AttemptID, "amountVnd": o.AmountVND, "reason": o.Reason,
+		"refundedTotalVnd": sum.RefundedVND, "refundPendingVnd": sum.RefundPending, "capturedVnd": sum.CapturedVND,
+	})
+}

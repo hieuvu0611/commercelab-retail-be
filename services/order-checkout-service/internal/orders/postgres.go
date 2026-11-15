@@ -20,12 +20,12 @@ type PostgresStore struct {
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
 const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), status, payment_status,
-	failure_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, refund_pending_vnd, version, expires_at, created_at, updated_at`
+	failure_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, refund_pending_vnd, refunded_amount_vnd, version, expires_at, created_at, updated_at`
 
 func scanOrder(row pgx.Row) (Order, error) {
 	var o Order
 	err := row.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentStatus,
-		&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
+		&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND, &o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
 	return o, err
 }
 
@@ -186,7 +186,7 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	for rows.Next() {
 		var o Order
 		if err := rows.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentStatus,
-			&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND,
+			&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND,
 			&o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt, &o.ItemCount); err != nil {
 			return nil, 0, dependency.Wrap(err)
 		}
@@ -198,6 +198,18 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 func (s *PostgresStore) RecordCapture(ctx context.Context, orderID string, capturedVND, refundPendingVND int64) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE orders.orders SET captured_amount_vnd = $2, refund_pending_vnd = $3, updated_at = $4 WHERE order_id = $1`,
 		orderID, capturedVND, refundPendingVND, time.Now().UTC())
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *PostgresStore) RecordRefund(ctx context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error {
+	tag, err := s.pool.Exec(ctx, `UPDATE orders.orders SET refunded_amount_vnd = $2, refund_pending_vnd = $3, payment_status = $4, updated_at = $5 WHERE order_id = $1`,
+		orderID, refundedVND, refundPendingVND, paymentStatus, time.Now().UTC())
 	if err != nil {
 		return dependency.Wrap(err)
 	}

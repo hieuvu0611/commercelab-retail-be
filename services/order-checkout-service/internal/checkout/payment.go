@@ -140,6 +140,9 @@ func (s *Service) step(ctx context.Context, o orders.Order, ev saga.Event) (orde
 		(res.State == saga.StateFailedClosed && from != saga.StateFailedClosed && o.CapturedVND > 0) {
 		payStatus = PayRefundPending // money is held for a closed order: it goes back to the customer
 	}
+	if refundSettled(o.PaymentStatus) {
+		payStatus = o.PaymentStatus // a replayed report never undoes a payout
+	}
 	if lost, err := s.runEffects(ctx, o, res.Effects); lost {
 		return s.closeLost(ctx, o, from)
 	} else if err != nil {

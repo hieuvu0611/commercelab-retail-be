@@ -17,6 +17,14 @@ const (
 	StatusCapturedLate = "CAPTURED_LATE"
 )
 
+// Reasons of a refund obligation: why money is owed back.
+const (
+	// ReasonLateCapture: the money arrived (or the order closed) after the order's payment window.
+	ReasonLateCapture = "LATE_CAPTURE"
+	// ReasonOrderCancelled: the customer cancelled a paid order before handover.
+	ReasonOrderCancelled = "ORDER_CANCELLED"
+)
+
 // UnknownWindow is how long an UNKNOWN payment may still be captured normally (P05).
 const UnknownWindow = 30 * time.Minute
 
@@ -40,6 +48,8 @@ var (
 	ErrActivePayment = errors.New("a payment attempt is already in progress for this order")
 	// ErrAttemptExists: the order already has a finished attempt; a failed payment closes the order.
 	ErrAttemptExists = errors.New("the order already has a payment attempt")
+	// ErrRefundCeiling: paying this out would refund more than was captured (I03).
+	ErrRefundCeiling = errors.New("a refund cannot exceed the captured amount")
 	// ErrIdempotencyConflict: the key was used for different content.
 	ErrIdempotencyConflict = errors.New("idempotency key was already used with different content")
 )
@@ -64,8 +74,11 @@ type Change struct {
 	Replay bool
 	// CapturedVND is the money newly captured by this call (added to the order's captured total).
 	CapturedVND int64
-	// LateRefundVND is the amount owed back because it was captured after the order was closed (SC05).
+	// LateRefundVND is the amount owed back because it was captured after the order was closed (SC05) or the
+	// order was cancelled after payment.
 	LateRefundVND int64
+	// RefundReason is why LateRefundVND is owed (empty means ReasonLateCapture).
+	RefundReason string
 }
 
 // Apply applies a reported outcome. amountVND is used for CAPTURED only. It never reopens a closed attempt:
@@ -145,13 +158,18 @@ func capture(a Attempt, status string, amountVND int64, now time.Time) Attempt {
 // holds no money becomes EXPIRED_30M, so a capture that still arrives is CAPTURED_LATE and refunded. An attempt
 // that already captured money is CAPTURED_LATE with the whole amount owed back. Finished attempts are a replay.
 func Close(a Attempt, now time.Time) (Attempt, Change, error) {
+	return CloseFor(a, now, ReasonLateCapture)
+}
+
+// CloseFor is Close with the reason the captured money (if any) is owed back.
+func CloseFor(a Attempt, now time.Time, reason string) (Attempt, Change, error) {
 	switch a.Status {
 	case StatusProcessing, StatusUnknown:
 		a.Status, a.OutcomeAt = StatusExpired30m, &now
 		return a, Change{}, nil
 	case StatusCaptured:
 		a.Status = StatusCapturedLate
-		return a, Change{LateRefundVND: a.CapturedAmountVND}, nil
+		return a, Change{LateRefundVND: a.CapturedAmountVND, RefundReason: reason}, nil
 	case StatusCapturedLate, StatusFailed, StatusExpired30m:
 		return a, Change{Replay: true}, nil
 	}

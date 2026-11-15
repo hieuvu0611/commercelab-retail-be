@@ -123,9 +123,24 @@ type paymentView struct {
 	CapturedAmountVND int64  `json:"capturedAmountVnd"`
 }
 
+// refundView is the money owed back for the order: AmountVND is the whole refund, RefundedAmountVND what was
+// already paid out, and Status is PENDING until all of it was paid (DONE after).
 type refundView struct {
-	AmountVND int64  `json:"amountVnd"`
-	Status    string `json:"status"`
+	AmountVND         int64  `json:"amountVnd"`
+	RefundedAmountVND int64  `json:"refundedAmountVnd"`
+	Status            string `json:"status"`
+}
+
+// refundOf describes the refund of an order, nil when nothing was ever owed.
+func refundOf(o orders.Order) *refundView {
+	total := o.RefundPendingVND + o.RefundedVND
+	switch {
+	case o.RefundPendingVND > 0:
+		return &refundView{AmountVND: total, RefundedAmountVND: o.RefundedVND, Status: "PENDING"}
+	case o.RefundedVND > 0:
+		return &refundView{AmountVND: total, RefundedAmountVND: o.RefundedVND, Status: "DONE"}
+	}
+	return nil
 }
 
 // orderDetail is the customer's view of one order: the frozen purchase-time snapshot, the payment and any refund
@@ -174,9 +189,7 @@ func detailOf(r *http.Request, svc *checkout.Service, o orders.Order) orderDetai
 	if o.Status != string(saga.StateFailedClosed) || o.CapturedVND > 0 || o.PaymentStatus != saga.PayUnpaid {
 		d.Payment.AttemptID = ids.PaymentAttemptID(o.OrderID)
 	}
-	if o.RefundPendingVND > 0 {
-		d.RefundObligation = &refundView{AmountVND: o.RefundPendingVND, Status: "PENDING"}
-	}
+	d.RefundObligation = refundOf(o)
 	snap, found, err := svc.Snapshots.Get(r.Context(), o.OrderID)
 	if err != nil {
 		log.Printf("[order] snapshot of order %s unavailable: %s", o.OrderID, "dependency unavailable")

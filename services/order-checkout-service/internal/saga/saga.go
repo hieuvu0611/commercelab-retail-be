@@ -42,6 +42,9 @@ const (
 	PayFailed     = "FAILED"
 	// PayRefundPending: money is held for an order that will not ship; it is owed back to the customer.
 	PayRefundPending = "REFUND_PENDING"
+	// PayRefunded and PayPartiallyRefunded: the owed money was paid back, completely or in part.
+	PayRefunded          = "REFUNDED"
+	PayPartiallyRefunded = "PARTIALLY_REFUNDED"
 )
 
 // Effect is a side effect the caller performs after storing the new state.

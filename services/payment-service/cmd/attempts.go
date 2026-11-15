@@ -28,6 +28,7 @@ const (
 	maxWebhookBytes  = 64 << 10
 	signatureHeader  = "X-Signature"
 	maxEventIDLength = 128
+	maxCloseBytes    = 1 << 10
 )
 
 var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
@@ -248,10 +249,41 @@ func (a *attemptAPI) byOrder(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// closeReason reads the optional body of a close: {"reason":"ORDER_CANCELLED"} says money already captured is owed
+// back because the customer cancelled; no body keeps the default (a late or lost order).
+func closeReason(w http.ResponseWriter, r *http.Request) (string, bool) {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxCloseBytes))
+	if err != nil {
+		response.Error(w, r, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "Request body is too large", nil)
+		return "", false
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return attempt.ReasonLateCapture, true
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil || (body.Reason != "" && body.Reason != attempt.ReasonOrderCancelled) {
+		response.Error(w, r, http.StatusBadRequest, "VALIDATION_FAILED", "The request has invalid fields",
+			map[string][]string{"reason": {"reason must be ORDER_CANCELLED"}})
+		return "", false
+	}
+	if body.Reason == "" {
+		return attempt.ReasonLateCapture, true
+	}
+	return body.Reason, true
+}
+
 // close ends an attempt because the order service closed its order. The order service already knows, so
 // nothing is reported back.
 func (a *attemptAPI) close(w http.ResponseWriter, r *http.Request) {
-	closed, _, err := a.store.Close(r.Context(), r.PathValue("attemptId"))
+	reason, ok := closeReason(w, r)
+	if !ok {
+		return
+	}
+	closed, _, err := a.store.CloseFor(r.Context(), r.PathValue("attemptId"), reason)
 	switch {
 	case errors.Is(err, attempt.ErrNotFound):
 		response.Error(w, r, http.StatusNotFound, "PAYMENT_NOT_FOUND", "Payment attempt not found", nil)

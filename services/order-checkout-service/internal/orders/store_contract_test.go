@@ -270,6 +270,19 @@ func runCaptureContract(t *testing.T, newStore func(t *testing.T) Store, uniq fu
 	if err := s.RecordCapture(ctx, "O-missing", 1, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing order = %v", err)
 	}
+	// A payout moves the amount from owed to refunded, in absolute values (so a repeat changes nothing).
+	for i := 0; i < 2; i++ {
+		if err := s.RecordRefund(ctx, o.OrderID, 660000, 0, "REFUNDED"); err != nil {
+			t.Fatalf("RecordRefund: %v", err)
+		}
+	}
+	got, _ = s.Get(ctx, o.OrderID)
+	if got.RefundedVND != 660000 || got.RefundPendingVND != 0 || got.PaymentStatus != "REFUNDED" || got.CapturedVND != 660000 {
+		t.Fatalf("after the payout = %+v", got)
+	}
+	if err := s.RecordRefund(ctx, "O-missing", 1, 0, "REFUNDED"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing order = %v", err)
+	}
 }
 
 func TestMemoryStoreCapture(t *testing.T) {

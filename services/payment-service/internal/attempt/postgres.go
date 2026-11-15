@@ -130,6 +130,11 @@ func (s *PostgresStore) Apply(ctx context.Context, attemptID string, o Outcome, 
 
 // Close implements Store.
 func (s *PostgresStore) Close(ctx context.Context, attemptID string) (Attempt, Change, error) {
+	return s.CloseFor(ctx, attemptID, ReasonLateCapture)
+}
+
+// CloseFor implements Store.
+func (s *PostgresStore) CloseFor(ctx context.Context, attemptID, reason string) (Attempt, Change, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Attempt{}, Change{}, dependency.Wrap(err)
@@ -142,7 +147,7 @@ func (s *PostgresStore) Close(ctx context.Context, attemptID string) (Attempt, C
 	if err != nil {
 		return Attempt{}, Change{}, dependency.Wrap(err)
 	}
-	next, ch, err := Close(cur, s.now())
+	next, ch, err := CloseFor(cur, s.now(), reason)
 	if err != nil {
 		return cur, Change{}, err
 	}
@@ -173,8 +178,12 @@ func persist(ctx context.Context, tx pgx.Tx, cur, next Attempt, ch Change) error
 		}
 	}
 	if ch.LateRefundVND > 0 {
-		if _, err := tx.Exec(ctx, `INSERT INTO payments.refund_obligations (order_id, attempt_id, amount_vnd, reason) VALUES ($1, $2, $3, 'LATE_CAPTURE')
-			ON CONFLICT (attempt_id) DO NOTHING`, cur.OrderID, attemptID, ch.LateRefundVND); err != nil {
+		reason := ch.RefundReason
+		if reason == "" {
+			reason = ReasonLateCapture
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO payments.refund_obligations (order_id, attempt_id, amount_vnd, reason) VALUES ($1, $2, $3, $4)
+			ON CONFLICT (attempt_id) DO NOTHING`, cur.OrderID, attemptID, ch.LateRefundVND, reason); err != nil {
 			return dependency.Wrap(err)
 		}
 	}
@@ -183,8 +192,8 @@ func persist(ctx context.Context, tx pgx.Tx, cur, next Attempt, ch Change) error
 
 func (s *PostgresStore) Summary(ctx context.Context, orderID string) (Summary, error) {
 	var sum Summary
-	err := s.pool.QueryRow(ctx, `SELECT order_id, expected_amount, captured_amount, refund_pending FROM payments.order_payment_summary WHERE order_id = $1`, orderID).
-		Scan(&sum.OrderID, &sum.ExpectedVND, &sum.CapturedVND, &sum.RefundPending)
+	err := s.pool.QueryRow(ctx, `SELECT order_id, expected_amount, captured_amount, refunded_amount, refund_pending FROM payments.order_payment_summary WHERE order_id = $1`, orderID).
+		Scan(&sum.OrderID, &sum.ExpectedVND, &sum.CapturedVND, &sum.RefundedVND, &sum.RefundPending)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Summary{}, ErrNotFound
 	}
@@ -192,7 +201,7 @@ func (s *PostgresStore) Summary(ctx context.Context, orderID string) (Summary, e
 }
 
 func (s *PostgresStore) Obligations(ctx context.Context, orderID string) ([]Obligation, error) {
-	rows, err := s.pool.Query(ctx, `SELECT order_id, attempt_id, amount_vnd, reason, status FROM payments.refund_obligations WHERE order_id = $1 ORDER BY id`, orderID)
+	rows, err := s.pool.Query(ctx, `SELECT order_id, attempt_id, amount_vnd, reason, status, provider_ref, refunded_at FROM payments.refund_obligations WHERE order_id = $1 ORDER BY id`, orderID)
 	if err != nil {
 		return nil, dependency.Wrap(err)
 	}
@@ -200,10 +209,80 @@ func (s *PostgresStore) Obligations(ctx context.Context, orderID string) ([]Obli
 	var out []Obligation
 	for rows.Next() {
 		var o Obligation
-		if err := rows.Scan(&o.OrderID, &o.AttemptID, &o.AmountVND, &o.Reason, &o.Status); err != nil {
+		if err := rows.Scan(&o.OrderID, &o.AttemptID, &o.AmountVND, &o.Reason, &o.Status, &o.ProviderRef, &o.RefundedAt); err != nil {
 			return nil, dependency.Wrap(err)
 		}
 		out = append(out, o)
 	}
 	return out, dependency.Wrap(rows.Err())
+}
+
+// PendingRefunds implements Store.
+func (s *PostgresStore) PendingRefunds(ctx context.Context, limit int) ([]Obligation, error) {
+	rows, err := s.pool.Query(ctx, `SELECT order_id, attempt_id, amount_vnd, reason, status, provider_ref, refunded_at
+		FROM payments.refund_obligations WHERE status = 'PENDING' ORDER BY id LIMIT $1`, max(limit, 1))
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+	var out []Obligation
+	for rows.Next() {
+		var o Obligation
+		if err := rows.Scan(&o.OrderID, &o.AttemptID, &o.AmountVND, &o.Reason, &o.Status, &o.ProviderRef, &o.RefundedAt); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		out = append(out, o)
+	}
+	return out, dependency.Wrap(rows.Err())
+}
+
+// CompleteRefund implements Store. The obligation row lock serialises concurrent completions, so the payout is
+// recorded, the totals move and the event is written exactly once; the ceiling is also a CHECK constraint.
+func (s *PostgresStore) CompleteRefund(ctx context.Context, attemptID, providerRef string) (Obligation, Summary, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Obligation{}, Summary{}, false, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var o Obligation
+	err = tx.QueryRow(ctx, `SELECT order_id, attempt_id, amount_vnd, reason, status, provider_ref, refunded_at
+		FROM payments.refund_obligations WHERE attempt_id = $1 FOR UPDATE`, attemptID).
+		Scan(&o.OrderID, &o.AttemptID, &o.AmountVND, &o.Reason, &o.Status, &o.ProviderRef, &o.RefundedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Obligation{}, Summary{}, false, ErrNotFound
+	}
+	if err != nil {
+		return Obligation{}, Summary{}, false, dependency.Wrap(err)
+	}
+	readSummary := func() (Summary, error) {
+		var sum Summary
+		err := tx.QueryRow(ctx, `SELECT order_id, expected_amount, captured_amount, refunded_amount, refund_pending FROM payments.order_payment_summary WHERE order_id = $1`, o.OrderID).
+			Scan(&sum.OrderID, &sum.ExpectedVND, &sum.CapturedVND, &sum.RefundedVND, &sum.RefundPending)
+		return sum, dependency.Wrap(err)
+	}
+	if o.Status == ObligationDone {
+		sum, err := readSummary()
+		return o, sum, false, err
+	}
+	at := s.now()
+	tag, err := tx.Exec(ctx, `UPDATE payments.order_payment_summary SET refund_pending = refund_pending - $2, refunded_amount = refunded_amount + $2, version = version + 1
+		WHERE order_id = $1 AND refund_pending >= $2 AND refunded_amount + $2 <= captured_amount`, o.OrderID, o.AmountVND)
+	if err != nil {
+		return Obligation{}, Summary{}, false, dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return Obligation{}, Summary{}, false, ErrRefundCeiling
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payments.refund_obligations SET status = 'DONE', provider_ref = $2, refunded_at = $3 WHERE attempt_id = $1`, attemptID, providerRef, at); err != nil {
+		return Obligation{}, Summary{}, false, dependency.Wrap(err)
+	}
+	o.Status, o.ProviderRef, o.RefundedAt = ObligationDone, providerRef, &at
+	sum, err := readSummary()
+	if err != nil {
+		return Obligation{}, Summary{}, false, err
+	}
+	if err := outbox.Insert(ctx, tx, outbox.PaymentsTable, RefundedEvent(o, sum, at)); err != nil {
+		return Obligation{}, Summary{}, false, dependency.Wrap(err)
+	}
+	return o, sum, true, dependency.Wrap(tx.Commit(ctx))
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/fulfillmentsync"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/paymentsync"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/peer"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
@@ -135,6 +136,16 @@ func main() {
 			Group: "order-checkout-service", Topic: outbox.TopicFor("Shipment")}, shipmentSync.Handle)
 		if err != nil {
 			log.Printf("[order-checkout-service] shipment event consumer stopped: %v", err)
+		}
+	}()
+
+	// Payouts of refunds move the order's money from owed to refunded.
+	paymentSync := &paymentsync.Handler{Refunds: checkoutSvc}
+	go func() {
+		err := eventconsumer.Run(ctx, eventconsumer.Config{Brokers: config.EnvOrDefault("REDPANDA_BROKERS", "localhost:19092"),
+			Group: "order-checkout-service-payments", Topic: outbox.TopicFor("Payment")}, paymentSync.Handle)
+		if err != nil {
+			log.Printf("[order-checkout-service] payment event consumer stopped: %v", err)
 		}
 	}()
 

@@ -54,6 +54,7 @@ type Order struct {
 	TotalPayableVND  int64      `json:"totalPayableVnd"`
 	CapturedVND      int64      `json:"capturedAmountVnd"`
 	RefundPendingVND int64      `json:"refundPendingVnd"`
+	RefundedVND      int64      `json:"refundedAmountVnd"`
 	ItemCount        int64      `json:"itemCount,omitempty"` // set by Query, which does not load items
 	Items            []Item     `json:"items"`
 	Version          int64      `json:"version"`
@@ -67,7 +68,7 @@ type Filter struct {
 	UserID        string
 	Statuses      []string
 	FailureCode   string
-	WarehouseIDs  []string // only orders of these warehouses (a warehouse manager's scope)
+	WarehouseIDs  []string  // only orders of these warehouses (a warehouse manager's scope)
 	UpdatedBefore time.Time // updated at or before
 	UpdatedAfter  time.Time // updated at or after
 	Offset, Limit int       // Limit 0 means 50
@@ -107,6 +108,9 @@ type Store interface {
 	// RecordCapture stores how much money the payment captured and how much of it is owed back (absolute values,
 	// so repeating it changes nothing); ErrNotFound when the order does not exist.
 	RecordCapture(ctx context.Context, orderID string, capturedVND, refundPendingVND int64) error
+	// RecordRefund stores how much was paid back and how much is still owed, with the resulting payment status
+	// (absolute values, so repeating it changes nothing); ErrNotFound when the order does not exist.
+	RecordRefund(ctx context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error
 	// Transition moves the order from one status to another (compare-and-set); ErrStaleState when the order
 	// is not in from, ErrNotFound when it does not exist.
 	// The events are written in the same transaction as the state change, and not at all when it is refused.

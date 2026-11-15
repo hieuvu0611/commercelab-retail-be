@@ -168,6 +168,18 @@ func (s *MemoryStore) RecordCapture(_ context.Context, orderID string, capturedV
 	return nil
 }
 
+func (s *MemoryStore) RecordRefund(_ context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orders[orderID]
+	if !ok {
+		return ErrNotFound
+	}
+	o.RefundedVND, o.RefundPendingVND, o.PaymentStatus, o.UpdatedAt = refundedVND, refundPendingVND, paymentStatus, s.now()
+	s.orders[orderID] = o
+	return nil
+}
+
 func (s *MemoryStore) Transition(_ context.Context, orderID, from, to, paymentStatus, failureCode string, ev ...events.DomainEvent) (Order, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -171,6 +171,17 @@ func (p *Payments) CloseAttempt(ctx context.Context, attemptID string) error {
 	return err
 }
 
+// CloseAttemptForCancel tells the payment service the order was cancelled: captured money is owed back with the
+// reason ORDER_CANCELLED. Like CloseAttempt, an unknown attempt counts as closed.
+func (p *Payments) CloseAttemptForCancel(ctx context.Context, attemptID string) error {
+	_, err := p.client.Do(ctx, http.MethodPost, p.base+"/api/v1/payments/attempts/"+url.PathEscape(attemptID)+"/close",
+		svcclient.Options{Internal: true, IdempotencyKey: "cancel-close-" + attemptID}, map[string]string{"reason": "ORDER_CANCELLED"}, nil)
+	if hasCode(err, http.StatusNotFound, "PAYMENT_NOT_FOUND") {
+		return nil
+	}
+	return err
+}
+
 // Carts calls the catalog service's internal cart route.
 type Carts struct {
 	base   string
