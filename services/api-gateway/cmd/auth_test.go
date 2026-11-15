@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,7 +32,7 @@ func newGateway(t *testing.T) *upstreamRecorder {
 		_, _ = rec.WriteString(`{"message":"upstream ok"}`)
 		return rec.Result(), nil
 	})
-	u.handler = NewServer(NewCartStorage(nil), rt, false)
+	u.handler = NewServer(rt, false)
 	return u
 }
 
@@ -75,7 +74,8 @@ func TestAnonymousCallsToProtectedEndpointsAreRejectedBeforeReachingAnyService(t
 		{http.MethodGet, "/api/v1/notifications/user-1"},
 		{http.MethodGet, "/api/v1/auth/me"},
 		{http.MethodGet, "/api/v1/carts/me"},
-		{http.MethodPut, "/api/v1/carts/me"},
+		{http.MethodPut, "/api/v1/carts/me/items/SKU-1"},
+		{http.MethodPost, "/api/v1/carts/me/merge"},
 		{http.MethodGet, "/api/v1/something-unknown"},
 		{http.MethodGet, "/api/v1/admin/inventory/stock"},
 		{http.MethodGet, "/api/v1/inventory/availabilityx"},  // exact path only
@@ -157,46 +157,6 @@ func TestValidTokenIsForwardedAndForgedIdentityHeadersAreRemoved(t *testing.T) {
 		if v := gw.last.Header.Get(h); v != "" {
 			t.Fatalf("identity header %s = %q must not be forwarded (services read the token)", h, v)
 		}
-	}
-}
-
-func TestCartBelongsToTheTokenSubject(t *testing.T) {
-	gw := newGateway(t)
-	alice := tokenFor(t, auth.Identity{UserID: "user-alice", Roles: []string{"CUSTOMER"}})
-	bob := tokenFor(t, auth.Identity{UserID: "user-bob", Roles: []string{"CUSTOMER"}})
-
-	if rec := gw.do(http.MethodPut, "/api/v1/carts/me", alice, nil, `{"items":[{"skuId":"SKU-BALO-BLACK-20L","quantity":3}]}`); rec.Code != http.StatusOK {
-		t.Fatalf("alice PUT: %d %s", rec.Code, rec.Body.String())
-	}
-
-	read := func(bearer string) (Cart, int) {
-		rec := gw.do(http.MethodGet, "/api/v1/carts/me", bearer, nil, "")
-		var resp struct {
-			Data Cart `json:"data"`
-		}
-		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-		return resp.Data, rec.Code
-	}
-	cart, code := read(alice)
-	if code != http.StatusOK || cart.UserID != "user-alice" || len(cart.Items) != 1 || cart.Items[0].Quantity != 3 {
-		t.Fatalf("alice's cart = %+v (status %d)", cart, code)
-	}
-	cart, code = read(bob)
-	if code != http.StatusOK || cart.UserID != "user-bob" || len(cart.Items) != 0 {
-		t.Fatalf("bob must see his own empty cart, got %+v (status %d)", cart, code)
-	}
-
-	// The cart can no longer be addressed by someone else's user id.
-	if rec := gw.do(http.MethodGet, "/api/v1/carts/user-alice", bob, nil, ""); rec.Code == http.StatusOK && strings.Contains(rec.Body.String(), "user-alice") {
-		t.Fatalf("bob read alice's cart through her user id: %s", rec.Body.String())
-	}
-	// A client-supplied userId in the body is ignored: the cart is always the token subject's.
-	rec := gw.do(http.MethodPut, "/api/v1/carts/me", bob, nil, `{"userId":"user-alice","items":[{"skuId":"SKU-BOTTLE-BLUE-500ML","quantity":1}]}`)
-	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusOK {
-		t.Fatalf("PUT with a userId in the body: %d %s", rec.Code, rec.Body.String())
-	}
-	if aliceCart, _ := read(alice); len(aliceCart.Items) != 1 || aliceCart.Items[0].SkuID != "SKU-BALO-BLACK-20L" {
-		t.Fatalf("bob's write changed alice's cart: %+v", aliceCart)
 	}
 }
 
