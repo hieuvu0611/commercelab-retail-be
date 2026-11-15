@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
@@ -145,5 +146,44 @@ func TestLowStockThresholdComesFromTheEnvironment(t *testing.T) {
 	t.Setenv("INVENTORY_LOW_STOCK_THRESHOLD", "many")
 	if _, err = loadConfig(); err == nil {
 		t.Fatal("a non-numeric threshold must be rejected")
+	}
+}
+
+func TestExceptionHoldEndpoint(t *testing.T) {
+	authtest.Configure(t)
+	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	call(t, srv, http.MethodPost, "/api/v1/inventory/reservations",
+		`{"orderId":"O-HOLD","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`, nil)
+
+	rec := call(t, srv, http.MethodPost, "/api/v1/inventory/reservations/O-HOLD/exception-hold", "", nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "EXCEPTION_HOLD_30M") {
+		t.Fatalf("hold: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = call(t, srv, http.MethodPost, "/api/v1/inventory/reservations/O-NONE/exception-hold", "", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown order: %d, want 404", rec.Code)
+	}
+	call(t, srv, http.MethodPost, "/api/v1/inventory/reservations/O-HOLD/release", "", nil)
+	if rec = call(t, srv, http.MethodPost, "/api/v1/inventory/reservations/O-HOLD/exception-hold", "", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("released order: %d, want 409", rec.Code)
+	}
+}
+
+func TestExpirySweepIntervalIsValidated(t *testing.T) {
+	t.Setenv("JWT_ACCESS_SECRET", strings.Repeat("a", 32))
+	t.Setenv("JWT_REFRESH_SECRET", strings.Repeat("b", 32))
+	t.Cleanup(auth.Reset)
+	cfg, err := loadConfig()
+	if err != nil || cfg.ExpirySweepEvery != 30*time.Second {
+		t.Fatalf("default = %v, err %v; want 30s", cfg.ExpirySweepEvery, err)
+	}
+	t.Setenv("INVENTORY_EXPIRY_SWEEP_INTERVAL", "5s")
+	if cfg, err = loadConfig(); err != nil || cfg.ExpirySweepEvery != 5*time.Second {
+		t.Fatalf("interval = %v, err %v; want 5s", cfg.ExpirySweepEvery, err)
+	}
+	for _, bad := range []string{"soon", "0s", "-1m"} {
+		t.Setenv("INVENTORY_EXPIRY_SWEEP_INTERVAL", bad)
+		if _, err := loadConfig(); err == nil {
+			t.Errorf("%q must be rejected", bad)
+		}
 	}
 }
