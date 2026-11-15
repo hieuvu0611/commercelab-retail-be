@@ -112,9 +112,11 @@ func signRefresh(u repository.User, tokenID, familyID string) (string, repositor
 // Deps are the collaborators of the IAM handler. Admin, Limiter and Audit are optional: without a Limiter
 // nothing is rate limited, without Audit nothing is recorded, without Admin the administration API is absent.
 type Deps struct {
-	Users       UserStore
-	Tokens      TokenStore
-	Admin       AdminStore
+	Users  UserStore
+	Tokens TokenStore
+	Admin  AdminStore
+	// Addresses serves the customer address book; without it the endpoints are absent.
+	Addresses   repository.AddressStore
 	Limiter     ratelimit.Limiter
 	Audit       audit.Recorder
 	DBConnected bool
@@ -524,6 +526,9 @@ func NewServerFromDeps(d Deps) http.Handler {
 	if admin != nil {
 		registerAdminRoutes(mux, admin)
 	}
+	if d.Addresses != nil {
+		registerAddressRoutes(mux, d.Addresses)
+	}
 
 	return middleware.Chain(mux)
 }
@@ -583,6 +588,7 @@ func main() {
 		Users:       repo,
 		Tokens:      repository.NewRefreshRepository(repo),
 		Admin:       repository.NewAdminRepository(repo),
+		Addresses:   repository.NewAddressRepository(pool),
 		Limiter:     ratelimit.NewRedis(redisClient, ratelimit.MaxFailures, ratelimit.Window),
 		Audit:       audit.NewPostgres(pool),
 		DBConnected: true,
