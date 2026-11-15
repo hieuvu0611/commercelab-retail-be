@@ -1,22 +1,36 @@
 package attempt
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
-// Summary is what an order owes and has paid (feeds the refund ceiling, I03).
+// Summary is what an order owes and has paid (feeds the refund ceiling, I03): refunded plus pending never
+// exceeds captured.
 type Summary struct {
 	OrderID       string `json:"orderId"`
 	ExpectedVND   int64  `json:"expectedVnd"`
 	CapturedVND   int64  `json:"capturedVnd"`
+	RefundedVND   int64  `json:"refundedVnd"`
 	RefundPending int64  `json:"refundPendingVnd"`
 }
 
-// Obligation is money to give back to a customer.
+// Obligation statuses.
+const (
+	ObligationPending = "PENDING"
+	ObligationDone    = "DONE"
+)
+
+// Obligation is money to give back to a customer. The attempt id is its identity (one per attempt) and the
+// idempotency key of the payout.
 type Obligation struct {
-	OrderID   string
-	AttemptID string
-	AmountVND int64
-	Reason    string
-	Status    string
+	OrderID     string
+	AttemptID   string
+	AmountVND   int64
+	Reason      string
+	Status      string
+	ProviderRef string
+	RefundedAt  *time.Time
 }
 
 // Store persists attempts. Implementations must be safe for concurrent use and apply an outcome atomically.
@@ -35,6 +49,15 @@ type Store interface {
 	GetByOrder(ctx context.Context, orderID string) (Attempt, error)
 	// Close ends the attempt because its order is closed (see the package-level Close). It is idempotent.
 	Close(ctx context.Context, attemptID string) (Attempt, Change, error)
+	// CloseFor is Close with the reason captured money is owed back (ReasonOrderCancelled for a cancellation).
+	CloseFor(ctx context.Context, attemptID, reason string) (Attempt, Change, error)
+	// PendingRefunds lists obligations that still have to be paid out, oldest first.
+	PendingRefunds(ctx context.Context, limit int) ([]Obligation, error)
+	// CompleteRefund records that the provider paid the obligation of attemptID (providerRef identifies the
+	// payout): the amount moves from refund-pending to refunded and one refunded event is written, all in one
+	// step. done=false means it was already completed and nothing changed; a payout above the captured ceiling
+	// is ErrRefundCeiling and changes nothing. ErrNotFound when the attempt has no obligation.
+	CompleteRefund(ctx context.Context, attemptID, providerRef string) (o Obligation, sum Summary, done bool, err error)
 	// Summary returns the order's payment totals (ErrNotFound when no attempt exists).
 	Summary(ctx context.Context, orderID string) (Summary, error)
 	// Obligations lists the order's refund obligations.

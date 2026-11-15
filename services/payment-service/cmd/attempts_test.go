@@ -431,3 +431,26 @@ func TestAttemptOfAnOrderIsReadOnlyByServices(t *testing.T) {
 		t.Fatalf("unknown order: %d", rec.Code)
 	}
 }
+
+func TestCloseForACancellationOwesTheCapturedAmountWithItsReason(t *testing.T) {
+	f := newFixture(t, true)
+	f.createAttempt("pay-O-1", "O-1", "user-lan", 660000)
+	f.simulate("user-lan", "PAY-O-1", `{"outcome":"CAPTURED"}`)
+	path := "/api/v1/payments/attempts/PAY-O-1/close"
+	h := map[string]string{internalauth.Header: internalToken}
+	for _, bad := range []string{`{"reason":"BECAUSE"}`, `{"other":1}`, `[]`} {
+		if rec := f.do(http.MethodPost, path, h, bad); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s = %d %s", bad, rec.Code, rec.Body.String())
+		}
+	}
+	for i := 0; i < 2; i++ {
+		rec := f.do(http.MethodPost, path, h, `{"reason":"ORDER_CANCELLED"}`)
+		if got := decode[attemptResp](t, rec); rec.Code != http.StatusOK || got.Data.Status != "CAPTURED_LATE" {
+			t.Fatalf("close #%d: %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	obs, _ := f.store.Obligations(context.Background(), "O-1")
+	if len(obs) != 1 || obs[0].Reason != attempt.ReasonOrderCancelled || obs[0].AmountVND != 660000 || obs[0].Status != attempt.ObligationPending {
+		t.Fatalf("obligations = %+v", obs)
+	}
+}

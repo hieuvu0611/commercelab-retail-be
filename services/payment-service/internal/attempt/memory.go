@@ -2,6 +2,7 @@ package attempt
 
 import (
 	"context"
+	"sort"
 
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 	"sync"
@@ -109,20 +110,39 @@ func (s *MemoryStore) store(cur, next Attempt, ch Change) {
 	sum := s.summaries[cur.OrderID]
 	sum.CapturedVND += ch.CapturedVND
 	if ch.LateRefundVND > 0 {
-		sum.RefundPending += ch.LateRefundVND
-		s.obligations[cur.OrderID] = append(s.obligations[cur.OrderID],
-			Obligation{OrderID: cur.OrderID, AttemptID: cur.AttemptID, AmountVND: ch.LateRefundVND, Reason: "LATE_CAPTURE", Status: "PENDING"})
+		reason := ch.RefundReason
+		if reason == "" {
+			reason = ReasonLateCapture
+		}
+		if !s.hasObligation(cur.OrderID, cur.AttemptID) { // one obligation per attempt, however often it is closed
+			sum.RefundPending += ch.LateRefundVND
+			s.obligations[cur.OrderID] = append(s.obligations[cur.OrderID],
+				Obligation{OrderID: cur.OrderID, AttemptID: cur.AttemptID, AmountVND: ch.LateRefundVND, Reason: reason, Status: ObligationPending})
+		}
 	}
 }
 
-func (s *MemoryStore) Close(_ context.Context, attemptID string) (Attempt, Change, error) {
+func (s *MemoryStore) hasObligation(orderID, attemptID string) bool {
+	for _, o := range s.obligations[orderID] {
+		if o.AttemptID == attemptID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *MemoryStore) Close(ctx context.Context, attemptID string) (Attempt, Change, error) {
+	return s.CloseFor(ctx, attemptID, ReasonLateCapture)
+}
+
+func (s *MemoryStore) CloseFor(_ context.Context, attemptID, reason string) (Attempt, Change, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cur, ok := s.byID[attemptID]
 	if !ok {
 		return Attempt{}, Change{}, ErrNotFound
 	}
-	next, ch, err := Close(cur, s.now())
+	next, ch, err := CloseFor(cur, s.now(), reason)
 	if err != nil {
 		return cur, Change{}, err
 	}
@@ -146,4 +166,52 @@ func (s *MemoryStore) Obligations(_ context.Context, orderID string) ([]Obligati
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]Obligation(nil), s.obligations[orderID]...), nil
+}
+
+func (s *MemoryStore) PendingRefunds(_ context.Context, limit int) ([]Obligation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []Obligation
+	for _, list := range s.obligations {
+		for _, o := range list {
+			if o.Status == ObligationPending {
+				out = append(out, o)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].AttemptID < out[j].AttemptID })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) CompleteRefund(_ context.Context, attemptID, providerRef string) (Obligation, Summary, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.byID[attemptID]
+	if !ok {
+		return Obligation{}, Summary{}, false, ErrNotFound
+	}
+	list := s.obligations[a.OrderID]
+	for i, o := range list {
+		if o.AttemptID != attemptID {
+			continue
+		}
+		sum := s.summaries[a.OrderID]
+		if o.Status == ObligationDone {
+			return o, *sum, false, nil
+		}
+		if sum.RefundedVND+o.AmountVND > sum.CapturedVND || o.AmountVND > sum.RefundPending {
+			return Obligation{}, *sum, false, ErrRefundCeiling
+		}
+		at := s.now()
+		o.Status, o.ProviderRef, o.RefundedAt = ObligationDone, providerRef, &at
+		list[i] = o
+		sum.RefundPending -= o.AmountVND
+		sum.RefundedVND += o.AmountVND
+		s.outbox = append(s.outbox, RefundedEvent(o, *sum, at))
+		return o, *sum, true, nil
+	}
+	return Obligation{}, Summary{}, false, ErrNotFound
 }
