@@ -13,10 +13,10 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
 )
 
-func newTestServer(t *testing.T, store voucher.Store) http.Handler {
+func newTestServer(t *testing.T, store *voucher.MemoryStore) http.Handler {
 	t.Helper()
 	authtest.Configure(t)
-	return NewServer(domain.NewCheckoutEngine(), voucher.NewService(store))
+	return NewServer(domain.NewCheckoutEngine(), voucher.NewService(store), voucher.NewAdmin(store))
 }
 
 func bearer(t *testing.T, userID string, roles ...string) string {

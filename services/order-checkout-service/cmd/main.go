@@ -20,7 +20,7 @@ import (
 )
 
 // NewServer builds the order service handler. vouchers is the voucher campaign service.
-func NewServer(engine *domain.CheckoutEngine, vouchers *voucher.Service) http.Handler {
+func NewServer(engine *domain.CheckoutEngine, vouchers *voucher.Service, admin *voucher.Admin) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +71,7 @@ func NewServer(engine *domain.CheckoutEngine, vouchers *voucher.Service) http.Ha
 	})
 
 	registerVoucherRoutes(mux, vouchers)
+	registerVoucherAdminRoutes(mux, admin)
 	return middleware.Chain(mux)
 }
 
@@ -95,12 +96,12 @@ func main() {
 		log.Fatal(err)
 	}
 	// Without Postgres (ALLOW_MEMORY_FALLBACK=true, dev/test only) the seeded development vouchers are used.
-	var store voucher.Store = voucher.NewMemoryStore(voucher.DevCampaigns()...)
+	var store voucher.AdminStore = voucher.NewMemoryStore(voucher.DevCampaigns()...)
 	if pool != nil {
 		defer pool.Close()
 		store = voucher.NewPostgresStore(pool)
 	}
 
 	log.Printf("[order-checkout-service] listening on :%s (schema: orders, mongo: order_commercial_snapshots)", port)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(domain.NewCheckoutEngine(), voucher.NewService(store))))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(domain.NewCheckoutEngine(), voucher.NewService(store), voucher.NewAdmin(store))))
 }

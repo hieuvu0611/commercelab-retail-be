@@ -20,6 +20,8 @@ func TestResolveTargetRoutesEveryPublicPrefixToItsService(t *testing.T) {
 		{"/api/v1/users/me/addresses", "iam"},
 		{"/api/v1/users/me/addresses/addr-1", "iam"},
 		{"/api/v1/admin/users", "iam"},
+		{"/api/v1/admin/vouchers", "order"},
+		{"/api/v1/admin/vouchers/WELCOME10", "order"},
 		{"/api/v1/admin/users/u-1/roles", "iam"},
 		{"/api/v1/admin/categories", "catalog"},
 		{"/api/v1/admin/categories/c-1/move", "catalog"},
