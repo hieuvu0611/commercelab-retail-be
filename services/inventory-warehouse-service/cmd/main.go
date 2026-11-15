@@ -46,17 +46,7 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 			response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", "Không tìm thấy tồn kho cho SKU "+skuID, nil)
 			return
 		}
-		response.JSON(w, http.StatusOK, "Lấy thông tin tồn kho thành công", map[string]any{
-			"skuId":       st.SkuID,
-			"warehouseId": st.WarehouseID,
-			"onHand":      st.OnHand,
-			"unsellable":  st.Unsellable,
-			"reserved":    st.Reserved,
-			"committed":   st.Committed,
-			"inTransit":   st.InTransit,
-			"available":   st.Available(),
-			"version":     st.Version,
-		}, nil)
+		response.JSON(w, http.StatusOK, "Lấy thông tin tồn kho thành công", stockView(st), nil)
 	})
 
 	// P03, SC02, SC03: Giữ tồn kho nguyên tử 10 phút cho toàn bộ đơn
@@ -154,6 +144,8 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 	}
 	mux.Handle("POST /api/v1/inventory/shipments/handover",
 		auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(http.HandlerFunc(handover))))
+
+	registerAdminRoutes(mux, repo)
 
 	return middleware.Chain(mux)
 }
