@@ -171,6 +171,8 @@ func TestSeedUsersGetBlueprintRolesFromTheLegacyColumns(t *testing.T) {
 		{"staff-admin", "ACCESS_ADMIN", nil},
 		{"staff-product", "PRODUCT_STAFF", nil},
 		{"staff-marketing", "MARKETING", nil},
+		{"staff-whm-hcm", "WAREHOUSE_MGR", []string{"WH-HCM-01"}},
+		{"staff-whm-all", "WAREHOUSE_MGR", []string{"ALL"}},
 	}
 	for _, tc := range cases {
 		u, err := repo.FindByID(ctx, tc.userID)
