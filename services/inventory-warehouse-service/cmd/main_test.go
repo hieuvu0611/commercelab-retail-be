@@ -267,3 +267,40 @@ func TestDuplicateSkuLinesAreSummedBeforeTheStockCheck(t *testing.T) {
 		t.Fatalf("status = %d %s; want 409", rec.Code, rec.Body.String())
 	}
 }
+
+func TestRepeatedHandoverDecrementsOnceAndTheBodyWarehouseMustMatchTheReservation(t *testing.T) {
+	authtest.Configure(t)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
+	post := func(path, body string, id *auth.Identity) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(body)))
+		if id != nil {
+			req.Header.Set("Authorization", bearerFor(t, *id))
+		}
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+	post("/api/v1/inventory/reservations", `{"orderId":"O-77","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":2}]}`, nil)
+	post("/api/v1/inventory/reservations/O-77/commit", ``, nil)
+
+	const handover = "/api/v1/inventory/shipments/handover"
+	if rec := post(handover, `{"orderId":"O-77","warehouseId":"WH-HN-01"}`, &hcmStaff); rec.Code != http.StatusConflict || !bytes.Contains(rec.Body.Bytes(), []byte("WAREHOUSE_MISMATCH")) {
+		t.Fatalf("mismatched warehouse: %d %s", rec.Code, rec.Body)
+	}
+	for i := 0; i < 2; i++ {
+		if rec := post(handover, `{"orderId":"O-77","warehouseId":"WH-HCM-01"}`, &hcmStaff); rec.Code != http.StatusOK {
+			t.Fatalf("handover %d: %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/inventory/SKU-BALO-BLACK-20L", nil)
+	req.Header.Set("Authorization", bearerFor(t, hcmStaff))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	var st struct {
+		Data map[string]any `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &st)
+	if st.Data["onHand"].(float64) != 8 || st.Data["committed"].(float64) != 0 {
+		t.Fatalf("stock after two handovers = %+v, want on hand 8 and committed 0", st.Data)
+	}
+}

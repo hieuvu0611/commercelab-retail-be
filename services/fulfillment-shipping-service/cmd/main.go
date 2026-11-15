@@ -15,7 +15,9 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/intake"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/inventory"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/migrations"
 )
@@ -23,9 +25,16 @@ import (
 // consumerGroup is the consumer group of this service on the order topic.
 const consumerGroup = "fulfillment-shipping-service"
 
+// StockHandover takes an order's stock out of its warehouse (implemented by inventory.Client).
+type StockHandover interface {
+	Handover(ctx context.Context, bearer, orderID, warehouseID string) error
+}
+
 // Deps are the collaborators of the HTTP handler.
 type Deps struct {
 	Shipments shipment.Store
+	// Stock hands the order's stock over in inventory.
+	Stock StockHandover
 	// Now is the clock (default: UTC wall clock).
 	Now func() time.Time
 }
@@ -80,6 +89,7 @@ func main() {
 		}
 	}
 
+	stock := inventory.NewClient(config.EnvOrDefault("INVENTORY_SERVICE_URL", "http://localhost:8082"), svcclient.New(svcclient.Config{MaxRetries: 2}))
 	in := &intake.Intake{Store: store, Now: func() time.Time { return time.Now().UTC() }}
 	brokers := config.EnvOrDefault("REDPANDA_BROKERS", "localhost:19092")
 	go func() {
@@ -90,5 +100,5 @@ func main() {
 	}()
 
 	log.Printf("[fulfillment-shipping-service] listening on :%s (schema: fulfillment, brokers: %s)", port, brokers)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(Deps{Shipments: store})))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(Deps{Shipments: store, Stock: stock})))
 }

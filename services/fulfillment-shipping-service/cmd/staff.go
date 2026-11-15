@@ -27,19 +27,20 @@ type itemView struct {
 
 // shipmentView is what staff see of a parcel.
 type shipmentView struct {
-	ShipmentID  string     `json:"shipmentId"`
-	OrderID     string     `json:"orderId"`
-	WarehouseID string     `json:"warehouseId"`
-	Status      string     `json:"status"`
-	Version     int64      `json:"version"`
-	Items       []itemView `json:"items"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
+	ShipmentID   string     `json:"shipmentId"`
+	OrderID      string     `json:"orderId"`
+	WarehouseID  string     `json:"warehouseId"`
+	Status       string     `json:"status"`
+	Version      int64      `json:"version"`
+	Items        []itemView `json:"items"`
+	HandedOverAt *time.Time `json:"handedOverAt,omitempty"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	UpdatedAt    time.Time  `json:"updatedAt"`
 }
 
 func viewOf(s shipment.Shipment) shipmentView {
 	v := shipmentView{ShipmentID: s.ShipmentID, OrderID: s.OrderID, WarehouseID: s.WarehouseID, Status: string(s.Status),
-		Version: s.Version, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+		Version: s.Version, HandedOverAt: s.HandedOverAt, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
 	for i, it := range s.Items {
 		v.Items[i] = itemView{SkuID: it.SkuID, Quantity: it.Quantity, PickedQuantity: it.PickedQuantity}
 	}
@@ -48,6 +49,7 @@ func viewOf(s shipment.Shipment) shipmentView {
 
 var knownStatuses = map[shipment.Status]bool{
 	shipment.StatusPendingPick: true, shipment.StatusPicking: true, shipment.StatusPacked: true,
+	shipment.StatusHandedOver: true,
 }
 
 func badParam(w http.ResponseWriter, r *http.Request, name, msg string) {
@@ -70,6 +72,7 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 	})))
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/scan", staff(withShipment(d, scanLine(d))))
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/pack", staff(withShipment(d, packParcel(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/handover", staff(withShipment(d, handoverParcel(d))))
 }
 
 func listShipments(d Deps) http.HandlerFunc {
@@ -78,7 +81,7 @@ func listShipments(d Deps) http.HandlerFunc {
 		q := r.URL.Query()
 		f := shipment.Filter{Status: shipment.Status(q.Get("status")), Warehouses: claims.WarehouseScopes}
 		if f.Status != "" && !knownStatuses[f.Status] {
-			badParam(w, r, "status", "status must be PENDING_PICK, PICKING or PACKED")
+			badParam(w, r, "status", "status must be PENDING_PICK, PICKING, PACKED or HANDED_OVER")
 			return
 		}
 		for _, scope := range claims.WarehouseScopes {
@@ -218,6 +221,8 @@ func writeStepError(w http.ResponseWriter, r *http.Request, err error) {
 		badField(w, r, "quantity", "quantity must be a positive whole number")
 	case errors.Is(err, shipment.ErrNotPickable):
 		response.Error(w, r, http.StatusConflict, "SHIPMENT_NOT_PICKABLE", err.Error(), nil)
+	case errors.Is(err, shipment.ErrHandoverNotAllowed):
+		response.Error(w, r, http.StatusConflict, "HANDOVER_NOT_ALLOWED", err.Error(), nil)
 	case errors.Is(err, shipment.ErrPickIncomplete):
 		response.Error(w, r, http.StatusConflict, "PICK_INCOMPLETE", err.Error(), nil)
 	default:

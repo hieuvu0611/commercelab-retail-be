@@ -19,7 +19,7 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, status, version, created_at, updated_at`
+const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, status, version, handed_over_at, created_at, updated_at`
 
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -29,7 +29,7 @@ type querier interface {
 func load(ctx context.Context, q querier, where string, arg string) (Shipment, error) {
 	var s Shipment
 	err := q.QueryRow(ctx, `SELECT `+shipmentColumns+` FROM fulfillment.shipments WHERE `+where+` = $1`, arg).
-		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.Status, &s.Version, &s.CreatedAt, &s.UpdatedAt)
+		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.Status, &s.Version, &s.HandedOverAt, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Shipment{}, ErrNotFound
 	}
@@ -145,8 +145,8 @@ func (p *PostgresStore) Save(ctx context.Context, s Shipment, expectedVersion in
 		return dependency.Wrap(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	tag, err := tx.Exec(ctx, `UPDATE fulfillment.shipments SET status = $3, version = $4, updated_at = $5 WHERE shipment_id = $1 AND version = $2`,
-		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt)
+	tag, err := tx.Exec(ctx, `UPDATE fulfillment.shipments SET status = $3, version = $4, updated_at = $5, handed_over_at = $6 WHERE shipment_id = $1 AND version = $2`,
+		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt, s.HandedOverAt)
 	if err != nil {
 		return dependency.Wrap(err)
 	}
