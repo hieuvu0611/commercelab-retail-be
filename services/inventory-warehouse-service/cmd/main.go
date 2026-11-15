@@ -13,6 +13,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
@@ -75,7 +76,7 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	mux.HandleFunc("GET /api/v1/inventory/availability", availabilityHandler(repo, options.lowStockThreshold))
 
 	// P03, SC02, SC03: Giữ tồn kho nguyên tử 10 phút cho toàn bộ đơn
-	mux.HandleFunc("POST /api/v1/inventory/reservations", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/inventory/reservations", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			OrderID     string               `json:"orderId"`
 			WarehouseID string               `json:"warehouseId"`
@@ -99,10 +100,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			return
 		}
 		response.JSON(w, http.StatusCreated, "Giữ hàng 10 phút thành công (P03)", rec, nil)
-	})
+	})))
 
 	// SC02: Chuyển Giữ tạm -> Cam kết chưa xuất khi thu tiền thành công
-	mux.HandleFunc("POST /api/v1/inventory/reservations/{orderId}/commit", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/inventory/reservations/{orderId}/commit", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		orderID := r.PathValue("orderId")
 		rec, err := repo.CommitOrderReservation(r.Context(), orderID)
 		if dependency.IsUnavailable(err) {
@@ -114,10 +115,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			return
 		}
 		response.JSON(w, http.StatusOK, "Cam kết giữ tồn kho thành công (SC02)", rec, nil)
-	})
+	})))
 
 	// P05, SC05: payment is unknown, so keep the stock for 30 minutes (from the reservation) instead of 10.
-	mux.HandleFunc("POST /api/v1/inventory/reservations/{orderId}/exception-hold", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/inventory/reservations/{orderId}/exception-hold", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec, err := repo.PlaceExceptionHold(r.Context(), r.PathValue("orderId"))
 		switch {
 		case dependency.IsUnavailable(err):
@@ -131,10 +132,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 		default:
 			response.JSON(w, http.StatusOK, "Reservation held for 30 minutes (P05)", rec, nil)
 		}
-	})
+	})))
 
 	// SC05: Nhả Giữ tạm về lại Khả dụng khi thanh toán thất bại hoặc hết hạn
-	mux.HandleFunc("POST /api/v1/inventory/reservations/{orderId}/release", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/v1/inventory/reservations/{orderId}/release", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		orderID := r.PathValue("orderId")
 		rec, err := repo.ReleaseOrderReservation(r.Context(), orderID)
 		if dependency.IsUnavailable(err) {
@@ -146,7 +147,7 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			return
 		}
 		response.JSON(w, http.StatusOK, "Nhả giữ tồn kho về Khả dụng thành công", rec, nil)
-	})
+	})))
 
 	// SC02, I08, SC12: the warehouse hands the parcel to the courier. Only warehouse staff and managers may do it,
 	// and only in a warehouse their token covers. The warehouse is the one the reservation was made in;
@@ -207,6 +208,7 @@ type Config struct {
 func loadConfig() (Config, error) {
 	l := config.NewLoader()
 	auth.LoadSecrets(l)
+	internalauth.LoadToken(l)
 	cfg := Config{
 		Port:        l.Optional("INVENTORY_WAREHOUSE_PORT", "8082"),
 		DatabaseURL: l.Optional("DATABASE_URL_INVENTORY", "postgres://inventory_svc_user:inventory_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=inventory"),

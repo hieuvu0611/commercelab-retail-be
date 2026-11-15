@@ -33,7 +33,7 @@ const openingBody = `{"warehouseId":"WH-HCM-01","reason":"initial count","lines"
 
 func TestOpeningStockIsRestrictedToManagersInTheirWarehouse(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	const path = "/api/v1/admin/inventory/opening-stock"
 
 	for name, tc := range map[string]struct {
@@ -60,7 +60,7 @@ func TestOpeningStockIsRestrictedToManagersInTheirWarehouse(t *testing.T) {
 
 func TestOpeningStockIsRecordedOnceAndAppearsInStockAndHistory(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 
 	if rec := call(t, srv, http.MethodPost, "/api/v1/admin/inventory/opening-stock", openingBody, &hcmManager); rec.Code != http.StatusCreated {
 		t.Fatalf("first call: %d %s", rec.Code, rec.Body.String())
@@ -106,7 +106,7 @@ func TestOpeningStockIsRecordedOnceAndAppearsInStockAndHistory(t *testing.T) {
 
 func TestReadEndpointsRequireWarehouseRoleAndScope(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	for _, path := range []string{
 		"/api/v1/admin/inventory/stock?warehouse=WH-HCM-01",
 		"/api/v1/admin/inventory/movements?warehouse=WH-HCM-01",
@@ -131,7 +131,7 @@ func TestReadEndpointsRequireWarehouseRoleAndScope(t *testing.T) {
 // SC02: every step of the order lifecycle leaves a movement (I06), newest first.
 func TestOrderLifecycleWritesMovements_SC02(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	call(t, srv, http.MethodPost, "/api/v1/inventory/reservations",
 		`{"orderId":"O-LEDGER","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BOTTLE-BLUE-500ML","quantity":2}]}`, nil)
 	call(t, srv, http.MethodPost, "/api/v1/inventory/reservations/O-LEDGER/commit", "", nil)

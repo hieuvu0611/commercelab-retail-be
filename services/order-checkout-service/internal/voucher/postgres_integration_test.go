@@ -83,3 +83,22 @@ func TestPostgresAdminStoreFollowsTheCampaignRules(t *testing.T) {
 		}
 	})
 }
+
+func TestPostgresStoreReserveContract(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL_ORDERS")
+	if dsn == "" {
+		t.Skip("DATABASE_URL_ORDERS is not set; run `make test-integration`")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	pool, err := db.ConnectPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM orders.voucher_usages WHERE voucher_code LIKE 'RSV-%'`)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM orders.voucher_campaigns WHERE voucher_code LIKE 'RSV-%'`)
+	})
+	runReserveContract(t, NewPostgresStore(pool), "RSV")
+}

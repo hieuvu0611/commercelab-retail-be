@@ -24,6 +24,10 @@ x-jwt-env: &jwt-env
   JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-}
   JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-}
 
+# Shared secret for service-to-service calls (stock reservation, payment attempts). Mandatory like the JWT secrets.
+x-internal-env: &internal-env
+  INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
+
 x-store-env: &store-env
   MONGO_URI: mongodb://mongo_admin:mongo_password@mongodb:27017/commerce_lab_doc?authSource=admin
   MONGO_DATABASE: commerce_lab_doc
@@ -262,7 +266,7 @@ services:
       args:
         SERVICE_NAME: inventory-warehouse-service
     environment:
-      <<: [*go-env, *jwt-env]
+      <<: [*go-env, *jwt-env, *internal-env]
       INVENTORY_WAREHOUSE_PORT: 8082
       DATABASE_URL_INVENTORY: postgres://inventory_svc_user:inventory_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=inventory
       MIGRATE_ON_START: "true"
@@ -282,8 +286,11 @@ services:
       args:
         SERVICE_NAME: order-checkout-service
     environment:
-      <<: [*go-env, *jwt-env]
+      <<: [*go-env, *jwt-env, *internal-env]
       ORDER_CHECKOUT_PORT: 8083
+      CATALOG_SERVICE_URL: http://catalog-pricing-service:8081
+      INVENTORY_SERVICE_URL: http://inventory-warehouse-service:8082
+      PAYMENT_SERVICE_URL: http://payment-service:8084
       DATABASE_URL_ORDERS: postgres://order_svc_user:order_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=orders
       MIGRATE_ON_START: "true"
     depends_on: *infra-healthy

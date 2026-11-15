@@ -10,6 +10,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
 )
@@ -27,7 +28,7 @@ func TestAvailabilityStateBoundaries(t *testing.T) {
 
 func TestAvailabilityIsPublicStateOnlyAndNeverLeaksCounts(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	// Seeded memory stock: backpack 10, bottle 20 in HCM; make the bottle LOW and the backpack OUT via reservations.
 	call(t, srv, http.MethodPost, "/api/v1/inventory/reservations",
 		`{"orderId":"O-AV","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":10},{"skuId":"SKU-BOTTLE-BLUE-500ML","quantity":18}]}`, nil)
@@ -68,7 +69,7 @@ func TestAvailabilityIsPublicStateOnlyAndNeverLeaksCounts(t *testing.T) {
 
 func TestAvailabilityHonoursTheWarehouseAndTheConfiguredThreshold(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false, WithLowStockThreshold(5))
+	srv := newTestServer(repository.NewInventoryRepository(nil), false, WithLowStockThreshold(5))
 	// WH-HN-01 holds 5 backpacks in the memory seed: with threshold 5 that is LOW; HCM holds 10: IN_STOCK.
 	state := func(wh string) string {
 		rec := httptest.NewRecorder()
@@ -89,7 +90,7 @@ func TestAvailabilityHonoursTheWarehouseAndTheConfiguredThreshold(t *testing.T) 
 
 func TestAvailabilityRejectsBadInput(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	many := make([]string, 101)
 	for i := range many {
 		many[i] = "S" + string(rune('A'+i%26)) + strings.Repeat("x", i/26)
@@ -108,7 +109,7 @@ func TestAvailabilityRejectsBadInput(t *testing.T) {
 
 func TestExactStockCountsRequireWarehouseStaff(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	const path = "/api/v1/inventory/SKU-BALO-BLACK-20L"
 	for name, tc := range map[string]struct {
 		id   int
@@ -134,7 +135,9 @@ func TestExactStockCountsRequireWarehouseStaff(t *testing.T) {
 func TestLowStockThresholdComesFromTheEnvironment(t *testing.T) {
 	t.Setenv("JWT_ACCESS_SECRET", strings.Repeat("a", 32))
 	t.Setenv("JWT_REFRESH_SECRET", strings.Repeat("b", 32))
+	t.Setenv("INTERNAL_SERVICE_TOKEN", strings.Repeat("c", 32))
 	t.Cleanup(auth.Reset)
+	t.Cleanup(internalauth.Reset)
 	cfg, err := loadConfig()
 	if err != nil || cfg.LowStockThreshold != 3 {
 		t.Fatalf("default threshold = %d, err %v; want 3", cfg.LowStockThreshold, err)
@@ -151,7 +154,7 @@ func TestLowStockThresholdComesFromTheEnvironment(t *testing.T) {
 
 func TestExceptionHoldEndpoint(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	call(t, srv, http.MethodPost, "/api/v1/inventory/reservations",
 		`{"orderId":"O-HOLD","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`, nil)
 
@@ -171,7 +174,9 @@ func TestExceptionHoldEndpoint(t *testing.T) {
 func TestExpirySweepIntervalIsValidated(t *testing.T) {
 	t.Setenv("JWT_ACCESS_SECRET", strings.Repeat("a", 32))
 	t.Setenv("JWT_REFRESH_SECRET", strings.Repeat("b", 32))
+	t.Setenv("INTERNAL_SERVICE_TOKEN", strings.Repeat("c", 32))
 	t.Cleanup(auth.Reset)
+	t.Cleanup(internalauth.Reset)
 	cfg, err := loadConfig()
 	if err != nil || cfg.ExpirySweepEvery != 30*time.Second {
 		t.Fatalf("default = %v, err %v; want 30s", cfg.ExpirySweepEvery, err)
