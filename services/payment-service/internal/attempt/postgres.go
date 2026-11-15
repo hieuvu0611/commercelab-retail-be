@@ -113,23 +113,58 @@ func (s *PostgresStore) Apply(ctx context.Context, attemptID string, o Outcome, 
 	if ch.Replay {
 		return next, ch, dependency.Wrap(tx.Commit(ctx)) // keeps the event id recorded
 	}
-	if _, err := tx.Exec(ctx, `UPDATE payments.payment_attempts SET status = $2, captured_amount_vnd = $3, unknown_deadline = $4, outcome_at = $5
-		WHERE attempt_id = $1`, attemptID, next.Status, next.CapturedAmountVND, next.UnknownDeadline, next.OutcomeAt); err != nil {
+	if err := persist(ctx, tx, cur, next, ch); err != nil {
+		return Attempt{}, Change{}, err
+	}
+	return next, ch, dependency.Wrap(tx.Commit(ctx))
+}
+
+// Close implements Store.
+func (s *PostgresStore) Close(ctx context.Context, attemptID string) (Attempt, Change, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
 		return Attempt{}, Change{}, dependency.Wrap(err)
 	}
-	if ch.CapturedVND > 0 {
+	defer func() { _ = tx.Rollback(ctx) }()
+	cur, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM payments.payment_attempts WHERE attempt_id = $1 FOR UPDATE`, attemptID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Attempt{}, Change{}, ErrNotFound
+	}
+	if err != nil {
+		return Attempt{}, Change{}, dependency.Wrap(err)
+	}
+	next, ch, err := Close(cur, s.now())
+	if err != nil {
+		return cur, Change{}, err
+	}
+	if !ch.Replay {
+		if err := persist(ctx, tx, cur, next, ch); err != nil {
+			return Attempt{}, Change{}, err
+		}
+	}
+	return next, ch, dependency.Wrap(tx.Commit(ctx))
+}
+
+// persist writes the new attempt, the order's money totals and a refund obligation inside the caller's transaction.
+func persist(ctx context.Context, tx pgx.Tx, cur, next Attempt, ch Change) error {
+	attemptID := cur.AttemptID
+	if _, err := tx.Exec(ctx, `UPDATE payments.payment_attempts SET status = $2, captured_amount_vnd = $3, unknown_deadline = $4, outcome_at = $5
+		WHERE attempt_id = $1`, attemptID, next.Status, next.CapturedAmountVND, next.UnknownDeadline, next.OutcomeAt); err != nil {
+		return dependency.Wrap(err)
+	}
+	if ch.CapturedVND > 0 || ch.LateRefundVND > 0 {
 		if _, err := tx.Exec(ctx, `UPDATE payments.order_payment_summary SET captured_amount = captured_amount + $2, refund_pending = refund_pending + $3,
 			version = version + 1 WHERE order_id = $1`, cur.OrderID, ch.CapturedVND, ch.LateRefundVND); err != nil {
-			return Attempt{}, Change{}, dependency.Wrap(err)
+			return dependency.Wrap(err)
 		}
 	}
 	if ch.LateRefundVND > 0 {
 		if _, err := tx.Exec(ctx, `INSERT INTO payments.refund_obligations (order_id, attempt_id, amount_vnd, reason) VALUES ($1, $2, $3, 'LATE_CAPTURE')
 			ON CONFLICT (attempt_id) DO NOTHING`, cur.OrderID, attemptID, ch.LateRefundVND); err != nil {
-			return Attempt{}, Change{}, dependency.Wrap(err)
+			return dependency.Wrap(err)
 		}
 	}
-	return next, ch, dependency.Wrap(tx.Commit(ctx))
+	return nil
 }
 
 func (s *PostgresStore) Summary(ctx context.Context, orderID string) (Summary, error) {

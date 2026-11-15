@@ -47,6 +47,38 @@ func runReserveContract(t *testing.T, store reserveStore, prefix string) {
 		return c.ReservedQuota, c.ConsumedQuota
 	}
 
+	t.Run("consume turns the reserved use into a consumed one exactly once", func(t *testing.T) {
+		code := mk("CONSUME", 5, 3, nil)
+		if err := store.Reserve(ctx, code, "u1", "O-C1", now); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 3; i++ {
+			if err := store.Consume(ctx, code, "O-C1"); err != nil {
+				t.Fatalf("consume #%d: %v", i, err)
+			}
+		}
+		if reserved, consumed := buckets(code); reserved != 0 || consumed != 1 {
+			t.Fatalf("reserved=%d consumed=%d, want 0 and 1", reserved, consumed)
+		}
+		// A consumed use is final: releasing it changes nothing and it still counts against the customer limit.
+		if err := store.Release(ctx, code, "O-C1"); err != nil {
+			t.Fatal(err)
+		}
+		if reserved, consumed := buckets(code); reserved != 0 || consumed != 1 {
+			t.Fatalf("after release reserved=%d consumed=%d", reserved, consumed)
+		}
+		if n, _ := store.CustomerUses(ctx, code, "u1"); n != 1 {
+			t.Fatalf("uses = %d, want 1", n)
+		}
+		// Nothing reserved for the order: consuming is a no-op, not an error and not a free use.
+		if err := store.Consume(ctx, code, "O-never"); err != nil {
+			t.Fatal(err)
+		}
+		if _, consumed := buckets(code); consumed != 1 {
+			t.Fatalf("consumed = %d, want 1", consumed)
+		}
+	})
+
 	t.Run("reserve takes one use and repeating the same order takes no more", func(t *testing.T) {
 		code := mk("A", 5, 3, nil)
 		for i := 0; i < 3; i++ {

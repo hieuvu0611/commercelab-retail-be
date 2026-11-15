@@ -143,6 +143,23 @@ func (m *MemoryStore) Reserve(_ context.Context, code, userID, orderID string, n
 	return nil
 }
 
+// Consume implements Reserver.
+func (m *MemoryStore) Consume(_ context.Context, code, orderID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, held := m.usages[code+"|"+orderID]
+	if !held || u.state != "RESERVED" {
+		return nil
+	}
+	c := m.campaigns[code]
+	c.ReservedQuota--
+	c.ConsumedQuota++
+	c.Version++
+	m.campaigns[code] = c
+	m.usages[code+"|"+orderID] = memUsage{user: u.user, state: "CONSUMED"}
+	return nil
+}
+
 // Release implements Reserver.
 func (m *MemoryStore) Release(_ context.Context, code, orderID string) error {
 	m.mu.Lock()

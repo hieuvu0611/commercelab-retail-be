@@ -24,6 +24,7 @@ var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
 func registerOrderRoutes(mux *http.ServeMux, svc *checkout.Service) {
 	mux.Handle("POST /api/v1/orders", auth.RequireAuth(auth.RequireRole("CUSTOMER")(http.HandlerFunc(placeOrder(svc)))))
+	registerPaymentOutcomeRoute(mux, svc)
 }
 
 // orderView is the order as the customer sees it.

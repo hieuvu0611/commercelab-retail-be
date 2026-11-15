@@ -166,3 +166,43 @@ func TestUnknownOutcomeIsRejected(t *testing.T) {
 		t.Fatalf("zero capture err = %v", err)
 	}
 }
+
+func TestCloseEndsAnAttemptWithoutMoney(t *testing.T) {
+	for _, from := range []string{StatusProcessing, StatusUnknown} {
+		a := fresh()
+		a.Status = from
+		closed, ch, err := Close(a, t0.Add(time.Hour))
+		if err != nil || closed.Status != StatusExpired30m || ch.Replay || ch.LateRefundVND != 0 || ch.CapturedVND != 0 {
+			t.Fatalf("close %s = %+v %+v %v", from, closed, ch, err)
+		}
+		// Money arriving after the order was closed is late: it is refunded, never confirmed.
+		late, lch := apply(t, closed, OutcomeCaptured, 660000, t0.Add(2*time.Hour))
+		if late.Status != StatusCapturedLate || lch.LateRefundVND != 660000 {
+			t.Fatalf("capture after close = %+v %+v", late, lch)
+		}
+	}
+}
+
+func TestCloseOfACapturedAttemptOwesTheMoneyBack(t *testing.T) {
+	captured, _ := apply(t, fresh(), OutcomeCaptured, 660000, t0)
+	closed, ch, err := Close(captured, t0.Add(time.Hour))
+	if err != nil || closed.Status != StatusCapturedLate || ch.LateRefundVND != 660000 || ch.CapturedVND != 0 || ch.Replay {
+		t.Fatalf("close captured = %+v %+v %v", closed, ch, err)
+	}
+	again, ch, err := Close(closed, t0.Add(2*time.Hour))
+	if err != nil || !ch.Replay || again.Status != StatusCapturedLate {
+		t.Fatalf("second close = %+v %+v %v", again, ch, err)
+	}
+}
+
+func TestCloseOfFinishedAttemptsChangesNothing(t *testing.T) {
+	failed, _ := apply(t, fresh(), OutcomeFailed, 0, t0)
+	if got, ch, err := Close(failed, t0); err != nil || !ch.Replay || got.Status != StatusFailed {
+		t.Fatalf("close failed = %+v %+v %v", got, ch, err)
+	}
+	expired := fresh()
+	expired.Status = StatusExpired30m
+	if got, ch, err := Close(expired, t0); err != nil || !ch.Replay || got.Status != StatusExpired30m {
+		t.Fatalf("close expired = %+v %+v %v", got, ch, err)
+	}
+}

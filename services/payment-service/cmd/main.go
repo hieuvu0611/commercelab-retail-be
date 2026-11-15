@@ -14,8 +14,10 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/internal/attempt"
 	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/internal/orderclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/migrations"
 )
 
@@ -87,6 +89,7 @@ func main() {
 		store = attempt.NewPostgresStore(pool)
 	}
 
+	orders := orderclient.New(config.EnvOrDefault("ORDER_SERVICE_URL", "http://localhost:8083"), svcclient.New(svcclient.Config{MaxRetries: 2}))
 	log.Printf("[payment-service] listening on :%s (schema: payments, simulator: %v)", port, simulator)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(domain.NewPaymentEngine(), store, Options{SimulatorEnabled: simulator, WebhookSecret: webhookSecret})))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(domain.NewPaymentEngine(), store, Options{SimulatorEnabled: simulator, WebhookSecret: webhookSecret, Orders: orders})))
 }

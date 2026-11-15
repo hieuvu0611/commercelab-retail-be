@@ -35,8 +35,8 @@ func (f *fakeQuotes) Get(_ context.Context, bearer, quoteID string) (checkout.Qu
 }
 
 type fakeStock struct {
-	reserves, releases atomic.Int32
-	err                error
+	reserves, releases, commits, holds atomic.Int32
+	err                                error
 }
 
 func (f *fakeStock) Reserve(context.Context, string, string, []checkout.StockLine) error {
@@ -44,10 +44,15 @@ func (f *fakeStock) Reserve(context.Context, string, string, []checkout.StockLin
 	return f.err
 }
 func (f *fakeStock) Release(context.Context, string) error { f.releases.Add(1); return nil }
+func (f *fakeStock) Commit(context.Context, string) error  { f.commits.Add(1); return nil }
+func (f *fakeStock) ExceptionHold(context.Context, string) error {
+	f.holds.Add(1)
+	return nil
+}
 
 type fakePayments struct {
-	calls atomic.Int32
-	err   error
+	calls, closes atomic.Int32
+	err           error
 }
 
 func (f *fakePayments) CreateAttempt(_ context.Context, orderID, _ string, _ int64) (checkout.Attempt, error) {
@@ -57,6 +62,8 @@ func (f *fakePayments) CreateAttempt(_ context.Context, orderID, _ string, _ int
 	}
 	return checkout.Attempt{AttemptID: "PAY-" + orderID, Status: "PROCESSING"}, nil
 }
+
+func (f *fakePayments) CloseAttempt(context.Context, string) error { f.closes.Add(1); return nil }
 
 type orderFixture struct {
 	srv      http.Handler

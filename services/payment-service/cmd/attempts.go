@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/ids"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
@@ -36,13 +38,24 @@ type Options struct {
 	SimulatorEnabled bool
 	// WebhookSecret signs webhook bodies (HMAC-SHA256, hex, X-Signature header).
 	WebhookSecret string
+	// Orders is told about every outcome so the order saga can confirm or close the order; nil disables it.
+	Orders OrderNotifier
 }
+
+// OrderNotifier reports the state of an attempt to the order service. It must be idempotent on the receiving side.
+type OrderNotifier interface {
+	PaymentOutcome(ctx context.Context, a attempt.Attempt) error
+}
+
+// notifyTimeout bounds the callback to the order service; it outlives a client that hangs up.
+const notifyTimeout = 10 * time.Second
 
 func registerAttemptRoutes(mux *http.ServeMux, store attempt.Store, opts Options) {
 	api := &attemptAPI{store: store, opts: opts}
 	mux.Handle("POST /api/v1/payments/attempts", internalauth.Require(http.HandlerFunc(api.create)))
 	mux.Handle("GET /api/v1/payments/attempts/{attemptId}", auth.RequireAuth(http.HandlerFunc(api.get)))
 	mux.Handle("POST /api/v1/payments/simulator/{attemptId}/outcome", auth.RequireAuth(http.HandlerFunc(api.simulate)))
+	mux.Handle("POST /api/v1/payments/attempts/{attemptId}/close", internalauth.Require(http.HandlerFunc(api.close)))
 	mux.HandleFunc("POST /api/v1/payments/webhooks/simulator", api.webhook)
 }
 
@@ -200,9 +213,38 @@ func (a *attemptAPI) apply(w http.ResponseWriter, r *http.Request, attemptID str
 	case err != nil:
 		writeStoreError(w, r, err)
 	case change.Replay:
+		a.notifyOrder(r, updated)
 		response.JSON(w, http.StatusOK, "Outcome already applied", updated, nil)
 	default:
+		a.notifyOrder(r, updated)
 		response.JSON(w, http.StatusOK, "Outcome recorded", updated, nil)
+	}
+}
+
+// notifyOrder reports the stored attempt to the order service. A failure is logged and does not fail the
+// request: the outcome is recorded, the provider redelivers, and the order service reconciles on its own.
+func (a *attemptAPI) notifyOrder(r *http.Request, at attempt.Attempt) {
+	if a.opts.Orders == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), notifyTimeout)
+	defer cancel()
+	if err := a.opts.Orders.PaymentOutcome(ctx, at); err != nil {
+		log.Printf("[payment] order callback for attempt %s failed (it is retried on redelivery or by reconcile): %v", at.AttemptID, err)
+	}
+}
+
+// close ends an attempt because the order service closed its order. The order service already knows, so
+// nothing is reported back.
+func (a *attemptAPI) close(w http.ResponseWriter, r *http.Request) {
+	closed, _, err := a.store.Close(r.Context(), r.PathValue("attemptId"))
+	switch {
+	case errors.Is(err, attempt.ErrNotFound):
+		response.Error(w, r, http.StatusNotFound, "PAYMENT_NOT_FOUND", "Payment attempt not found", nil)
+	case err != nil:
+		writeStoreError(w, r, err)
+	default:
+		response.JSON(w, http.StatusOK, "Payment attempt closed", closed, nil)
 	}
 }
 

@@ -6,10 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,10 +27,35 @@ const (
 	webhookSecret = "test-webhook-secret-0123456789abcdef"
 )
 
+// recordingOrders stands in for the order service: it records what the payment service reports.
+type recordingOrders struct {
+	mu    sync.Mutex
+	calls []attempt.Attempt
+	err   error
+}
+
+func (r *recordingOrders) PaymentOutcome(_ context.Context, a attempt.Attempt) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, a)
+	return r.err
+}
+
+func (r *recordingOrders) statuses() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, c := range r.calls {
+		out = append(out, c.Status)
+	}
+	return out
+}
+
 type fixture struct {
-	srv   http.Handler
-	store *attempt.MemoryStore
-	clock *time.Time
+	srv    http.Handler
+	store  *attempt.MemoryStore
+	clock  *time.Time
+	orders *recordingOrders
 }
 
 func newFixture(t *testing.T, simulator bool) *fixture {
@@ -37,9 +64,9 @@ func newFixture(t *testing.T, simulator bool) *fixture {
 	_ = internalauth.Configure(internalToken)
 	t.Cleanup(internalauth.Reset)
 	now := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
-	f := &fixture{clock: &now}
+	f := &fixture{clock: &now, orders: &recordingOrders{}}
 	f.store = attempt.NewMemoryStore().WithClock(func() time.Time { return *f.clock })
-	f.srv = NewServer(domain.NewPaymentEngine(), f.store, Options{SimulatorEnabled: simulator, WebhookSecret: webhookSecret})
+	f.srv = NewServer(domain.NewPaymentEngine(), f.store, Options{SimulatorEnabled: simulator, WebhookSecret: webhookSecret, Orders: f.orders})
 	return f
 }
 
@@ -329,5 +356,62 @@ func TestRefundReservationRouteIsInternalOnly(t *testing.T) {
 	}
 	if rec := f.do(http.MethodPost, "/api/v1/payments/O-001/refund-reservations", map[string]string{internalauth.Header: internalToken}, body); rec.Code != http.StatusCreated {
 		t.Fatalf("internal = %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOutcomeIsReportedToTheOrderServiceAndAReplayReportsAgain(t *testing.T) {
+	f := newFixture(t, true)
+	f.createAttempt("pay-O-1", "O-1", "user-lan", 660000)
+	body := `{"eventId":"evt-1","attemptId":"PAY-O-1","outcome":"CAPTURED","amountVnd":660000}`
+	for i := 0; i < 2; i++ {
+		if rec := f.do(http.MethodPost, "/api/v1/payments/webhooks/simulator", map[string]string{"X-Signature": sign(body)}, body); rec.Code != http.StatusOK {
+			t.Fatalf("webhook #%d: %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	// The second delivery is a replay for the payment, but it is reported again so a lost callback heals; the
+	// order service applies it once.
+	if got := f.orders.statuses(); len(got) != 2 || got[0] != "CAPTURED" || got[1] != "CAPTURED" || f.orders.calls[0].CapturedAmountVND != 660000 || f.orders.calls[0].OrderID != "O-1" {
+		t.Fatalf("reports = %v %+v", got, f.orders.calls)
+	}
+}
+
+func TestSimulatorOutcomeIsReportedAndALostCallbackDoesNotFailTheRequest(t *testing.T) {
+	f := newFixture(t, true)
+	f.createAttempt("pay-O-1", "O-1", "user-lan", 660000)
+	f.orders.err = errors.New("order service is down")
+	if rec := f.simulate("user-lan", "PAY-O-1", `{"outcome":"UNKNOWN"}`); rec.Code != http.StatusOK {
+		t.Fatalf("simulate with the order service down: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := f.orders.statuses(); len(got) != 1 || got[0] != "UNKNOWN" {
+		t.Fatalf("reports = %v", got)
+	}
+}
+
+func TestCloseAttemptIsInternalOnlyAndMakesALaterCaptureLate(t *testing.T) {
+	f := newFixture(t, true)
+	f.createAttempt("pay-O-1", "O-1", "user-lan", 660000)
+	path := "/api/v1/payments/attempts/PAY-O-1/close"
+	if rec := f.do(http.MethodPost, path, map[string]string{"Authorization": "Bearer " + token("user-lan")}, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("customer token: %d", rec.Code)
+	}
+	if rec := f.do(http.MethodPost, "/api/v1/payments/attempts/PAY-none/close", map[string]string{internalauth.Header: internalToken}, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown attempt: %d", rec.Code)
+	}
+	for i := 0; i < 2; i++ {
+		rec := f.do(http.MethodPost, path, map[string]string{internalauth.Header: internalToken}, "")
+		if got := decode[attemptResp](t, rec); rec.Code != http.StatusOK || got.Data.Status != "EXPIRED_30M" {
+			t.Fatalf("close #%d: %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if len(f.orders.calls) != 0 {
+		t.Fatalf("a close asked for by the order service must not be reported back: %v", f.orders.statuses())
+	}
+	rec := f.simulate("user-lan", "PAY-O-1", `{"outcome":"CAPTURED"}`)
+	if got := decode[attemptResp](t, rec); rec.Code != http.StatusOK || got.Data.Status != "CAPTURED_LATE" {
+		t.Fatalf("capture after close: %d %s", rec.Code, rec.Body.String())
+	}
+	obs, _ := f.store.Obligations(context.Background(), "O-1")
+	if len(obs) != 1 || obs[0].AmountVND != 660000 {
+		t.Fatalf("obligations = %+v", obs)
 	}
 }

@@ -144,6 +144,46 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string) {
 		}
 	})
 
+	t.Run("closing a processing attempt turns a later capture into a refund", func(t *testing.T) {
+		a := newAttempt()
+		_, _, _ = store.Create(ctx, a)
+		closed, ch, err := store.Close(ctx, a.AttemptID)
+		if err != nil || closed.Status != StatusExpired30m || ch.Replay {
+			t.Fatalf("Close = %+v %+v %v", closed, ch, err)
+		}
+		if _, ch, err := store.Close(ctx, a.AttemptID); err != nil || !ch.Replay {
+			t.Fatalf("second Close = %+v %v", ch, err)
+		}
+		late, ch, err := store.Apply(ctx, a.AttemptID, OutcomeCaptured, 660000, "")
+		if err != nil || late.Status != StatusCapturedLate || ch.LateRefundVND != 660000 {
+			t.Fatalf("capture after close = %+v %+v %v", late, ch, err)
+		}
+		sum, _ := store.Summary(ctx, a.OrderID)
+		if sum.CapturedVND != 660000 || sum.RefundPending != 660000 {
+			t.Fatalf("summary = %+v", sum)
+		}
+		if _, _, err := store.Close(ctx, "PAY-missing"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Close missing = %v", err)
+		}
+	})
+
+	t.Run("closing a captured attempt records one refund obligation", func(t *testing.T) {
+		a := newAttempt()
+		_, _, _ = store.Create(ctx, a)
+		_, _, _ = store.Apply(ctx, a.AttemptID, OutcomeCaptured, 660000, "")
+		for i := 0; i < 2; i++ {
+			got, _, err := store.Close(ctx, a.AttemptID)
+			if err != nil || got.Status != StatusCapturedLate {
+				t.Fatalf("Close #%d = %+v %v", i, got, err)
+			}
+		}
+		sum, _ := store.Summary(ctx, a.OrderID)
+		obs, _ := store.Obligations(ctx, a.OrderID)
+		if sum.CapturedVND != 660000 || sum.RefundPending != 660000 || len(obs) != 1 || obs[0].AmountVND != 660000 {
+			t.Fatalf("summary = %+v obligations = %+v", sum, obs)
+		}
+	})
+
 	t.Run("concurrent identical captures count the money once", func(t *testing.T) {
 		a := newAttempt()
 		_, _, _ = store.Create(ctx, a)

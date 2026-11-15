@@ -38,6 +38,10 @@ type fakeStock struct {
 	mu        sync.Mutex
 	reserves  int
 	releases  int
+	commits   int
+	holds     int
+	commitErr error
+	holdErr   error
 	reserveFn func() error
 	lastLines []StockLine
 	lastWH    string
@@ -54,6 +58,20 @@ func (f *fakeStock) Reserve(_ context.Context, _ string, warehouseID string, lin
 	return nil
 }
 
+func (f *fakeStock) Commit(context.Context, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commits++
+	return f.commitErr
+}
+
+func (f *fakeStock) ExceptionHold(context.Context, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holds++
+	return f.holdErr
+}
+
 func (f *fakeStock) Release(context.Context, string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -61,12 +79,27 @@ func (f *fakeStock) Release(context.Context, string) error {
 	return nil
 }
 
-type fakePayments struct {
+type fakeCarts struct {
 	mu      sync.Mutex
-	calls   int
-	amount  int64
-	userID  string
-	failure error
+	removed [][]string
+	err     error
+}
+
+func (f *fakeCarts) RemoveOrdered(_ context.Context, userID string, skuIDs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, append([]string{userID}, skuIDs...))
+	return f.err
+}
+
+type fakePayments struct {
+	mu       sync.Mutex
+	closes   []string
+	closeErr error
+	calls    int
+	amount   int64
+	userID   string
+	failure  error
 }
 
 func (f *fakePayments) CreateAttempt(_ context.Context, orderID, userID string, amountVND int64) (Attempt, error) {
@@ -80,7 +113,15 @@ func (f *fakePayments) CreateAttempt(_ context.Context, orderID, userID string, 
 	return Attempt{AttemptID: "PAY-" + orderID, Status: "PROCESSING"}, nil
 }
 
+func (f *fakePayments) CloseAttempt(_ context.Context, attemptID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closes = append(f.closes, attemptID)
+	return f.closeErr
+}
+
 type fixture struct {
+	carts    *fakeCarts
 	svc      *Service
 	quotes   *fakeQuotes
 	stock    *fakeStock
@@ -105,13 +146,14 @@ func newFixture() *fixture {
 	f := &fixture{
 		quotes:   &fakeQuotes{quote: sc01Quote()},
 		stock:    &fakeStock{},
+		carts:    &fakeCarts{},
 		payments: &fakePayments{},
 		vouchers: voucher.NewMemoryStore(voucher.DevCampaigns()...),
 		orders:   orders.NewMemoryStore(),
 	}
 	n := 0
 	var mu sync.Mutex
-	f.svc = New(Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers, WarehouseID: "WH-HCM-01"}).
+	f.svc = New(Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers, Carts: f.carts, WarehouseID: "WH-HCM-01"}).
 		WithClock(func() time.Time { return now }).
 		WithIDs(func() string { mu.Lock(); defer mu.Unlock(); n++; return "O-" + string(rune('A'+n)) })
 	return f

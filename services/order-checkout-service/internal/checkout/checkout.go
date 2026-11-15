@@ -12,6 +12,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/ids"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/saga"
@@ -25,7 +26,15 @@ const ReservationTTL = 10 * time.Minute
 const (
 	FailureOutOfStock            = "OUT_OF_STOCK"
 	FailureDependencyUnavailable = "DEPENDENCY_UNAVAILABLE"
+	FailurePaymentFailed         = "PAYMENT_FAILED"
+	FailureReservationExpired    = "RESERVATION_EXPIRED"
+	FailureUnknownExpired        = "PAYMENT_UNKNOWN_EXPIRED"
+	FailureStockLost             = "STOCK_RESERVATION_LOST"
 )
+
+// PayRefundPending is the payment status of an order that is closed while the customer's money is held: it is
+// owed back (SC05).
+const PayRefundPending = "REFUND_PENDING"
 
 var (
 	// ErrQuoteNotFound: the quote does not exist or belongs to someone else.
@@ -36,6 +45,8 @@ var (
 	ErrQuoteChanged = errors.New("quote no longer matches the catalog")
 	// ErrQuoteInvalid: the stored quote is internally inconsistent, so no money amount can be trusted.
 	ErrQuoteInvalid = errors.New("quote is not usable")
+	// ErrReservationLost: the stock reservation of the order is gone (expired, released or never made).
+	ErrReservationLost = errors.New("stock reservation is not available")
 	// ErrOutOfStock: the warehouse cannot cover the whole order (SC03).
 	ErrOutOfStock = errors.New("insufficient stock")
 )
@@ -75,11 +86,23 @@ type Quotes interface {
 type Stock interface {
 	Reserve(ctx context.Context, orderID, warehouseID string, lines []StockLine) error
 	Release(ctx context.Context, orderID string) error
+	// Commit turns the reservation into committed stock (payment captured); ErrReservationLost when it cannot.
+	Commit(ctx context.Context, orderID string) error
+	// ExceptionHold extends the reservation to the 30-minute exception hold; ErrReservationLost when it is gone.
+	ExceptionHold(ctx context.Context, orderID string) error
 }
 
 // Payments creates the single payment attempt of an order.
 type Payments interface {
 	CreateAttempt(ctx context.Context, orderID, userID string, amountVND int64) (Attempt, error)
+	// CloseAttempt tells the payment service the order is closed: money that arrives later is refunded, and
+	// money already captured is owed back. Idempotent; an unknown attempt counts as closed.
+	CloseAttempt(ctx context.Context, attemptID string) error
+}
+
+// Carts removes what the customer just bought from their cart (best effort, idempotent).
+type Carts interface {
+	RemoveOrdered(ctx context.Context, userID string, skuIDs []string) error
 }
 
 // Deps are the collaborators of a Service.
@@ -89,6 +112,7 @@ type Deps struct {
 	Stock       Stock
 	Payments    Payments
 	Vouchers    voucher.Reserver
+	Carts       Carts // optional
 	WarehouseID string
 }
 
@@ -98,6 +122,7 @@ type Principal struct{ UserID, Bearer string }
 // Service places orders.
 type Service struct {
 	Deps
+	locks orderLocks
 	now   func() time.Time
 	newID func() string
 }
@@ -231,6 +256,13 @@ func (s *Service) close(ctx context.Context, o orders.Order, from saga.State, ev
 		return o
 	}
 	s.apply(ctx, o, res.Effects)
+	if from == saga.StateReserved {
+		// The attempt may exist even if its creation call failed on the way back: close it so a payment that
+		// still arrives is refunded instead of landing on a closed order.
+		if err := s.Payments.CloseAttempt(ctx, ids.PaymentAttemptID(o.OrderID)); err != nil {
+			log.Printf("[order] payment attempt close failed for order %s (the sweeper repeats it): %s", o.OrderID, redact(err))
+		}
+	}
 	closed, err := s.Orders.Transition(ctx, o.OrderID, string(from), string(res.State), res.PaymentStatus, failureCode)
 	if err != nil {
 		log.Printf("[order] cannot store the closed state of order %s: %v", o.OrderID, err)
@@ -256,8 +288,8 @@ func (s *Service) undoAfterStoreFailure(ctx context.Context, o orders.Order) ord
 	return o
 }
 
-// apply runs the release effects. COMMIT_STOCK, CONSUME_VOUCHER and the exception effects belong to the payment
-// outcome handling (P5-T06/T07) and are ignored here.
+// apply runs the release effects of a failed placement. The effects of a payment outcome (commit, consume,
+// exception hold, refund) are run by ApplyPayment.
 func (s *Service) apply(ctx context.Context, o orders.Order, effects []saga.Effect) {
 	for _, e := range effects {
 		switch e {

@@ -78,13 +78,35 @@ func (s *MemoryStore) Apply(_ context.Context, attemptID string, o Outcome, amou
 	if eventID != "" {
 		s.events[eventID] = true
 	}
-	s.byID[attemptID] = next
+	s.store(cur, next, ch)
+	return next, ch, nil
+}
+
+// store saves the new attempt and its money effects. The caller holds the lock.
+func (s *MemoryStore) store(cur, next Attempt, ch Change) {
+	s.byID[cur.AttemptID] = next
 	sum := s.summaries[cur.OrderID]
 	sum.CapturedVND += ch.CapturedVND
 	if ch.LateRefundVND > 0 {
 		sum.RefundPending += ch.LateRefundVND
 		s.obligations[cur.OrderID] = append(s.obligations[cur.OrderID],
-			Obligation{OrderID: cur.OrderID, AttemptID: attemptID, AmountVND: ch.LateRefundVND, Reason: "LATE_CAPTURE", Status: "PENDING"})
+			Obligation{OrderID: cur.OrderID, AttemptID: cur.AttemptID, AmountVND: ch.LateRefundVND, Reason: "LATE_CAPTURE", Status: "PENDING"})
+	}
+}
+
+func (s *MemoryStore) Close(_ context.Context, attemptID string) (Attempt, Change, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.byID[attemptID]
+	if !ok {
+		return Attempt{}, Change{}, ErrNotFound
+	}
+	next, ch, err := Close(cur, s.now())
+	if err != nil {
+		return cur, Change{}, err
+	}
+	if !ch.Replay {
+		s.store(cur, next, ch)
 	}
 	return next, ch, nil
 }

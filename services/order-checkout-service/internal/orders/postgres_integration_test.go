@@ -35,4 +35,5 @@ func TestPostgresStoreContract(t *testing.T) {
 		_, _ = pool.Exec(bg, `DELETE FROM orders.orders WHERE order_id LIKE '%'||$1||'%'`, run)
 	})
 	runStoreContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
+	runCaptureContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
 }

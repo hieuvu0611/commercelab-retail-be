@@ -10,6 +10,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cart"
@@ -30,6 +31,39 @@ func registerCartRoutes(mux *http.ServeMux, svc *cart.Service) {
 	mux.Handle("PUT /api/v1/carts/me/items/{skuId}", mine(api.put))
 	mux.Handle("DELETE /api/v1/carts/me/items/{skuId}", mine(api.remove))
 	mux.Handle("POST /api/v1/carts/me/merge", mine(api.merge))
+	// The order service empties what was bought once the order is confirmed; customers cannot call it.
+	mux.Handle("POST /api/v1/carts/internal/ordered-items", internalauth.Require(http.HandlerFunc(api.removeOrdered)))
+}
+
+// removeOrdered removes the purchased SKUs from a customer's cart. Only those lines go: anything the customer
+// added after the quote stays. Removing a line that is not there is fine, so the call is idempotent.
+func (a *cartAPI) removeOrdered(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		UserID string   `json:"userId"`
+		SkuIDs []string `json:"skuIds"`
+	}
+	if !request.DecodeJSON(w, r, &body) {
+		return
+	}
+	if body.UserID == "" || len(body.UserID) > 64 || len(body.SkuIDs) == 0 || len(body.SkuIDs) > cart.MaxLines {
+		response.Error(w, r, http.StatusBadRequest, "VALIDATION_FAILED", "The request has invalid fields",
+			map[string][]string{"userId": {"userId and 1 to 50 skuIds are required"}})
+		return
+	}
+	for _, id := range body.SkuIDs {
+		if !skuIDPattern.MatchString(id) {
+			response.Error(w, r, http.StatusBadRequest, "VALIDATION_FAILED", "The request has invalid fields",
+				map[string][]string{"skuIds": {"every skuId must be valid"}})
+			return
+		}
+	}
+	for _, id := range body.SkuIDs {
+		if err := a.svc.Remove(r.Context(), body.UserID, id); err != nil {
+			writeCartError(w, r, err)
+			return
+		}
+	}
+	response.JSON(w, http.StatusOK, "Ordered items removed from the cart", map[string]any{"removed": len(body.SkuIDs)}, nil)
 }
 
 func userIDOf(r *http.Request) string {

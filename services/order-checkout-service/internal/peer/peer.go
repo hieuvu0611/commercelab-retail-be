@@ -3,6 +3,8 @@ package peer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/url"
@@ -132,4 +134,59 @@ func (p *Payments) CreateAttempt(ctx context.Context, orderID, userID string, am
 		return checkout.Attempt{}, err
 	}
 	return checkout.Attempt{AttemptID: out.AttemptID, Status: out.Status}, nil
+}
+
+// Commit turns the order's reservation into committed stock. A reservation that cannot be committed (expired,
+// released or missing) is ErrReservationLost; committing twice is fine (inventory answers 200).
+func (s *Stock) Commit(ctx context.Context, orderID string) error {
+	_, err := s.client.Do(ctx, http.MethodPost, s.base+"/api/v1/inventory/reservations/"+url.PathEscape(orderID)+"/commit",
+		svcclient.Options{Internal: true, IdempotencyKey: "commit-" + orderID}, nil, nil)
+	if hasCode(err, http.StatusConflict, "COMMIT_RESERVATION_FAILED") {
+		return checkout.ErrReservationLost
+	}
+	return err
+}
+
+// ExceptionHold extends the reservation to the 30-minute hold while the payment outcome is unknown.
+func (s *Stock) ExceptionHold(ctx context.Context, orderID string) error {
+	_, err := s.client.Do(ctx, http.MethodPost, s.base+"/api/v1/inventory/reservations/"+url.PathEscape(orderID)+"/exception-hold",
+		svcclient.Options{Internal: true, IdempotencyKey: "hold-" + orderID}, nil, nil)
+	if hasCode(err, http.StatusNotFound, "RESERVATION_NOT_FOUND") || hasCode(err, http.StatusConflict, "RESERVATION_EXPIRED") ||
+		hasCode(err, http.StatusConflict, "EXCEPTION_HOLD_FAILED") {
+		return checkout.ErrReservationLost
+	}
+	return err
+}
+
+// CloseAttempt tells the payment service the order is closed. An attempt the payment service does not know
+// (the creation call never arrived) counts as closed.
+func (p *Payments) CloseAttempt(ctx context.Context, attemptID string) error {
+	_, err := p.client.Do(ctx, http.MethodPost, p.base+"/api/v1/payments/attempts/"+url.PathEscape(attemptID)+"/close",
+		svcclient.Options{Internal: true, IdempotencyKey: "close-" + attemptID}, nil, nil)
+	if hasCode(err, http.StatusNotFound, "PAYMENT_NOT_FOUND") {
+		return nil
+	}
+	return err
+}
+
+// Carts calls the catalog service's internal cart route.
+type Carts struct {
+	base   string
+	client *svcclient.Client
+}
+
+func NewCarts(catalogURL string, c *svcclient.Client) *Carts { return &Carts{trim(catalogURL), c} }
+
+// RemoveOrdered removes the purchased SKUs from the customer's cart. Removing what is not there is fine.
+func (c *Carts) RemoveOrdered(ctx context.Context, userID string, skuIDs []string) error {
+	_, err := c.client.Do(ctx, http.MethodPost, c.base+"/api/v1/carts/internal/ordered-items",
+		svcclient.Options{Internal: true, IdempotencyKey: "ordered-" + digest(userID, skuIDs)},
+		map[string]any{"userId": userID, "skuIds": skuIDs}, nil)
+	return err
+}
+
+// digest is a short stable name for "these SKUs of this customer", used as the idempotency key of the cleanup.
+func digest(userID string, skuIDs []string) string {
+	sum := sha256.Sum256([]byte(userID + "|" + strings.Join(skuIDs, ",")))
+	return hex.EncodeToString(sum[:8])
 }
