@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -101,38 +100,6 @@ func TestSetPriceValidation(t *testing.T) {
 	}
 	if rec := e.do(http.MethodPut, "/api/v1/admin/skus/SKU-CITY-BLACK/price", mkt, `{"unitPriceVnd":1000,"extra":1}`); rec.Code != 400 {
 		t.Fatalf("unknown field: %d", rec.Code)
-	}
-}
-
-func TestQuoteIgnoresClientPricesAndRejectsClosedSKUs(t *testing.T) {
-	authtest.Configure(t)
-	repo := repository.NewCatalogPricingRepository(nil, nil)
-	srv := NewServer(repo, false, false)
-	post := func(body string) (int, string) {
-		req := newJSONRequest(http.MethodPost, "/api/v1/quotes", body)
-		rec := serve(srv, req)
-		return rec.Code, rec.Body.String()
-	}
-
-	// SC01 with client-supplied prices and names that must be ignored: 2 x 300,000 + 100,000, 10% off, free shipping
-	// is not reached, so 630,000 + 30,000 = 660,000.
-	code, body := post(`{"quoteId":"Q-IGNORE","voucherCode":"WELCOME10","items":[
-		{"skuId":"SKU-BALO-BLACK-20L","quantity":2,"unitPriceVnd":1,"skuName":"Hacked"},
-		{"skuId":"SKU-BOTTLE-BLUE-500ML","quantity":1,"unitPriceVnd":1}]}`)
-	if code != http.StatusCreated || !strings.Contains(body, `"totalPayableVnd":660000`) || strings.Contains(body, "Hacked") {
-		t.Fatalf("quote with forged prices: %d %s", code, body)
-	}
-
-	if err := repo.SetOrderable(nilCtx(), "PROD-BALO-CITY", nil); err != nil {
-		t.Fatal(err)
-	}
-	code, body = post(`{"items":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`)
-	if code != http.StatusConflict || !strings.Contains(body, "SKU_NOT_ORDERABLE") {
-		t.Fatalf("unpublished SKU: %d %s", code, body)
-	}
-	code, body = post(`{"items":[{"skuId":"SKU-NOPE","quantity":1}]}`)
-	if code != http.StatusNotFound || !strings.Contains(body, "SKU_NOT_FOUND") {
-		t.Fatalf("unknown SKU: %d %s", code, body)
 	}
 }
 

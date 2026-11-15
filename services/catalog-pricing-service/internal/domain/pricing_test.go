@@ -39,3 +39,21 @@ func TestCalculateQuote_SC01AndSC07(t *testing.T) {
 		t.Fatalf("expected bottle unit paid 90000, got %d", q.Lines[1].AllocatedUnitPaidVND)
 	}
 }
+
+func TestQuoteVersionChangesWhenWhatTheCustomerAcceptsChanges(t *testing.T) {
+	now := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	lines := func(price int64) []QuoteLineInput {
+		return []QuoteLineInput{{SkuID: "SKU-A", SkuName: "A", Quantity: 2, UnitPriceVND: price}}
+	}
+	base, _ := CalculateQuote("Q-1", "u1", "WELCOME10", 10, lines(300000), now)
+	same, _ := CalculateQuote("Q-2", "u1", "WELCOME10", 10, lines(300000), now.Add(time.Minute))
+	repriced, _ := CalculateQuote("Q-3", "u1", "WELCOME10", 10, lines(310000), now)
+	noVoucher, _ := CalculateQuote("Q-4", "u1", "", 0, lines(300000), now)
+
+	if base.Version == "" || base.Version != same.Version {
+		t.Fatalf("identical content must give the same version: %q vs %q", base.Version, same.Version)
+	}
+	if repriced.Version == base.Version || noVoucher.Version == base.Version {
+		t.Fatalf("a price or voucher change must change the version: %q %q %q", base.Version, repriced.Version, noVoucher.Version)
+	}
+}

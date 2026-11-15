@@ -1,8 +1,12 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -31,8 +35,11 @@ type QuoteLineAllocation struct {
 }
 
 type Quote struct {
-	QuoteID         string                `json:"quoteId"`
+	QuoteID string `json:"quoteId"`
+	// Version fingerprints the priced content (lines, prices, voucher, totals); it changes when any of them does.
+	Version         string                `json:"version"`
 	UserID          string                `json:"userId"`
+	AddressID       string                `json:"addressId,omitempty"`
 	VoucherCode     string                `json:"voucherCode,omitempty"`
 	DiscountPct     int64                 `json:"discountPct"`
 	SubtotalVND     int64                 `json:"subtotalVnd"`
@@ -119,7 +126,7 @@ func CalculateQuote(quoteID, userID, voucherCode string, discountPct int64, inpu
 		shippingFee = 0
 	}
 
-	return &Quote{
+	q := &Quote{
 		QuoteID:         quoteID,
 		UserID:          userID,
 		VoucherCode:     voucherCode,
@@ -130,5 +137,18 @@ func CalculateQuote(quoteID, userID, voucherCode string, discountPct int64, inpu
 		TotalPayableVND: netMerchandise + shippingFee,
 		Lines:           lines,
 		ExpiresAt:       now.UTC().Add(QuoteTTL),
-	}, nil
+	}
+	q.Version = quoteVersion(q)
+	return q, nil
+}
+
+// quoteVersion is a short fingerprint of everything the customer is asked to accept.
+func quoteVersion(q *Quote) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s|%d|%d|%d|%d|%d", q.VoucherCode, q.DiscountPct, q.SubtotalVND, q.DiscountVND, q.ShippingFeeVND, q.TotalPayableVND)
+	for _, l := range q.Lines {
+		fmt.Fprintf(&b, "|%s:%d:%d:%d", l.SkuID, l.Quantity, l.UnitPriceVND, l.LineDiscountVND)
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(sum[:])[:16]
 }
