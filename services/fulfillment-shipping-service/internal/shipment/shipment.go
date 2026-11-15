@@ -14,13 +14,15 @@ import (
 type Status string
 
 const (
-	StatusPendingPick    Status = "PENDING_PICK"
-	StatusPicking        Status = "PICKING"
-	StatusPacked         Status = "PACKED"
-	StatusHandedOver     Status = "HANDED_OVER"
-	StatusInTransit      Status = "IN_TRANSIT"
-	StatusDelivered      Status = "DELIVERED"
-	StatusDeliveryFailed Status = "DELIVERY_FAILED"
+	StatusPendingPick        Status = "PENDING_PICK"
+	StatusPicking            Status = "PICKING"
+	StatusPacked             Status = "PACKED"
+	StatusHandedOver         Status = "HANDED_OVER"
+	StatusInTransit          Status = "IN_TRANSIT"
+	StatusDelivered          Status = "DELIVERED"
+	StatusDeliveryFailed     Status = "DELIVERY_FAILED"
+	StatusPartiallyDelivered Status = "PARTIALLY_DELIVERED"
+	StatusPickBlocked        Status = "PICK_BLOCKED"
 )
 
 var (
@@ -120,4 +122,8 @@ type Store interface {
 	// SaveCarrierEvent is Save plus recording the carrier's event id in the same step; ErrDuplicateEvent (and
 	// nothing stored) when that id was applied before, so a repeated notice never dispatches or delivers twice.
 	SaveCarrierEvent(ctx context.Context, s Shipment, expectedVersion int64, carrierEventID string, ev ...events.DomainEvent) error
+	// SaveWith is the general form: Save with the carrier event id, an exception case and events, all in one step.
+	SaveWith(ctx context.Context, s Shipment, expectedVersion int64, o SaveOptions) error
+	// ListCases returns cases oldest first and the number of matches ignoring paging.
+	ListCases(ctx context.Context, f CaseFilter) ([]Case, int, error)
 }

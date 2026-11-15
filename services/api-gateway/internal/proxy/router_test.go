@@ -36,6 +36,8 @@ func TestResolveTargetRoutesEveryPublicPrefixToItsService(t *testing.T) {
 		{"/api/v1/admin/inventory/movements", "inventory"},
 		{"/api/v1/admin/shipments", "fulfillment"},
 		{"/api/v1/admin/shipments/SHP-O-1/scan", "fulfillment"},
+		{"/api/v1/admin/shipments/SHP-O-1/report-shortage", "fulfillment"},
+		{"/api/v1/admin/fulfillment-cases", "fulfillment"},
 		{"/api/v1/products", "catalog"},
 		{"/api/v1/categories", "catalog"},
 		{"/api/v1/categories/backpacks", "catalog"},

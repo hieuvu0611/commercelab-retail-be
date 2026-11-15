@@ -15,11 +15,12 @@ type MemoryStore struct {
 	byID      map[string]Shipment
 	processed map[string]bool
 	carrier   map[string]bool
+	cases     map[string]Case
 	events    map[string][]events.DomainEvent
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{byID: map[string]Shipment{}, processed: map[string]bool{}, carrier: map[string]bool{}, events: map[string][]events.DomainEvent{}}
+	return &MemoryStore{byID: map[string]Shipment{}, processed: map[string]bool{}, carrier: map[string]bool{}, cases: map[string]Case{}, events: map[string][]events.DomainEvent{}}
 }
 
 func clone(s Shipment) Shipment {
@@ -86,7 +87,12 @@ func (m *MemoryStore) Save(ctx context.Context, s Shipment, expectedVersion int6
 	return m.SaveCarrierEvent(ctx, s, expectedVersion, "", ev...)
 }
 
-func (m *MemoryStore) SaveCarrierEvent(_ context.Context, s Shipment, expectedVersion int64, carrierEventID string, ev ...events.DomainEvent) error {
+func (m *MemoryStore) SaveCarrierEvent(ctx context.Context, s Shipment, expectedVersion int64, carrierEventID string, ev ...events.DomainEvent) error {
+	return m.SaveWith(ctx, s, expectedVersion, SaveOptions{CarrierEventID: carrierEventID, Events: ev})
+}
+
+func (m *MemoryStore) SaveWith(_ context.Context, s Shipment, expectedVersion int64, o SaveOptions) error {
+	carrierEventID, ev := o.CarrierEventID, o.Events
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if carrierEventID != "" && m.carrier[carrierEventID] {
@@ -104,7 +110,40 @@ func (m *MemoryStore) SaveCarrierEvent(_ context.Context, s Shipment, expectedVe
 	}
 	m.byID[s.ShipmentID] = clone(s)
 	m.events[s.ShipmentID] = append(m.events[s.ShipmentID], ev...)
+	if o.Case != nil {
+		if _, exists := m.cases[o.Case.CaseID]; !exists {
+			m.cases[o.Case.CaseID] = *o.Case
+		}
+	}
 	return nil
+}
+
+func (m *MemoryStore) ListCases(_ context.Context, f CaseFilter) ([]Case, int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var all []Case
+	for _, c := range m.cases {
+		if (f.Status != "" && c.Status != f.Status) || (f.Type != "" && c.Type != f.Type) {
+			continue
+		}
+		if !f.AllWarehouses && !slices.Contains(f.Warehouses, c.WarehouseID) {
+			continue
+		}
+		all = append(all, c)
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].CreatedAt.Equal(all[j].CreatedAt) {
+			return all[i].CaseID < all[j].CaseID
+		}
+		return all[i].CreatedAt.Before(all[j].CreatedAt)
+	})
+	total := len(all)
+	limit := f.Limit
+	if limit <= 0 {
+		limit = DefaultLimit
+	}
+	from := min(max(f.Offset, 0), total)
+	return all[from:min(from+limit, total)], total, nil
 }
 
 // EventTypes lists the event types stored for a shipment (tests).

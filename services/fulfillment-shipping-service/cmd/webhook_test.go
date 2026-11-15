@@ -43,7 +43,6 @@ func (e *env) carrier(t *testing.T, body, signature string) *httptest.ResponseRe
 	return rec
 }
 
-
 // dispatched packs and hands over O-1 so carrier notices have something to act on.
 func dispatched(t *testing.T, e *env) {
 	t.Helper()

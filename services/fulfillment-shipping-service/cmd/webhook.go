@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -22,6 +23,7 @@ const (
 	maxWebhookBytes = 64 << 10
 	maxIDLength     = 64
 	maxStaleRetries = 5
+	maxNoticeItems  = 100
 )
 
 // Carrier notice types.
@@ -29,6 +31,7 @@ const (
 	noticeInTransit      = "IN_TRANSIT"
 	noticeDelivered      = "DELIVERED"
 	noticeDeliveryFailed = "DELIVERY_FAILED"
+	noticePartial        = "PARTIALLY_DELIVERED"
 )
 
 type noticeBody struct {
@@ -36,6 +39,11 @@ type noticeBody struct {
 	ShipmentID string `json:"shipmentId"`
 	Type       string `json:"type"`
 	Reason     string `json:"reason"`
+	// Items are the delivered units of a PARTIALLY_DELIVERED notice.
+	Items []struct {
+		SkuID    string `json:"skuId"`
+		Quantity int64  `json:"quantity"`
+	} `json:"items"`
 	OccurredAt string `json:"occurredAt"` // informational; the service uses its own clock
 }
 
@@ -73,6 +81,8 @@ func carrierWebhook(d Deps) http.HandlerFunc {
 		case noticeInTransit, noticeDelivered:
 		case noticeDeliveryFailed:
 			valid = valid && strings.TrimSpace(n.Reason) != "" && len(n.Reason) <= shipment.MaxFailureReason
+		case noticePartial:
+			valid = valid && len(n.Items) > 0 && len(n.Items) <= maxNoticeItems
 		default:
 			valid = false
 		}
@@ -108,11 +118,9 @@ func applyNotice(w http.ResponseWriter, r *http.Request, d Deps, n noticeBody) {
 			response.JSON(w, http.StatusOK, "Notice ignored", noticeResult{ShipmentID: s.ShipmentID, Status: string(s.Status)}, nil)
 			return
 		}
-		var ev []events.DomainEvent
-		if next.Status == shipment.StatusDelivered {
-			ev = append(ev, deliveredEvent(next, d))
-		}
-		err = d.Shipments.SaveCarrierEvent(r.Context(), next, s.Version, n.EventID, ev...)
+		opts := changeOptions(next, d)
+		opts.CarrierEventID = n.EventID
+		err = d.Shipments.SaveWith(r.Context(), next, s.Version, opts)
 		switch {
 		case errors.Is(err, shipment.ErrStaleVersion):
 			continue // another change got in first: look again
@@ -134,9 +142,43 @@ func transition(s shipment.Shipment, n noticeBody, now time.Time) (shipment.Ship
 		return s.MarkInTransit(now)
 	case noticeDelivered:
 		return s.MarkDelivered(now)
+	case noticePartial:
+		delivered := make([]shipment.Item, len(n.Items))
+		for i, it := range n.Items {
+			delivered[i] = shipment.Item{SkuID: it.SkuID, Quantity: it.Quantity}
+		}
+		return s.MarkPartiallyDelivered(delivered, now)
 	default:
 		return s.MarkDeliveryFailed(n.Reason, now)
 	}
+}
+
+// changeOptions lists what a status change stores besides the shipment: the delivered event, or the exception
+// case (and its event) for a failed or partial delivery.
+func changeOptions(next shipment.Shipment, d Deps) shipment.SaveOptions {
+	var o shipment.SaveOptions
+	switch next.Status {
+	case shipment.StatusDelivered:
+		o.Events = append(o.Events, deliveredEvent(next, d))
+	case shipment.StatusDeliveryFailed:
+		c := shipment.NewCase(next, shipment.CaseDeliveryFailed, "", 0, next.FailureReason, d.now())
+		o.Case, o.Events = &c, append(o.Events, caseOpenedEvent(c, d))
+	case shipment.StatusPartiallyDelivered:
+		var missing, total int64
+		for _, it := range next.Items {
+			missing, total = missing+it.PickedQuantity-it.DeliveredQuantity, total+it.PickedQuantity
+		}
+		c := shipment.NewCase(next, shipment.CasePartialDelivery, "", missing, fmt.Sprintf("%d of %d units were not delivered", missing, total), d.now())
+		o.Case, o.Events = &c, append(o.Events, caseOpenedEvent(c, d))
+	}
+	return o
+}
+
+func caseOpenedEvent(c shipment.Case, d Deps) events.DomainEvent {
+	return outbox.NewEvent(events.EventExceptionCaseOpened, aggregateShipment, c.ShipmentID, d.now(), map[string]any{
+		"caseId": c.CaseID, "caseType": c.Type, "reason": c.Reason, "shipmentId": c.ShipmentID, "orderId": c.OrderID,
+		"warehouseId": c.WarehouseID, "skuId": c.SkuID, "quantity": c.Quantity,
+	})
 }
 
 func deliveredEvent(s shipment.Shipment, d Deps) events.DomainEvent {

@@ -183,6 +183,41 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string, outbo
 		}
 	})
 
+	t.Run("a case is stored with the change, listed by scope, and opened once", func(t *testing.T) {
+		wh := uniq("WH")
+		s, _ := New(uniq("O"), "u", wh, []Item{{SkuID: "SKU-A", Quantity: 2}}, now)
+		stored, _, _ := store.Create(ctx, s, uniq("evt"), createdEvent(s))
+		blocked, err := stored.ReportShortage("SKU-A", 1, "shelf empty", now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := NewCase(blocked, CasePickShortage, "SKU-A", 1, "shelf empty", now)
+		if err := store.SaveWith(ctx, blocked, stored.Version, SaveOptions{Case: &c}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := store.Get(ctx, s.ShipmentID)
+		if got.Status != StatusPickBlocked || got.FailureReason != "shelf empty" {
+			t.Fatalf("stored = %+v", got)
+		}
+		list, total, err := store.ListCases(ctx, CaseFilter{Warehouses: []string{wh}})
+		if err != nil || total != 1 || list[0].CaseID != c.CaseID || list[0].Type != CasePickShortage || !list[0].SkuBlocked || list[0].Quantity != 1 {
+			t.Fatalf("cases = %+v (%d), %v", list, total, err)
+		}
+		if _, total, _ := store.ListCases(ctx, CaseFilter{Warehouses: nil}); total != 0 {
+			t.Fatalf("no scope listed %d cases", total)
+		}
+		if _, total, _ := store.ListCases(ctx, CaseFilter{Warehouses: []string{wh}, Type: CaseDeliveryFailed}); total != 0 {
+			t.Fatalf("type filter listed %d cases", total)
+		}
+		// The same case id again opens nothing new.
+		if err := store.SaveWith(ctx, blocked, blocked.Version, SaveOptions{Case: &c}); err != nil {
+			t.Fatal(err)
+		}
+		if _, total, _ := store.ListCases(ctx, CaseFilter{Warehouses: []string{wh}}); total != 1 {
+			t.Fatalf("%d cases after a repeat", total)
+		}
+	})
+
 	t.Run("twenty concurrent saves of one version store exactly one", func(t *testing.T) {
 		s := newShipment(uniq("O"))
 		stored, _, _ := store.Create(ctx, s, uniq("evt"), createdEvent(s))
