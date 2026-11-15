@@ -236,6 +236,7 @@ services:
     environment:
       <<: [*go-env, *store-env, *jwt-env]
       CATALOG_PRICING_PORT: 8081
+      INVENTORY_SERVICE_URL: http://inventory-warehouse-service:8082
       S3_ENDPOINT: http://object-storage:9000
       S3_PUBLIC_ENDPOINT: http://localhost:${S3_HOST_PORT:-9000}
       S3_AUTO_CREATE_BUCKET: "true"

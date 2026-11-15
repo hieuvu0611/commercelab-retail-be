@@ -2,17 +2,26 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/inventory"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
 )
 
 // newStorefrontServer returns a server with two published products (priced through the memory repository).
 func newStorefrontServer(t *testing.T) http.Handler {
+	t.Helper()
+	return newStorefrontServerWithStock(t, nil)
+}
+
+// newStorefrontServerWithStock connects an availability lookup (nil: availability stays unknown).
+func newStorefrontServerWithStock(t *testing.T, stock domain.AvailabilityLookup) http.Handler {
 	t.Helper()
 	authtest.Configure(t)
 	ctx := context.Background()
@@ -47,7 +56,7 @@ func newStorefrontServer(t *testing.T) http.Handler {
 	}
 	add("city-pack", "City Backpack", "SKU-CITY", "Black", 300000, time.Now().Add(-2*time.Hour))
 	add("mini-pack", "Mini Backpack", "SKU-MINI", "Red", 150000, time.Now().Add(-time.Hour))
-	return NewServerWithDeps(repo, false, false, Deps{Categories: cats, Products: prods, Prices: prices, Storefront: domain.NewStorefrontService(products, cats, repo)})
+	return NewServerWithDeps(repo, false, false, Deps{Categories: cats, Products: prods, Prices: prices, Storefront: domain.NewStorefrontService(products, cats, repo).WithAvailability(stock)})
 }
 
 type listResp struct {
@@ -138,5 +147,61 @@ func TestStorefrontDetail(t *testing.T) {
 	rec = serve(srv, newJSONRequest(http.MethodGet, "/api/v1/products/nope", ""))
 	if rec.Code != 404 || decode[errorBody](t, rec).Code != "PRODUCT_NOT_FOUND" {
 		t.Fatalf("%d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestStorefrontShowsAvailabilityFromTheInventoryServiceAndSurvivesItsFailure(t *testing.T) {
+	type availabilityList struct {
+		Data []struct {
+			Slug         string `json:"slug"`
+			Availability string `json:"availability"`
+		} `json:"data"`
+	}
+	type availabilityDetail struct {
+		Data struct {
+			Availability string `json:"availability"`
+			SKUs         []struct {
+				SkuID        string `json:"skuId"`
+				Availability string `json:"availability"`
+			} `json:"skus"`
+		} `json:"data"`
+	}
+	for name, tc := range map[string]struct {
+		handler        http.HandlerFunc
+		city, mini, pd string
+	}{
+		"inventory answers": {func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"data":{"items":[{"skuId":"SKU-CITY","state":"LOW"},{"skuId":"SKU-MINI","state":"OUT"}]}}`)
+		}, "LOW", "OUT", "LOW"},
+		"inventory errors": {func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }, "unknown", "unknown", "unknown"},
+		"inventory is slow": {func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-time.After(5 * time.Second):
+			case <-r.Context().Done():
+			}
+		}, "unknown", "unknown", "unknown"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := httptest.NewServer(tc.handler)
+			defer stub.Close()
+			srv := newStorefrontServerWithStock(t, inventory.NewClient(stub.URL, nil))
+			start := time.Now()
+			list := decode[availabilityList](t, serve(srv, newJSONRequest(http.MethodGet, "/api/v1/products", "")))
+			got := map[string]string{}
+			for _, d := range list.Data {
+				got[d.Slug] = d.Availability
+			}
+			if got["city-pack"] != tc.city || got["mini-pack"] != tc.mini {
+				t.Fatalf("list availability = %v", got)
+			}
+			rec := serve(srv, newJSONRequest(http.MethodGet, "/api/v1/products/city-pack", ""))
+			detail := decode[availabilityDetail](t, rec)
+			if rec.Code != 200 || detail.Data.Availability != tc.pd || detail.Data.SKUs[0].Availability != tc.city {
+				t.Fatalf("detail = %d %s", rec.Code, rec.Body)
+			}
+			if time.Since(start) > 4*time.Second {
+				t.Fatalf("took %v: the inventory call must time out after about one second", time.Since(start))
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -20,9 +21,48 @@ const (
 	SortPriceAsc  = "price_asc"
 	SortPriceDesc = "price_desc"
 
-	// AvailabilityUnknown is reported until inventory is connected (Phase 3).
+	// AvailabilityUnknown is reported when inventory cannot answer in time; the page never fails because of it.
 	AvailabilityUnknown = "unknown"
+
+	// Availability states of the inventory service (D-12).
+	AvailabilityInStock = "IN_STOCK"
+	AvailabilityLow     = "LOW"
+	AvailabilityOut     = "OUT"
+
+	// AvailabilityTimeout bounds the batch call to inventory so a slow inventory service cannot slow the catalog.
+	AvailabilityTimeout = time.Second
 )
+
+// AvailabilityLookup returns the storefront state of each SKU (IN_STOCK, LOW or OUT).
+// SKUs missing from the result are reported as unknown.
+type AvailabilityLookup interface {
+	States(ctx context.Context, skuIDs []string) (map[string]string, error)
+}
+
+// ProductAvailability summarises the SKUs of one product: IN_STOCK if any is, else LOW if any is,
+// else unknown if any is unknown, else OUT. No SKUs means unknown.
+func ProductAvailability(states []string) string {
+	var low, unknown bool
+	for _, st := range states {
+		switch st {
+		case AvailabilityInStock:
+			return AvailabilityInStock
+		case AvailabilityLow:
+			low = true
+		case AvailabilityOut:
+		default:
+			unknown = true
+		}
+	}
+	switch {
+	case low:
+		return AvailabilityLow
+	case unknown || len(states) == 0:
+		return AvailabilityUnknown
+	default:
+		return AvailabilityOut
+	}
+}
 
 // SKUPrice is the price in effect for an orderable SKU. Prices include VAT.
 type SKUPrice struct {
@@ -83,6 +123,7 @@ type StorefrontItem struct {
 	MinPriceVND       int64               `json:"minPriceVnd"`
 	MaxPriceVND       int64               `json:"maxPriceVnd"`
 	Options           map[string][]string `json:"options"`
+	Availability      string              `json:"availability"`
 }
 
 // StorefrontPage is one page of results with real totals.
@@ -124,6 +165,36 @@ type StorefrontService struct {
 	store      StorefrontStore
 	categories CategoryLister
 	prices     PriceLookup
+	stock      AvailabilityLookup
+}
+
+// WithAvailability connects the inventory lookup; without it every availability is unknown.
+func (s *StorefrontService) WithAvailability(stock AvailabilityLookup) *StorefrontService {
+	s.stock = stock
+	return s
+}
+
+// availability asks inventory once for all SKUs, within AvailabilityTimeout. Any failure yields no states,
+// which callers report as unknown.
+func (s *StorefrontService) availability(ctx context.Context, skuIDs []string) map[string]string {
+	if s.stock == nil || len(skuIDs) == 0 {
+		return map[string]string{}
+	}
+	ctx, cancel := context.WithTimeout(ctx, AvailabilityTimeout)
+	defer cancel()
+	states, err := s.stock.States(ctx, skuIDs)
+	if err != nil {
+		log.Printf("[catalog] availability unavailable, reporting unknown: %v", err)
+		return map[string]string{}
+	}
+	return states
+}
+
+func stateOrUnknown(states map[string]string, skuID string) string {
+	if st, ok := states[skuID]; ok {
+		return st
+	}
+	return AvailabilityUnknown
 }
 
 func NewStorefrontService(store StorefrontStore, categories CategoryLister, prices PriceLookup) *StorefrontService {
@@ -209,6 +280,7 @@ type candidate struct {
 	ref      PublishedRef
 	min, max int64
 	options  map[string]map[string]string // axis -> lower-cased value -> display value
+	skuIDs   []string                     // matching SKUs, for availability
 }
 
 // List returns one page of published products. A product matches when at least one of its active, orderable
@@ -258,6 +330,7 @@ func (s *StorefrontService) List(ctx context.Context, q StorefrontQuery) (Storef
 			matched[c.ref.ID] = c
 		}
 		c.min, c.max = min(c.min, price.UnitPriceVND), max(c.max, price.UnitPriceVND)
+		c.skuIDs = append(c.skuIDs, k.SkuID)
 		for axis, value := range k.Attributes {
 			if c.options[axis] == nil {
 				c.options[axis] = map[string]string{}
@@ -297,11 +370,20 @@ func (s *StorefrontService) List(ctx context.Context, q StorefrontQuery) (Storef
 	if err != nil {
 		return StorefrontPage{}, err
 	}
+	var pageSkus []string
+	for _, c := range window {
+		pageSkus = append(pageSkus, matched[c.ref.ID].skuIDs...)
+	}
+	states := s.availability(ctx, pageSkus)
 	for _, p := range products {
 		c := matched[p.ID]
+		productStates := make([]string, len(c.skuIDs))
+		for i, id := range c.skuIDs {
+			productStates[i] = stateOrUnknown(states, id)
+		}
 		item := StorefrontItem{
 			ID: p.ID, Slug: p.Slug, Name: p.Name, Brand: p.Brand, PrimaryCategoryID: p.PrimaryCategoryID,
-			MinPriceVND: c.min, MaxPriceVND: c.max, Options: map[string][]string{},
+			MinPriceVND: c.min, MaxPriceVND: c.max, Options: map[string][]string{}, Availability: ProductAvailability(productStates),
 		}
 		if len(p.Images) > 0 {
 			item.ImageKey = p.Images[0].Key
@@ -336,9 +418,12 @@ func (s *StorefrontService) Detail(ctx context.Context, slug string) (Storefront
 		return StorefrontDetail{}, err
 	}
 	sort.Slice(skus, func(i, j int) bool { return skus[i].SkuID < skus[j].SkuID })
+	states := s.availability(ctx, ids)
 	out := make([]StorefrontSKU, 0, len(skus))
+	skuStates := make([]string, 0, len(skus))
 	for _, k := range skus {
-		item := StorefrontSKU{SkuID: k.SkuID, Attributes: k.Attributes, Availability: AvailabilityUnknown, VatRatePct: 10}
+		item := StorefrontSKU{SkuID: k.SkuID, Attributes: k.Attributes, Availability: stateOrUnknown(states, k.SkuID), VatRatePct: 10}
+		skuStates = append(skuStates, item.Availability)
 		if price, ok := prices[k.SkuID]; ok {
 			amount := price.UnitPriceVND
 			item.UnitPriceVND, item.VatRatePct = &amount, price.VatRatePct
@@ -352,6 +437,6 @@ func (s *StorefrontService) Detail(ctx context.Context, slug string) (Storefront
 	return StorefrontDetail{
 		ID: p.ID, Slug: p.Slug, Name: p.Name, Description: p.Description, Brand: p.Brand,
 		PrimaryCategoryID: p.PrimaryCategoryID, CategoryIDs: p.CategoryIDs, VariantAxes: p.VariantAxes, Specs: p.Specs,
-		Images: images, SKUs: out, Availability: AvailabilityUnknown,
+		Images: images, SKUs: out, Availability: ProductAvailability(skuStates),
 	}, nil
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cache"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/inventory"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/storage"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/migrations"
@@ -36,6 +37,8 @@ type Deps struct {
 	Images     *domain.ImageService
 	Storefront *domain.StorefrontService
 	Cache      cache.Cache
+	// Availability supplies stock states for the storefront; nil reports every availability as unknown.
+	Availability domain.AvailabilityLookup
 }
 
 func NewServer(repo *repository.CatalogPricingRepository, pgConnected, mongoConnected bool) http.Handler {
@@ -56,7 +59,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 		if mongoStore := repo.MongoStore(); mongoStore != nil {
 			reads = repository.NewMongoStorefrontStore(mongoStore)
 		}
-		deps.Storefront = domain.NewStorefrontService(reads, deps.Categories, repo)
+		deps.Storefront = domain.NewStorefrontService(reads, deps.Categories, repo).WithAvailability(deps.Availability)
 	}
 	registerCategoryRoutes(mux, deps.Categories, deps.Cache)
 	if deps.Images == nil {
@@ -228,6 +231,7 @@ func main() {
 	}
 
 	repo := repository.NewCatalogPricingRepository(pgPool, mongoStore)
+	deps.Availability = inventory.NewClient(config.EnvOrDefault("INVENTORY_SERVICE_URL", "http://localhost:8082"), nil)
 	if deps.Products != nil {
 		deps.Products.WithPricing(repo, repo)
 		deps.Prices = domain.NewPriceService(deps.Products, repo)
