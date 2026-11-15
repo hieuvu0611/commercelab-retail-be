@@ -14,6 +14,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
 )
 
@@ -69,12 +70,21 @@ func (f *fakePayments) AttemptState(context.Context, string) (checkout.PaymentSt
 
 func (f *fakePayments) CloseAttempt(context.Context, string) error { f.closes.Add(1); return nil }
 
+type fakeAddresses struct{ err error }
+
+func (f *fakeAddresses) Get(context.Context, string, string) (snapshot.Address, error) {
+	return snapshot.Address{Recipient: "Nguyen Van Lan", Phone: "0901234567", Line1: "1 Le Loi", Ward: "Ben Nghe", District: "District 1", Province: "Ho Chi Minh"}, f.err
+}
+
 type orderFixture struct {
-	srv      http.Handler
-	quotes   *fakeQuotes
-	stock    *fakeStock
-	payments *fakePayments
-	vouchers *voucher.MemoryStore
+	orders    *orders.MemoryStore
+	snaps     *snapshot.MemoryStore
+	addresses *fakeAddresses
+	srv       http.Handler
+	quotes    *fakeQuotes
+	stock     *fakeStock
+	payments  *fakePayments
+	vouchers  *voucher.MemoryStore
 }
 
 func newOrderFixture(t *testing.T) *orderFixture {
@@ -94,9 +104,17 @@ func newOrderFixture(t *testing.T) *orderFixture {
 		payments: &fakePayments{},
 		vouchers: voucher.NewMemoryStore(voucher.DevCampaigns()...),
 	}
-	svc := checkout.New(checkout.Deps{Orders: orders.NewMemoryStore(), Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers, WarehouseID: "WH-HCM-01"})
+	f.orders, f.snaps, f.addresses = orders.NewMemoryStore(), snapshot.NewMemoryStore(), &fakeAddresses{}
+	svc := checkout.New(checkout.Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers,
+		Addresses: f.addresses, Snapshots: f.snaps, WarehouseID: "WH-HCM-01"})
 	f.srv = NewServer(svc, voucher.NewService(f.vouchers), voucher.NewAdmin(f.vouchers))
 	return f
+}
+
+// svcWith builds a service over the fixture's stores with another snapshot store.
+func (f *orderFixture) svcWith(snaps snapshot.Store) *checkout.Service {
+	return checkout.New(checkout.Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers,
+		Addresses: f.addresses, Snapshots: snaps, WarehouseID: "WH-HCM-01"})
 }
 
 func (f *orderFixture) place(t *testing.T, token, key, body string) *httptest.ResponseRecorder {
@@ -221,6 +239,8 @@ func TestPlaceOrderQuoteErrors(t *testing.T) {
 	}{
 		{"unknown quote", func(f *orderFixture) { f.quotes.err = checkout.ErrQuoteNotFound }, 404, "QUOTE_NOT_FOUND"},
 		{"other customer's quote", func(f *orderFixture) { f.quotes.quote.UserID = "user-minh" }, 404, "QUOTE_NOT_FOUND"},
+		{"address no longer exists", func(f *orderFixture) { f.addresses.err = checkout.ErrAddressNotFound }, 422, "ADDRESS_NOT_FOUND"},
+		{"IAM down", func(f *orderFixture) { f.addresses.err = dependency.Wrap(errors.New("refused")) }, 503, "DEPENDENCY_UNAVAILABLE"},
 		{"changed quote", func(f *orderFixture) { f.quotes.quote.Stale = true }, 409, "QUOTE_CHANGED"},
 		{"expired quote", func(f *orderFixture) { f.quotes.quote.ExpiresAt = time.Now().Add(-time.Second) }, 409, "QUOTE_EXPIRED"},
 		{"inconsistent quote", func(f *orderFixture) { f.quotes.quote.TotalPayableVND = 1 }, 409, "QUOTE_INVALID"},

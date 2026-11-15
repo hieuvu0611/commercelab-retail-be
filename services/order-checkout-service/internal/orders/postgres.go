@@ -170,7 +170,8 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders `+where, f.UserID, statuses, f.FailureCode, before, after).Scan(&total); err != nil {
 		return nil, 0, dependency.Wrap(err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT `+orderColumns+` FROM orders.orders `+where+` ORDER BY created_at DESC, order_id DESC LIMIT $6 OFFSET $7`,
+	rows, err := s.pool.Query(ctx, `SELECT `+orderColumns+`, (SELECT COALESCE(SUM(quantity), 0) FROM orders.order_items i WHERE i.order_id = o.order_id)
+		FROM orders.orders o `+where+` ORDER BY created_at DESC, order_id DESC LIMIT $6 OFFSET $7`,
 		f.UserID, statuses, f.FailureCode, before, after, PageLimit(f.Limit), max(f.Offset, 0))
 	if err != nil {
 		return nil, 0, dependency.Wrap(err)
@@ -178,8 +179,10 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	defer rows.Close()
 	out := []Order{}
 	for rows.Next() {
-		o, err := scanOrder(rows)
-		if err != nil {
+		var o Order
+		if err := rows.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentStatus,
+			&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND,
+			&o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt, &o.ItemCount); err != nil {
 			return nil, 0, dependency.Wrap(err)
 		}
 		out = append(out, o)

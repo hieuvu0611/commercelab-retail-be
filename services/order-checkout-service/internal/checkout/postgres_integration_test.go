@@ -13,6 +13,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/saga"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
 )
 
@@ -48,7 +49,8 @@ func TestPlaceOrderOnPostgresSC04AndSC10(t *testing.T) {
 	quotes := &fakeQuotes{quote: sc01Quote()}
 	quotes.quote.VoucherCode = code
 	stock, payments := &fakeStock{}, &fakePayments{}
-	svc := New(Deps{Orders: orders.NewPostgresStore(pool), Quotes: quotes, Stock: stock, Payments: payments, Vouchers: vouchers, WarehouseID: "WH-HCM-01"})
+	svc := New(Deps{Orders: orders.NewPostgresStore(pool), Quotes: quotes, Stock: stock, Payments: payments, Vouchers: vouchers,
+		Addresses: &fakeAddresses{}, Snapshots: snapshot.NewMemoryStore(), WarehouseID: "WH-HCM-01"})
 
 	// SC04: twenty concurrent clicks with one key make one order and one reservation of everything.
 	a := Principal{UserID: userA, Bearer: "tok"}

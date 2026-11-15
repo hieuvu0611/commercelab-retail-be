@@ -97,6 +97,9 @@ func (s *MemoryStore) Query(_ context.Context, f Filter) ([]Order, int, error) {
 	for _, o := range s.orders {
 		if matches(o, f) {
 			c := clone(o)
+			for _, it := range c.Items {
+				c.ItemCount += it.Quantity
+			}
 			c.Items = nil
 			out = append(out, c)
 		}

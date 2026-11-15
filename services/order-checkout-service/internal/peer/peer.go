@@ -13,6 +13,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 )
 
 func trim(base string) string { return strings.TrimRight(base, "/") }
@@ -207,4 +208,27 @@ func (p *Payments) AttemptState(ctx context.Context, orderID string) (checkout.P
 		return checkout.PaymentState{}, false, err
 	}
 	return checkout.PaymentState{AttemptID: out.AttemptID, Status: out.Status, CapturedVND: out.CapturedAmountVND}, true, nil
+}
+
+// Addresses reads delivery addresses from the IAM service with the customer's own token.
+type Addresses struct {
+	base   string
+	client *svcclient.Client
+}
+
+func NewAddresses(iamURL string, c *svcclient.Client) *Addresses { return &Addresses{trim(iamURL), c} }
+
+// Get returns the address if it is in the token owner's address book (checkout.ErrAddressNotFound otherwise).
+// The address is personal data: it is returned to the caller and never logged here.
+func (a *Addresses) Get(ctx context.Context, bearer, addressID string) (snapshot.Address, error) {
+	var out snapshot.Address
+	_, err := a.client.Do(ctx, http.MethodGet, a.base+"/api/v1/users/me/addresses/"+url.PathEscape(addressID), svcclient.Options{Bearer: bearer}, nil, &out)
+	var apiErr *svcclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
+		return snapshot.Address{}, checkout.ErrAddressNotFound
+	}
+	if err != nil {
+		return snapshot.Address{}, err
+	}
+	return out, nil
 }

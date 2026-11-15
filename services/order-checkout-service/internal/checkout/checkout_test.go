@@ -10,6 +10,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/saga"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
 )
 
@@ -79,6 +80,26 @@ func (f *fakeStock) Release(context.Context, string) error {
 	return nil
 }
 
+type fakeAddresses struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+	addr  snapshot.Address
+}
+
+func (f *fakeAddresses) Get(_ context.Context, _, _ string) (snapshot.Address, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	return f.addr, f.err
+}
+
+type failingSnapshots struct{ snapshot.Store }
+
+func (failingSnapshots) Save(context.Context, snapshot.Snapshot) error {
+	return dependency.Wrap(errors.New("mongo down"))
+}
+
 type fakeCarts struct {
 	mu      sync.Mutex
 	removed [][]string
@@ -133,6 +154,8 @@ func (f *fakePayments) CloseAttempt(_ context.Context, attemptID string) error {
 }
 
 type fixture struct {
+	addrs    *fakeAddresses
+	snaps    *snapshot.MemoryStore
 	carts    *fakeCarts
 	svc      *Service
 	quotes   *fakeQuotes
@@ -159,13 +182,15 @@ func newFixture() *fixture {
 		quotes:   &fakeQuotes{quote: sc01Quote()},
 		stock:    &fakeStock{},
 		carts:    &fakeCarts{},
+		addrs:    &fakeAddresses{addr: snapshot.Address{Recipient: "Nguyen Van Lan", Phone: "0901234567", Line1: "1 Le Loi", Ward: "Ben Nghe", District: "District 1", Province: "Ho Chi Minh"}},
+		snaps:    snapshot.NewMemoryStore(),
 		payments: &fakePayments{},
 		vouchers: voucher.NewMemoryStore(voucher.DevCampaigns()...),
 		orders:   orders.NewMemoryStore(),
 	}
 	n := 0
 	var mu sync.Mutex
-	f.svc = New(Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers, Carts: f.carts, WarehouseID: "WH-HCM-01"}).
+	f.svc = New(Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers, Carts: f.carts, Addresses: f.addrs, Snapshots: f.snaps, WarehouseID: "WH-HCM-01"}).
 		WithClock(func() time.Time { return now }).
 		WithIDs(func() string { mu.Lock(); defer mu.Unlock(); n++; return "O-" + string(rune('A'+n)) })
 	return f
