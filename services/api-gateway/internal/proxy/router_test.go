@@ -24,6 +24,8 @@ func TestResolveTargetRoutesEveryPublicPrefixToItsService(t *testing.T) {
 		{"/api/v1/admin/orders/O-1", "order"},
 		{"/api/v1/orders/O-1", "order"},
 		{"/api/v1/orders/O-1/tracking", "fulfillment"},
+		{"/api/v1/admin/shipments/SHP-O-1/confirm-stop", "fulfillment"}, // the warehouse confirms a stop (P7-T02)
+		{"/api/v1/inventory/shipments/stop", "inventory"},
 		{"/api/v1/orders/O-1/cancel", "order"},                        // the customer's cancel request (P7-T01)
 		{"/api/v1/shipments/internal/orders/O-1/stop", "fulfillment"}, // internal: the service refuses callers without the internal token
 		{"/api/v1/admin/vouchers", "order"},

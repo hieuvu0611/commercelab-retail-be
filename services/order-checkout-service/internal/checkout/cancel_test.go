@@ -6,7 +6,10 @@ import (
 	"sync"
 	"testing"
 
+	"time"
+
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/saga"
 )
@@ -109,15 +112,175 @@ func TestCancelAfterHandoverIsRefused_Case4(t *testing.T) {
 	}
 }
 
-func TestCancelWhileWarehouseIsPackingIsNotYetAccepted(t *testing.T) {
+func TestCancelWhileWarehouseIsPackingWaitsForTheWarehouse_Case3(t *testing.T) {
 	f := newFixture()
 	o := f.paid(t)
-	f.ful.result = StopInProgress
-	if _, err := f.cancel(t, o); !errors.Is(err, ErrBeingPacked) {
-		t.Fatalf("cancel = %v, want ErrBeingPacked", err)
+	f.ful.result = StopRequested
+	for i := 0; i < 3; i++ { // the customer asks again while waiting
+		got, err := f.cancel(t, o)
+		if err != nil || got.Status != string(saga.StateCancelRequested) || got.PaymentStatus != saga.PayCaptured || got.RefundPendingVND != 0 {
+			t.Fatalf("request #%d = %+v %v, want CANCEL_REQUESTED and still paid", i, got, err)
+		}
 	}
-	if got, _ := f.orders.Get(context.Background(), o.OrderID); got.Status != "CONFIRMED" || f.stock.committedReleases != 0 {
-		t.Fatalf("order = %+v released=%d", got, f.stock.committedReleases)
+	if f.stock.committedReleases != 0 || len(f.payments.closes) != 0 {
+		t.Fatalf("a cancellation that is only requested released stock (%d) or closed the payment (%v)", f.stock.committedReleases, f.payments.closes)
+	}
+	if reserved, consumed := f.voucherBuckets(t); reserved != 0 || consumed != 1 {
+		t.Fatalf("voucher reserved=%d consumed=%d", reserved, consumed)
+	}
+	if countEvents(f, events.EventOrderCancelRequested) != 1 || countEvents(f, events.EventOrderCancelled) != 0 {
+		t.Fatalf("events = %v, want one order.cancel_requested and no order.cancelled", f.eventTypes())
+	}
+}
+
+func (f *fixture) requested(t *testing.T) orders.Order {
+	t.Helper()
+	o := f.paid(t)
+	f.ful.result = StopRequested
+	got, err := f.cancel(t, o)
+	if err != nil || got.Status != string(saga.StateCancelRequested) {
+		t.Fatalf("request = %+v %v", got, err)
+	}
+	return got
+}
+
+func TestWarehouseStopsBeforeHandoverTheOrderIsCancelledAndRefunded_SC06A(t *testing.T) {
+	f := newFixture()
+	o := f.requested(t)
+	f.ful.result = StopStopped
+	for i := 0; i < 3; i++ { // the stopped event is delivered more than once, and the sweeper looks too
+		if err := f.svc.SettleCancel(context.Background(), o.OrderID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _ := f.orders.Get(context.Background(), o.OrderID)
+	if got.Status != string(saga.StateCancelled) || got.PaymentStatus != PayRefundPending || got.RefundPendingVND != 660000 || got.CapturedVND != 660000 {
+		t.Fatalf("order = %+v, want CANCELLED with the whole 660,000 owed", got)
+	}
+	if f.stock.committedReleases != 1 || len(f.payments.closes) != 1 || countEvents(f, events.EventOrderCancelled) != 1 {
+		t.Fatalf("committedReleases=%d closes=%v events=%v, want each once", f.stock.committedReleases, f.payments.closes, f.eventTypes())
+	}
+	if reserved, consumed := f.voucherBuckets(t); reserved != 0 || consumed != 1 {
+		t.Fatalf("voucher reserved=%d consumed=%d, a paid cancellation keeps the use", reserved, consumed)
+	}
+	// Asking again after the fact is the stored answer, not another cancellation.
+	if again, err := f.cancel(t, got); err != nil || again.Status != string(saga.StateCancelled) || f.stock.committedReleases != 1 {
+		t.Fatalf("repeat = %+v %v releases=%d", again, err, f.stock.committedReleases)
+	}
+}
+
+func TestHandoverWinsTheCancellationIsRejectedAndNothingIsRefunded_SC06B(t *testing.T) {
+	f := newFixture()
+	o := f.requested(t)
+	f.ful.result = StopTooLate
+	for i := 0; i < 3; i++ {
+		if err := f.svc.SettleCancel(context.Background(), o.OrderID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _ := f.orders.Get(context.Background(), o.OrderID)
+	if got.Status != string(saga.StateInFulfillment) || got.PaymentStatus != saga.PayCaptured || got.RefundPendingVND != 0 {
+		t.Fatalf("order = %+v, want back in fulfillment, still paid, nothing owed", got)
+	}
+	if f.stock.committedReleases != 0 || len(f.payments.closes) != 0 || countEvents(f, events.EventOrderCancelled) != 0 || countEvents(f, events.EventOrderCancelRejected) != 1 {
+		t.Fatalf("released=%d closes=%v events=%v", f.stock.committedReleases, f.payments.closes, f.eventTypes())
+	}
+	// The customer asking again is refused as a handed over order (case 4).
+	if _, err := f.cancel(t, got); !errors.Is(err, ErrHandedOver) {
+		t.Fatalf("cancel after the rejection = %v, want ErrHandedOver", err)
+	}
+}
+
+func TestCancelRequestIsFinishedByTheCustomerAskingAgainOnceTheStopIsConfirmed(t *testing.T) {
+	f := newFixture()
+	o := f.requested(t)
+	f.ful.result = StopStopped
+	got, err := f.cancel(t, o)
+	if err != nil || got.Status != string(saga.StateCancelled) || got.RefundPendingVND != 660000 {
+		t.Fatalf("cancel = %+v %v", got, err)
+	}
+}
+
+func TestSettleOnlyActsOnAWaitingCancellation(t *testing.T) {
+	f := newFixture()
+	o := f.paid(t) // CONFIRMED: a stopped or handed over event for it changes nothing
+	f.ful.result = StopStopped
+	if err := f.svc.SettleCancel(context.Background(), o.OrderID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.SettleCancel(context.Background(), "O-nope"); err != nil {
+		t.Fatalf("unknown order = %v", err)
+	}
+	if got, _ := f.orders.Get(context.Background(), o.OrderID); got.Status != "CONFIRMED" || f.ful.calls != 0 || f.stock.committedReleases != 0 {
+		t.Fatalf("order = %+v asked=%d released=%d", got, f.ful.calls, f.stock.committedReleases)
+	}
+}
+
+func TestSettleKeepsWaitingWhileTheWarehouseHasNotAnswered(t *testing.T) {
+	f := newFixture()
+	o := f.requested(t)
+	if err := f.svc.SettleCancel(context.Background(), o.OrderID); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.orders.Get(context.Background(), o.OrderID); got.Status != string(saga.StateCancelRequested) {
+		t.Fatalf("order = %+v", got)
+	}
+	f.ful.err = dependency.Wrap(errors.New("fulfillment down"))
+	if err := f.svc.SettleCancel(context.Background(), o.OrderID); !dependency.IsUnavailable(err) {
+		t.Fatalf("outage = %v, want a retryable error", err)
+	}
+}
+
+func TestSweeperSettlesAWaitingCancellation(t *testing.T) {
+	f := newFixture()
+	o := f.requested(t)
+	f.ful.result = StopStopped
+	// The memory store stamps updates with the wall clock, so age the order by moving the sweeper's clock past it.
+	svc := f.svc.WithClock(func() time.Time { return time.Now().UTC().Add(time.Hour) })
+	if st := svc.Sweep(context.Background()); st.CancelsSettled != 1 {
+		t.Fatalf("sweep = %+v, want one settled cancellation", st)
+	}
+	if got, _ := f.orders.Get(context.Background(), o.OrderID); got.Status != string(saga.StateCancelled) {
+		t.Fatalf("order = %+v", got)
+	}
+}
+
+func TestConcurrentRequestsAndSettlesCancelOnce_SC06A(t *testing.T) {
+	f := newFixture()
+	o := f.requested(t)
+	f.ful.result = StopStopped
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				if _, err := f.cancel(t, o); err != nil {
+					t.Errorf("cancel: %v", err)
+				}
+			} else if err := f.svc.SettleCancel(context.Background(), o.OrderID); err != nil {
+				t.Errorf("settle: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if f.stock.committedReleases != 1 || len(f.payments.closes) != 1 || countEvents(f, events.EventOrderCancelled) != 1 {
+		t.Fatalf("committedReleases=%d closes=%d cancelled=%d, want 1 of each", f.stock.committedReleases, len(f.payments.closes), countEvents(f, events.EventOrderCancelled))
+	}
+}
+
+func TestPaymentReportsWhileACancellationWaitsChangeNothing(t *testing.T) {
+	f := newFixture()
+	o := f.requested(t)
+	before := len(f.eventTypes())
+	for _, status := range []string{"CAPTURED", "CAPTURED_LATE", "UNKNOWN", "FAILED", "EXPIRED_30M"} {
+		got := f.apply(t, o, status, 660000)
+		if got.Status != string(saga.StateCancelRequested) || got.PaymentStatus != saga.PayCaptured {
+			t.Fatalf("%s = %+v", status, got)
+		}
+	}
+	if len(f.eventTypes()) != before || f.stock.commits != 1 {
+		t.Fatalf("events=%v commits=%d", f.eventTypes(), f.stock.commits)
 	}
 }
 

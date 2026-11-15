@@ -64,3 +64,11 @@ func (s *Service) orderCancelled(o orders.Order, paymentStatus string, refundVND
 		"paymentStatus": paymentStatus, "refundAmountVnd": refundVND, "warehouseId": o.WarehouseID,
 	})
 }
+
+func (s *Service) orderCancelRequested(o orders.Order) events.DomainEvent {
+	return s.orderEvent(events.EventOrderCancelRequested, o, map[string]any{"warehouseId": o.WarehouseID})
+}
+
+func (s *Service) orderCancelRejected(o orders.Order) events.DomainEvent {
+	return s.orderEvent(events.EventOrderCancelRejected, o, map[string]any{"warehouseId": o.WarehouseID, "reason": "HANDED_OVER"})
+}

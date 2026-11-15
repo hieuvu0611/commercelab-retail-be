@@ -174,3 +174,84 @@ func TestConcurrentCancelsOnPostgresAreOneCancellation(t *testing.T) {
 		_, _ = pool.Exec(ctx, `DELETE FROM orders.idempotency_keys WHERE user_id = $1`, user)
 	}
 }
+
+// SC06 on the real stores: a waiting cancellation settled by five instances at once is one cancellation (branch
+// A) or one rejection (branch B); never both, never twice.
+func TestConcurrentSettlesOnPostgresAreOneOutcome_SC06(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL_ORDERS")
+	if dsn == "" {
+		t.Skip("DATABASE_URL_ORDERS is not set; run `make test-integration`")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	pool, err := db.ConnectPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	run := fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000_000)
+	for _, branch := range []string{"A", "B"} {
+		user, code := "it-sc06-"+branch+"-"+run, "SC06-"+branch+"-"+run
+		t.Cleanup(func() {
+			bg := context.Background()
+			_, _ = pool.Exec(bg, `DELETE FROM orders.voucher_usages WHERE voucher_code = $1`, code)
+			_, _ = pool.Exec(bg, `DELETE FROM orders.voucher_campaigns WHERE voucher_code = $1`, code)
+			_, _ = pool.Exec(bg, `DELETE FROM orders.idempotency_keys WHERE user_id = $1`, user)
+			_, _ = pool.Exec(bg, `DELETE FROM orders.outbox_events WHERE payload->>'userId' = $1`, user)
+			_, _ = pool.Exec(bg, `DELETE FROM orders.orders WHERE user_id = $1`, user)
+		})
+		vouchers := voucher.NewPostgresStore(pool)
+		if _, err := voucher.NewAdmin(vouchers).Create(ctx, code, "it", voucher.Fields{Name: "sc06", DiscountPct: 10, TotalQuota: 5, PerCustomerLimit: 5, Status: voucher.StatusActive}); err != nil {
+			t.Fatal(err)
+		}
+		quotes := &fakeQuotes{quote: sc01Quote()}
+		quotes.quote.VoucherCode, quotes.quote.UserID = code, user
+		stock, payments, ful := &fakeStock{}, &fakePayments{}, &fakeFulfillment{result: StopRequested}
+		build := func() *Service {
+			return New(Deps{Orders: orders.NewPostgresStore(pool), Quotes: quotes, Stock: stock, Payments: payments, Vouchers: vouchers,
+				Addresses: &fakeAddresses{}, Snapshots: snapshot.NewMemoryStore(), Fulfillment: ful, WarehouseID: "WH-HCM-01"}).
+				WithClock(func() time.Time { return now })
+		}
+		o, _, err := build().Place(ctx, Principal{UserID: user, Bearer: "tok"}, "key-"+code, "Q-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o, err = build().ApplyPayment(ctx, o.OrderID, report(o, "CAPTURED", 660000)); err != nil || o.Status != "CONFIRMED" {
+			t.Fatalf("capture = %+v %v", o, err)
+		}
+		if got, err := build().Cancel(ctx, user, o.OrderID); err != nil || got.Status != string(saga.StateCancelRequested) {
+			t.Fatalf("request = %+v %v", got, err)
+		}
+		ful.result = map[string]StopResult{"A": StopStopped, "B": StopTooLate}[branch]
+		services := make([]*Service, 5)
+		for i := range services {
+			services[i] = build()
+		}
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := services[i%5].SettleCancel(ctx, o.OrderID); err != nil {
+					t.Errorf("settle: %v", err)
+				}
+			}()
+		}
+		wg.Wait()
+		count := func(typ string) (n int) {
+			_ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.outbox_events WHERE event_type = $1 AND aggregate_id = $2`, typ, o.OrderID).Scan(&n)
+			return n
+		}
+		final, _ := orders.NewPostgresStore(pool).Get(ctx, o.OrderID)
+		c, _ := vouchers.Get(ctx, code)
+		if c.ConsumedQuota != 1 || c.ReservedQuota != 0 {
+			t.Fatalf("branch %s: voucher reserved=%d consumed=%d, want the use kept", branch, c.ReservedQuota, c.ConsumedQuota)
+		}
+		if branch == "A" && (final.Status != "CANCELLED" || final.RefundPendingVND != 660000 || count("order.cancelled.v1") != 1 || count("order.cancel_rejected.v1") != 0) {
+			t.Fatalf("branch A: order = %+v cancelled=%d", final, count("order.cancelled.v1"))
+		}
+		if branch == "B" && (final.Status != "IN_FULFILLMENT" || final.RefundPendingVND != 0 || count("order.cancel_rejected.v1") != 1 || count("order.cancelled.v1") != 0) {
+			t.Fatalf("branch B: order = %+v rejected=%d", final, count("order.cancel_rejected.v1"))
+		}
+	}
+}

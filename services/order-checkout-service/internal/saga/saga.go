@@ -81,6 +81,10 @@ type (
 	// CustomerCancelled: the cancellation was accepted (B05): before payment, or after payment while the warehouse
 	// has not handed the parcel over.
 	CustomerCancelled struct{}
+	// CancelRequested: a paid order is cancelled while the warehouse picks or packs it (SC06): wait for the stop.
+	CancelRequested struct{}
+	// CancelRejected: the parcel was handed over before the warehouse stopped it (SC06 branch B).
+	CancelRejected struct{}
 )
 
 func (Reserved) sagaEvent()          {}
@@ -90,6 +94,8 @@ func (PaymentFailed) sagaEvent()     {}
 func (PaymentUnknown) sagaEvent()    {}
 func (HoldExpired) sagaEvent()       {}
 func (CustomerCancelled) sagaEvent() {}
+func (CancelRequested) sagaEvent()   {}
+func (CancelRejected) sagaEvent()    {}
 
 // Result is the outcome of a transition.
 type Result struct {
@@ -125,6 +131,17 @@ func Next(s State, e Event) (Result, error) {
 		case CustomerCancelled:
 			if s != StateDelivered {
 				return paidCancellation()
+			}
+		case CancelRequested:
+			if s == StateConfirmed || s == StateInFulfillment {
+				return result(StateCancelRequested, PayCaptured)
+			}
+			if s == StateCancelRequested {
+				return result(s, PayCaptured) // a repeated request waits for the same stop
+			}
+		case CancelRejected:
+			if s == StateCancelRequested {
+				return result(StateInFulfillment, PayCaptured)
 			}
 		}
 	case StateCancelled:

@@ -98,3 +98,32 @@ func TestShipmentDeliveredDoesNotTouchOrdersThatNeverEnteredFulfillment(t *testi
 		t.Fatal("a closed order was delivered")
 	}
 }
+
+type fakeSettler struct{ calls []string }
+
+func (f *fakeSettler) SettleCancel(_ context.Context, orderID string) error {
+	f.calls = append(f.calls, orderID)
+	return nil
+}
+
+func TestStoppedAndHandedOverEventsSettleAWaitingCancellation(t *testing.T) {
+	settler := &fakeSettler{}
+	h := &Handler{Orders: orders.NewMemoryStore(), Cancels: settler}
+	for _, typ := range []string{events.EventShipmentStopped, events.EventShipmentHandedOver} {
+		if err := h.Handle(context.Background(), shipmentEvent(typ, "O-1")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(settler.calls) != 2 || settler.calls[0] != "O-1" {
+		t.Fatalf("settles = %v", settler.calls)
+	}
+	// Without a settler, or without an order id, the events are skipped instead of blocking the partition.
+	if err := (&Handler{Orders: orders.NewMemoryStore()}).Handle(context.Background(), shipmentEvent(events.EventShipmentStopped, "O-1")); err != nil {
+		t.Fatal(err)
+	}
+	noID := shipmentEvent(events.EventShipmentStopped, "")
+	noID.Payload = map[string]any{}
+	if err := h.Handle(context.Background(), noID); err != nil || len(settler.calls) != 2 {
+		t.Fatalf("no order id: %v calls=%v", err, settler.calls)
+	}
+}

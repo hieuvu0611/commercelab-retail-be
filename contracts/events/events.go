@@ -18,6 +18,7 @@ const (
 	EventOrderFailed           = "order.failed.v1"
 	EventOrderCancelRequested  = "order.cancel_requested.v1"
 	EventOrderCancelled        = "order.cancelled.v1"
+	EventOrderCancelRejected   = "order.cancel_rejected.v1"
 	EventPaymentUnknown30m     = "payment.unknown_30m.v1"
 	EventPaymentCaptured       = "payment.captured.v1"
 	EventPaymentLateRefundNeed = "payment.late_refund_required.v1"

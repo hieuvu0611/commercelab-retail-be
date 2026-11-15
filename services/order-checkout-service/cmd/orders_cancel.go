@@ -10,6 +10,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/saga"
 )
 
 // cancelView is what the customer gets back from a cancel request.
@@ -34,6 +35,11 @@ func cancelOrder(svc *checkout.Service) http.HandlerFunc {
 		if o.RefundPendingVND > 0 {
 			view.RefundObligation = &refundView{AmountVND: o.RefundPendingVND, Status: "PENDING"}
 		}
+		if o.Status == string(saga.StateCancelRequested) {
+			// The warehouse is picking or packing: the cancellation is not promised until it confirms the stop (SC06).
+			response.JSON(w, http.StatusAccepted, "Cancellation requested. Waiting for the warehouse to confirm it stopped the parcel.", view, nil)
+			return
+		}
 		response.JSON(w, http.StatusOK, "Order cancelled", view, nil)
 	}
 }
@@ -46,8 +52,6 @@ func writeCancelError(w http.ResponseWriter, r *http.Request, err error) {
 		response.Error(w, r, http.StatusConflict, "ORDER_HANDED_OVER", "The parcel was already handed to the carrier; refuse it at delivery or return it after delivery", nil)
 	case errors.Is(err, checkout.ErrPaymentUnresolved):
 		response.Error(w, r, http.StatusConflict, "PAYMENT_UNRESOLVED", "The payment result is not known yet; try again once it is resolved", nil)
-	case errors.Is(err, checkout.ErrBeingPacked):
-		response.Error(w, r, http.StatusConflict, "ORDER_BEING_PACKED", "The warehouse is already packing this order", nil)
 	case errors.Is(err, checkout.ErrNotCancellable):
 		response.Error(w, r, http.StatusConflict, "ORDER_NOT_CANCELLABLE", "This order cannot be cancelled", nil)
 	case errors.Is(err, orders.ErrStaleState):

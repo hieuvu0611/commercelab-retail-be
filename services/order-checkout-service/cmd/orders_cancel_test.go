@@ -104,16 +104,6 @@ func TestCancelRefusalsUseDocumentedCodes(t *testing.T) {
 			t.Fatalf("%d %s", rec.Code, rec.Body.String())
 		}
 	})
-	t.Run("being packed", func(t *testing.T) {
-		f := newOrderFixture(t)
-		token := bearer(t, "user-lan", "CUSTOMER")
-		id := f.paidOrder(t)
-		f.ful.result = checkout.StopInProgress
-		rec := f.cancel(t, token, id)
-		if rec.Code != http.StatusConflict || decodeJSON[orderError](t, rec).Code != "ORDER_BEING_PACKED" {
-			t.Fatalf("%d %s", rec.Code, rec.Body.String())
-		}
-	})
 	t.Run("already closed", func(t *testing.T) {
 		f := newOrderFixture(t)
 		token := bearer(t, "user-lan", "CUSTOMER")
@@ -144,5 +134,33 @@ func TestCancelIsForTheOwningCustomerOnly(t *testing.T) {
 	}
 	if f.stock.releases.Load() != 0 {
 		t.Fatal("a refused cancel released stock")
+	}
+}
+
+func TestCancelWhileThePackingIsInProgressIsAcceptedAsARequest_Case3(t *testing.T) {
+	f := newOrderFixture(t)
+	token := bearer(t, "user-lan", "CUSTOMER")
+	id := f.paidOrder(t)
+	f.ful.result = checkout.StopRequested
+	for i := 0; i < 2; i++ {
+		rec := f.cancel(t, token, id)
+		got := decodeJSON[cancelResp](t, rec)
+		if rec.Code != http.StatusAccepted || got.Data.Status != "CANCEL_REQUESTED" || got.Data.PaymentStatus != "CAPTURED" || got.Data.RefundObligation != nil {
+			t.Fatalf("request #%d = %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+	if f.stock.committedReleases.Load() != 0 {
+		t.Fatal("a requested cancellation released stock")
+	}
+	list := f.get(t, token, "/api/v1/orders?status=CANCEL_REQUESTED")
+	if list.Code != http.StatusOK {
+		t.Fatalf("status filter = %d %s", list.Code, list.Body.String())
+	}
+	// The warehouse stops the parcel; asking again now settles the order as cancelled with the refund.
+	f.ful.result = checkout.StopStopped
+	rec := f.cancel(t, token, id)
+	got := decodeJSON[cancelResp](t, rec)
+	if rec.Code != http.StatusOK || got.Data.Status != "CANCELLED" || got.Data.RefundObligation == nil || got.Data.RefundObligation.AmountVND != 660000 {
+		t.Fatalf("after the stop = %d %s", rec.Code, rec.Body.String())
 	}
 }
