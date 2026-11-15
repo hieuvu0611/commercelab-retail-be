@@ -2,13 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"log"
 	"net/http"
-	"sync/atomic"
-	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
@@ -22,12 +17,11 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cart"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/inventory"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/peer"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/storage"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/migrations"
 )
-
-var quoteSeq uint64 = 1
 
 // Deps are the optional collaborators of the catalog handler. Without Categories or Products the matching
 // endpoints use an in-memory store (development and tests); without Cache nothing is cached.
@@ -40,6 +34,10 @@ type Deps struct {
 	Cache      cache.Cache
 	// Carts defaults to an in-memory store (development and tests).
 	Carts cart.Store
+	// Vouchers and Addresses are the order and IAM services the quote asks; without them a quote request that
+	// needs one answers 503.
+	Vouchers  VoucherChecker
+	Addresses AddressChecker
 	// Availability supplies stock states for the storefront; nil reports every availability as unknown.
 	Availability domain.AvailabilityLookup
 }
@@ -77,7 +75,8 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	if deps.Carts == nil {
 		deps.Carts = cart.NewMemoryStore()
 	}
-	registerCartRoutes(mux, cart.NewService(deps.Carts, repo))
+	cartSvc := cart.NewService(deps.Carts, repo)
+	registerCartRoutes(mux, cartSvc)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "catalog-pricing-service healthy", map[string]any{
@@ -89,89 +88,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 		}, nil)
 	})
 
-	// P02, P08, SC01: Tạo báo giá có hiệu lực 5 phút & lưu vào pricing.quotes
-	mux.HandleFunc("POST /api/v1/quotes", func(w http.ResponseWriter, r *http.Request) {
-		// Prices and names are never taken from the client: any unitPriceVnd or skuName it sends is ignored.
-		var req struct {
-			QuoteID     string `json:"quoteId"`
-			UserID      string `json:"userId"`
-			VoucherCode string `json:"voucherCode"`
-			Items       []struct {
-				SkuID    string `json:"skuId"`
-				Quantity int64  `json:"quantity"`
-			} `json:"items"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			response.Error(w, r, http.StatusBadRequest, "INVALID_REQUEST", "The quote request is invalid", nil)
-			return
-		}
-		if req.UserID == "" {
-			req.UserID = "user-lan"
-		}
-		lines := make([]domain.QuoteLineInput, len(req.Items))
-		for i, item := range req.Items {
-			sp, err := repo.GetSkuPrice(r.Context(), item.SkuID)
-			switch {
-			case dependency.IsUnavailable(err):
-				dependency.WriteUnavailable(w, r, err)
-				return
-			case errors.Is(err, repository.ErrSkuNotFound):
-				response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", "SKU not found: "+item.SkuID, nil)
-				return
-			case errors.Is(err, repository.ErrSkuNotOrderable):
-				response.Error(w, r, http.StatusConflict, "SKU_NOT_ORDERABLE", "SKU cannot be ordered right now: "+item.SkuID, nil)
-				return
-			case err != nil:
-				log.Printf("[catalog] quote price lookup failed: %v", err)
-				response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error", nil)
-				return
-			}
-			lines[i] = domain.QuoteLineInput{SkuID: sp.SkuID, SkuName: sp.SkuName, Quantity: item.Quantity, UnitPriceVND: sp.UnitPriceVND}
-		}
-
-		var discountPct int64
-		if req.VoucherCode == "WELCOME10" {
-			discountPct = 10
-		}
-		quoteID := req.QuoteID
-		if quoteID == "" {
-			seq := atomic.AddUint64(&quoteSeq, 1)
-			quoteID = fmt.Sprintf("Q-%s-%03d", time.Now().UTC().Format("150405"), seq)
-		}
-		quote, err := domain.CalculateQuote(quoteID, req.UserID, req.VoucherCode, discountPct, lines, time.Now().UTC())
-		if err != nil {
-			response.Error(w, r, http.StatusBadRequest, "QUOTE_CALCULATION_FAILED", err.Error(), nil)
-			return
-		}
-		if err := repo.SaveQuote(r.Context(), quote); err != nil {
-			if dependency.IsUnavailable(err) {
-				dependency.WriteUnavailable(w, r, err)
-				return
-			}
-			response.Error(w, r, http.StatusInternalServerError, "QUOTE_PERSIST_FAILED", err.Error(), nil)
-			return
-		}
-		response.JSON(w, http.StatusCreated, "Tạo báo giá 5 phút thành công", quote, nil)
-	})
-
-	// P02: Truy vấn báo giá theo quoteId kèm kiểm tra hiệu lực 5 phút
-	mux.HandleFunc("GET /api/v1/quotes/{quoteId}", func(w http.ResponseWriter, r *http.Request) {
-		quoteID := r.PathValue("quoteId")
-		quote, err := repo.GetQuoteByID(r.Context(), quoteID)
-		if dependency.IsUnavailable(err) {
-			dependency.WriteUnavailable(w, r, err)
-			return
-		}
-		if err != nil {
-			response.Error(w, r, http.StatusNotFound, "QUOTE_NOT_FOUND", err.Error(), nil)
-			return
-		}
-		isExpired := time.Now().UTC().After(quote.ExpiresAt)
-		response.JSON(w, http.StatusOK, "Lấy thông tin báo giá thành công", map[string]any{
-			"quote":     quote,
-			"isExpired": isExpired,
-		}, nil)
-	})
+	registerQuoteRoutes(mux, repo, cartSvc, deps.Vouchers, deps.Addresses)
 
 	return middleware.Chain(mux)
 }
@@ -239,6 +156,8 @@ func main() {
 	}
 
 	repo := repository.NewCatalogPricingRepository(pgPool, mongoStore)
+	deps.Vouchers = peer.NewVouchers(config.EnvOrDefault("ORDER_SERVICE_URL", "http://localhost:8083"), nil)
+	deps.Addresses = peer.NewAddresses(config.EnvOrDefault("IAM_SERVICE_URL", "http://localhost:8087"), nil)
 	deps.Availability = inventory.NewClient(config.EnvOrDefault("INVENTORY_SERVICE_URL", "http://localhost:8082"), nil)
 	if deps.Products != nil {
 		deps.Products.WithPricing(repo, repo)
