@@ -67,6 +67,7 @@ type Filter struct {
 	UserID        string
 	Statuses      []string
 	FailureCode   string
+	WarehouseIDs  []string // only orders of these warehouses (a warehouse manager's scope)
 	UpdatedBefore time.Time // updated at or before
 	UpdatedAfter  time.Time // updated at or after
 	Offset, Limit int       // Limit 0 means 50
