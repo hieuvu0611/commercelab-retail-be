@@ -81,6 +81,14 @@ func (s *PostgresStore) Get(ctx context.Context, attemptID string) (Attempt, err
 	return a, dependency.Wrap(err)
 }
 
+func (s *PostgresStore) GetByOrder(ctx context.Context, orderID string) (Attempt, error) {
+	a, err := scanAttempt(s.pool.QueryRow(ctx, `SELECT `+attemptColumns+` FROM payments.payment_attempts WHERE order_id = $1`, orderID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Attempt{}, ErrNotFound
+	}
+	return a, dependency.Wrap(err)
+}
+
 func (s *PostgresStore) Apply(ctx context.Context, attemptID string, o Outcome, amountVND int64, eventID string) (Attempt, Change, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

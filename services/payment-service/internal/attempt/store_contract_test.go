@@ -144,6 +144,18 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string) {
 		}
 	})
 
+	t.Run("an attempt is found by its order", func(t *testing.T) {
+		a := newAttempt()
+		_, _, _ = store.Create(ctx, a)
+		got, err := store.GetByOrder(ctx, a.OrderID)
+		if err != nil || got.AttemptID != a.AttemptID || got.Status != StatusProcessing {
+			t.Fatalf("GetByOrder = %+v, %v", got, err)
+		}
+		if _, err := store.GetByOrder(ctx, "O-missing"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("GetByOrder missing = %v", err)
+		}
+	})
+
 	t.Run("closing a processing attempt turns a later capture into a refund", func(t *testing.T) {
 		a := newAttempt()
 		_, _, _ = store.Create(ctx, a)

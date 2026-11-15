@@ -415,3 +415,19 @@ func TestCloseAttemptIsInternalOnlyAndMakesALaterCaptureLate(t *testing.T) {
 		t.Fatalf("obligations = %+v", obs)
 	}
 }
+
+func TestAttemptOfAnOrderIsReadOnlyByServices(t *testing.T) {
+	f := newFixture(t, true)
+	f.createAttempt("pay-O-1", "O-1", "user-lan", 660000)
+	path := "/api/v1/payments/orders/O-1/attempt"
+	if rec := f.do(http.MethodGet, path, map[string]string{"Authorization": "Bearer " + token("user-lan")}, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("customer token: %d", rec.Code)
+	}
+	rec := f.do(http.MethodGet, path, map[string]string{internalauth.Header: internalToken}, "")
+	if got := decode[attemptResp](t, rec); rec.Code != http.StatusOK || got.Data.AttemptID != "PAY-O-1" || got.Data.Status != "PROCESSING" {
+		t.Fatalf("read: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.do(http.MethodGet, "/api/v1/payments/orders/O-none/attempt", map[string]string{internalauth.Header: internalToken}, ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown order: %d", rec.Code)
+	}
+}

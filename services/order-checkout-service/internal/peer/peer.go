@@ -190,3 +190,21 @@ func digest(userID string, skuIDs []string) string {
 	sum := sha256.Sum256([]byte(userID + "|" + strings.Join(skuIDs, ",")))
 	return hex.EncodeToString(sum[:8])
 }
+
+// AttemptState reads the payment service's attempt of an order. An order without an attempt is found=false.
+func (p *Payments) AttemptState(ctx context.Context, orderID string) (checkout.PaymentState, bool, error) {
+	var out struct {
+		AttemptID         string `json:"attemptId"`
+		Status            string `json:"status"`
+		CapturedAmountVND int64  `json:"capturedAmountVnd"`
+	}
+	_, err := p.client.Do(ctx, http.MethodGet, p.base+"/api/v1/payments/orders/"+url.PathEscape(orderID)+"/attempt",
+		svcclient.Options{Internal: true}, nil, &out)
+	if hasCode(err, http.StatusNotFound, "PAYMENT_NOT_FOUND") {
+		return checkout.PaymentState{}, false, nil
+	}
+	if err != nil {
+		return checkout.PaymentState{}, false, err
+	}
+	return checkout.PaymentState{AttemptID: out.AttemptID, Status: out.Status, CapturedVND: out.CapturedAmountVND}, true, nil
+}

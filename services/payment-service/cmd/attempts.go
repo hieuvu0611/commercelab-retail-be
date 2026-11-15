@@ -55,6 +55,7 @@ func registerAttemptRoutes(mux *http.ServeMux, store attempt.Store, opts Options
 	mux.Handle("POST /api/v1/payments/attempts", internalauth.Require(http.HandlerFunc(api.create)))
 	mux.Handle("GET /api/v1/payments/attempts/{attemptId}", auth.RequireAuth(http.HandlerFunc(api.get)))
 	mux.Handle("POST /api/v1/payments/simulator/{attemptId}/outcome", auth.RequireAuth(http.HandlerFunc(api.simulate)))
+	mux.Handle("GET /api/v1/payments/orders/{orderId}/attempt", internalauth.Require(http.HandlerFunc(api.byOrder)))
 	mux.Handle("POST /api/v1/payments/attempts/{attemptId}/close", internalauth.Require(http.HandlerFunc(api.close)))
 	mux.HandleFunc("POST /api/v1/payments/webhooks/simulator", api.webhook)
 }
@@ -231,6 +232,19 @@ func (a *attemptAPI) notifyOrder(r *http.Request, at attempt.Attempt) {
 	defer cancel()
 	if err := a.opts.Orders.PaymentOutcome(ctx, at); err != nil {
 		log.Printf("[payment] order callback for attempt %s failed (it is retried on redelivery or by reconcile): %v", at.AttemptID, err)
+	}
+}
+
+// byOrder lets the order service read where an order's payment stands (it reconciles lost callbacks with it).
+func (a *attemptAPI) byOrder(w http.ResponseWriter, r *http.Request) {
+	cur, err := a.store.GetByOrder(r.Context(), r.PathValue("orderId"))
+	switch {
+	case errors.Is(err, attempt.ErrNotFound):
+		response.Error(w, r, http.StatusNotFound, "PAYMENT_NOT_FOUND", "Payment attempt not found", nil)
+	case err != nil:
+		writeStoreError(w, r, err)
+	default:
+		response.JSON(w, http.StatusOK, "Payment attempt", cur, nil)
 	}
 }
 

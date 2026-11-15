@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
@@ -48,6 +49,9 @@ func NewServer(checkoutSvc *checkout.Service, vouchers *voucher.Service, admin *
 // defaultWarehouseID is the warehouse that fulfils online orders until warehouse routing exists.
 const defaultWarehouseID = "WH-HCM-01"
 
+// defaultSweepInterval is how often the order sweeper times out unpaid orders and repairs lost callbacks.
+const defaultSweepInterval = "30s"
+
 func main() {
 	port := config.EnvOrDefault("ORDER_CHECKOUT_PORT", "8083")
 	pgURL := config.EnvOrDefault("DATABASE_URL_ORDERS", "postgres://order_svc_user:order_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=orders")
@@ -90,6 +94,12 @@ func main() {
 		Carts:       peer.NewCarts(config.EnvOrDefault("CATALOG_SERVICE_URL", "http://localhost:8081"), peers),
 		WarehouseID: config.EnvOrDefault("ORDER_WAREHOUSE_ID", defaultWarehouseID),
 	})
+
+	sweepEvery, err := time.ParseDuration(config.EnvOrDefault("ORDER_SWEEP_INTERVAL", defaultSweepInterval))
+	if err != nil || sweepEvery < time.Second {
+		log.Fatalf("[order-checkout-service] ORDER_SWEEP_INTERVAL must be a duration of at least 1s: %v", err)
+	}
+	go checkoutSvc.RunSweeper(ctx, sweepEvery)
 
 	log.Printf("[order-checkout-service] listening on :%s (schema: orders, mongo: order_commercial_snapshots)", port)
 	log.Fatal(http.ListenAndServe(":"+port, NewServer(checkoutSvc, voucher.NewService(store), voucher.NewAdmin(store))))

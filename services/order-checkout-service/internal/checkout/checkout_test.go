@@ -95,6 +95,8 @@ func (f *fakeCarts) RemoveOrdered(_ context.Context, userID string, skuIDs []str
 type fakePayments struct {
 	mu       sync.Mutex
 	closes   []string
+	states   map[string]PaymentState
+	stateErr error
 	closeErr error
 	calls    int
 	amount   int64
@@ -111,6 +113,16 @@ func (f *fakePayments) CreateAttempt(_ context.Context, orderID, userID string, 
 		return Attempt{}, f.failure
 	}
 	return Attempt{AttemptID: "PAY-" + orderID, Status: "PROCESSING"}, nil
+}
+
+func (f *fakePayments) AttemptState(_ context.Context, orderID string) (PaymentState, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.stateErr != nil {
+		return PaymentState{}, false, f.stateErr
+	}
+	st, ok := f.states[orderID]
+	return st, ok, nil
 }
 
 func (f *fakePayments) CloseAttempt(_ context.Context, attemptID string) error {

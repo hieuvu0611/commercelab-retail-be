@@ -63,6 +63,10 @@ func (f *fakePayments) CreateAttempt(_ context.Context, orderID, _ string, _ int
 	return checkout.Attempt{AttemptID: "PAY-" + orderID, Status: "PROCESSING"}, nil
 }
 
+func (f *fakePayments) AttemptState(context.Context, string) (checkout.PaymentState, bool, error) {
+	return checkout.PaymentState{}, false, nil
+}
+
 func (f *fakePayments) CloseAttempt(context.Context, string) error { f.closes.Add(1); return nil }
 
 type orderFixture struct {

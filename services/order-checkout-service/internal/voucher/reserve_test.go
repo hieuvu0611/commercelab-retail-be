@@ -47,6 +47,32 @@ func runReserveContract(t *testing.T, store reserveStore, prefix string) {
 		return c.ReservedQuota, c.ConsumedQuota
 	}
 
+	t.Run("reserved uses are listed by age", func(t *testing.T) {
+		code := mk("AGE", 5, 3, nil)
+		if err := store.Reserve(ctx, code, "u-age", "O-AGE1", now); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Reserve(ctx, code, "u-age2", "O-AGE2", now); err != nil {
+			t.Fatal(err)
+		}
+		_ = store.Consume(ctx, code, "O-AGE2")
+		has := func(list []Reservation, order string) bool {
+			for _, r := range list {
+				if r.OrderID == order {
+					return r.Code == code
+				}
+			}
+			return false
+		}
+		recent, err := store.ReservedBefore(ctx, now.Add(time.Hour), 1000)
+		if err != nil || !has(recent, "O-AGE1") || has(recent, "O-AGE2") {
+			t.Fatalf("list = %+v, %v: want the reserved use only", recent, err)
+		}
+		if old, _ := store.ReservedBefore(ctx, now.Add(-time.Hour), 1000); has(old, "O-AGE1") {
+			t.Fatal("a use taken now is not older than an hour")
+		}
+	})
+
 	t.Run("consume turns the reserved use into a consumed one exactly once", func(t *testing.T) {
 		code := mk("CONSUME", 5, 3, nil)
 		if err := store.Reserve(ctx, code, "u1", "O-C1", now); err != nil {

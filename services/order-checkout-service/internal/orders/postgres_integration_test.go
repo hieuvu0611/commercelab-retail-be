@@ -36,4 +36,5 @@ func TestPostgresStoreContract(t *testing.T) {
 	})
 	runStoreContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
 	runCaptureContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
+	runQueryContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
 }
