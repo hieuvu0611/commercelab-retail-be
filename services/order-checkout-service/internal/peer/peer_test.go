@@ -297,3 +297,26 @@ func TestFulfillmentStopShipmentSendsTheOrderAndMapsTheResult(t *testing.T) {
 		}
 	}
 }
+
+func TestPaymentsCloseAttemptForCancelSendsTheReason(t *testing.T) {
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("0123456789abcdef0123456789abcdef")
+	var got map[string]string
+	var path, key string
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, key = r.URL.Path, r.Header.Get("Idempotency-Key")
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"gone","code":"PAYMENT_NOT_FOUND","status":404,"data":{}}`))
+	}))
+	defer srv.Close()
+	p := NewPayments(srv.URL, client())
+	if err := p.CloseAttemptForCancel(context.Background(), "PAY-O-1"); err != nil || path != "/api/v1/payments/attempts/PAY-O-1/close" || got["reason"] != "ORDER_CANCELLED" || key == "" {
+		t.Fatalf("err=%v path=%s body=%v key=%q", err, path, got, key)
+	}
+	status = http.StatusNotFound
+	if err := p.CloseAttemptForCancel(context.Background(), "PAY-O-1"); err != nil {
+		t.Fatalf("an unknown attempt counts as closed: %v", err)
+	}
+}

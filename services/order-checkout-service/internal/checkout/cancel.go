@@ -3,6 +3,7 @@ package checkout
 import (
 	"context"
 	"errors"
+	"log"
 
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/ids"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
@@ -128,7 +129,7 @@ func (s *Service) cancelUnpaid(ctx context.Context, o orders.Order) (orders.Orde
 	if err != nil {
 		return o, err
 	}
-	if err := s.Payments.CloseAttempt(ctx, ids.PaymentAttemptID(o.OrderID)); err != nil {
+	if err := s.Payments.CloseAttemptForCancel(ctx, ids.PaymentAttemptID(o.OrderID)); err != nil {
 		return o, err
 	}
 	s.apply(ctx, o, res.Effects)
@@ -186,7 +187,7 @@ func (s *Service) cancelPaid(ctx context.Context, o orders.Order) (orders.Order,
 			return o, err
 		}
 	}
-	if err := s.Payments.CloseAttempt(ctx, ids.PaymentAttemptID(o.OrderID)); err != nil {
+	if err := s.Payments.CloseAttemptForCancel(ctx, ids.PaymentAttemptID(o.OrderID)); err != nil {
 		return o, err
 	}
 	owed := o.CapturedVND
@@ -261,4 +262,46 @@ func (s *Service) settleCancel(ctx context.Context, orderID string) (bool, error
 		err = nil // the rejection is stored, or another instance already settled it
 	}
 	return moved.Status != o.Status, err
+}
+
+// RefundReport is the payment service's view after a payout: the totals refunded and still owed, and what was
+// captured. The values are absolute, so a repeated or reordered report changes nothing.
+type RefundReport struct{ RefundedVND, PendingVND, CapturedVND int64 }
+
+// refundSettled reports whether money was already paid back, which a replayed payment report must not undo.
+func refundSettled(paymentStatus string) bool {
+	return paymentStatus == PayRefunded || paymentStatus == PayPartiallyRefunded
+}
+
+// ApplyRefund stores a payout on the order: REFUNDED when nothing is owed any more, PARTIALLY_REFUNDED while some
+// is. A report that would refund more than was captured, or is negative, is dropped (it can never become valid,
+// and retrying it would block the event stream); an unknown order is skipped. Only retryable errors are returned.
+func (s *Service) ApplyRefund(ctx context.Context, orderID string, r RefundReport) error {
+	defer s.locks.lock(orderID)()
+	o, err := s.Orders.Get(ctx, orderID)
+	if errors.Is(err, orders.ErrNotFound) {
+		log.Printf("[order] refund report names unknown order %q; skipped", orderID)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	ceiling := max(o.CapturedVND, r.CapturedVND)
+	if r.RefundedVND < 0 || r.PendingVND < 0 || r.RefundedVND+r.PendingVND > ceiling {
+		log.Printf("[order] refund report for order %s is above the captured amount; ignored", orderID)
+		return nil
+	}
+	status := o.PaymentStatus
+	switch {
+	case r.RefundedVND > 0 && r.PendingVND == 0:
+		status = PayRefunded
+	case r.RefundedVND > 0:
+		status = PayPartiallyRefunded
+	}
+	if o.CapturedVND < ceiling {
+		if err := s.Orders.RecordCapture(ctx, orderID, ceiling, r.PendingVND); err != nil {
+			return err
+		}
+	}
+	return s.Orders.RecordRefund(ctx, orderID, r.RefundedVND, r.PendingVND, status)
 }

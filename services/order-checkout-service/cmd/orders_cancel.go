@@ -31,10 +31,7 @@ func cancelOrder(svc *checkout.Service) http.HandlerFunc {
 			writeCancelError(w, r, err)
 			return
 		}
-		view := cancelView{OrderID: o.OrderID, Status: o.Status, PaymentStatus: o.PaymentStatus}
-		if o.RefundPendingVND > 0 {
-			view.RefundObligation = &refundView{AmountVND: o.RefundPendingVND, Status: "PENDING"}
-		}
+		view := cancelView{OrderID: o.OrderID, Status: o.Status, PaymentStatus: o.PaymentStatus, RefundObligation: refundOf(o)}
 		if o.Status == string(saga.StateCancelRequested) {
 			// The warehouse is picking or packing: the cancellation is not promised until it confirms the stop (SC06).
 			response.JSON(w, http.StatusAccepted, "Cancellation requested. Waiting for the warehouse to confirm it stopped the parcel.", view, nil)

@@ -164,3 +164,34 @@ func TestCancelWhileThePackingIsInProgressIsAcceptedAsARequest_Case3(t *testing.
 		t.Fatalf("after the stop = %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestOrderDetailShowsTheRefundProgress_P09(t *testing.T) {
+	f := newOrderFixture(t)
+	token := bearer(t, "user-lan", "CUSTOMER")
+	id := f.paidOrder(t)
+	f.cancel(t, token, id)
+	type detail struct {
+		Data struct {
+			Status           string                  `json:"status"`
+			Payment          struct{ Status string } `json:"payment"`
+			RefundObligation *struct {
+				AmountVND         int64  `json:"amountVnd"`
+				RefundedAmountVND int64  `json:"refundedAmountVnd"`
+				Status            string `json:"status"`
+			} `json:"refundObligation"`
+		} `json:"data"`
+	}
+	got := decodeJSON[detail](t, f.get(t, token, "/api/v1/orders/"+id))
+	if got.Data.Status != "CANCELLED" || got.Data.Payment.Status != "REFUND_PENDING" || got.Data.RefundObligation == nil ||
+		got.Data.RefundObligation.Status != "PENDING" || got.Data.RefundObligation.AmountVND != 660000 || got.Data.RefundObligation.RefundedAmountVND != 0 {
+		t.Fatalf("before the payout = %+v", got.Data)
+	}
+	if err := f.orders.RecordRefund(context.Background(), id, 660000, 0, "REFUNDED"); err != nil {
+		t.Fatal(err)
+	}
+	got = decodeJSON[detail](t, f.get(t, token, "/api/v1/orders/"+id))
+	if got.Data.Payment.Status != "REFUNDED" || got.Data.RefundObligation == nil || got.Data.RefundObligation.Status != "DONE" ||
+		got.Data.RefundObligation.AmountVND != 660000 || got.Data.RefundObligation.RefundedAmountVND != 660000 {
+		t.Fatalf("after the payout = %+v", got.Data)
+	}
+}

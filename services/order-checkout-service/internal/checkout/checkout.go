@@ -36,7 +36,11 @@ const (
 
 // PayRefundPending is the payment status of an order that is closed while the customer's money is held: it is
 // owed back (SC05).
-const PayRefundPending = saga.PayRefundPending
+const (
+	PayRefundPending     = saga.PayRefundPending
+	PayRefunded          = saga.PayRefunded
+	PayPartiallyRefunded = saga.PayPartiallyRefunded
+)
 
 var (
 	// ErrQuoteNotFound: the quote does not exist or belongs to someone else.
@@ -114,6 +118,9 @@ type Payments interface {
 	// CloseAttempt tells the payment service the order is closed: money that arrives later is refunded, and
 	// money already captured is owed back. Idempotent; an unknown attempt counts as closed.
 	CloseAttempt(ctx context.Context, attemptID string) error
+	// CloseAttemptForCancel is CloseAttempt for a cancelled order: captured money is owed back with the reason
+	// ORDER_CANCELLED. Idempotent.
+	CloseAttemptForCancel(ctx context.Context, attemptID string) error
 }
 
 // Addresses reads the customer's delivery address with their own token, so IAM applies its owner check.

@@ -140,15 +140,16 @@ func (f *fakeCarts) RemoveOrdered(_ context.Context, userID string, skuIDs []str
 }
 
 type fakePayments struct {
-	mu       sync.Mutex
-	closes   []string
-	states   map[string]PaymentState
-	stateErr error
-	closeErr error
-	calls    int
-	amount   int64
-	userID   string
-	failure  error
+	mu           sync.Mutex
+	closes       []string
+	states       map[string]PaymentState
+	stateErr     error
+	closeErr     error
+	calls        int
+	amount       int64
+	userID       string
+	failure      error
+	cancelCloses int
 	// afterClose, when set, is what AttemptState reports once the attempt was closed (money that slipped in).
 	afterClose *PaymentState
 }
@@ -182,6 +183,13 @@ func (f *fakePayments) CloseAttempt(_ context.Context, attemptID string) error {
 	defer f.mu.Unlock()
 	f.closes = append(f.closes, attemptID)
 	return f.closeErr
+}
+
+func (f *fakePayments) CloseAttemptForCancel(ctx context.Context, attemptID string) error {
+	f.mu.Lock()
+	f.cancelCloses++
+	f.mu.Unlock()
+	return f.CloseAttempt(ctx, attemptID)
 }
 
 type fixture struct {
