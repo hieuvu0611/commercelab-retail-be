@@ -109,21 +109,30 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 		if err == nil {
 			defer func() { _ = tx.Rollback(ctx) }()
 
-			// Kiểm tra idempotent nếu orderID đã giữ tồn trước đó
-			var existing ReservationRecord
-			var rawLines []byte
-			err = tx.QueryRow(ctx, `
-				SELECT reservation_id, order_id, warehouse_id, status, lines_json, expires_at
-				FROM reservations
-				WHERE order_id = $1
-			`, orderID).Scan(&existing.ReservationID, &existing.OrderID, &existing.WarehouseID, &existing.Status, &rawLines, &existing.ExpiresAt)
-			if err == nil {
-				_ = json.Unmarshal(rawLines, &existing.Lines)
-				_ = tx.Commit(ctx)
-				return &existing, nil
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
+			// Claim the order id first. A repeat of the same order (double click, retry), even a concurrent one,
+			// blocks here until the first transaction ends and then gets the stored reservation back.
+			resID := "RES-" + orderID
+			claim, err := tx.Exec(ctx, `
+				INSERT INTO reservations (reservation_id, order_id, warehouse_id, status, lines_json, expires_at)
+				VALUES ($1, $2, $3, 'ACTIVE_10M', $4::jsonb, $5)
+				ON CONFLICT DO NOTHING
+			`, resID, orderID, warehouseID, string(linesJSON), expiresAt)
+			if err != nil {
 				return nil, dependency.Wrap(err)
+			}
+			if claim.RowsAffected() == 0 {
+				var existing ReservationRecord
+				var rawLines []byte
+				err = tx.QueryRow(ctx, `
+					SELECT reservation_id, order_id, warehouse_id, status, lines_json, expires_at
+					FROM reservations
+					WHERE order_id = $1
+				`, orderID).Scan(&existing.ReservationID, &existing.OrderID, &existing.WarehouseID, &existing.Status, &rawLines, &existing.ExpiresAt)
+				if err != nil {
+					return nil, dependency.Wrap(err)
+				}
+				_ = json.Unmarshal(rawLines, &existing.Lines)
+				return &existing, nil
 			}
 
 			// lines are sorted by SKU id: every transaction locks rows in the same order, so none can deadlock.
@@ -157,14 +166,6 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 				if err := insertMovement(ctx, tx, lineMovement(domain.MovementReserve, warehouseID, orderID, line, "order reservation")); err != nil {
 					return nil, err
 				}
-			}
-
-			resID := "RES-" + orderID
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO reservations (reservation_id, order_id, warehouse_id, status, lines_json, expires_at)
-				VALUES ($1, $2, $3, 'ACTIVE_10M', $4::jsonb, $5)
-			`, resID, orderID, warehouseID, string(linesJSON), expiresAt); err != nil {
-				return nil, dependency.Wrap(err)
 			}
 
 			if err := tx.Commit(ctx); err != nil {
