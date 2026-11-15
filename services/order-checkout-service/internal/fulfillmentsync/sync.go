@@ -1,5 +1,5 @@
 // Package fulfillmentsync applies fulfillment events to orders: a shipment moves a confirmed order into
-// fulfillment (B04). Every step is a compare-and-set, so repeated or late events change nothing.
+// fulfillment and its delivery completes it (B04). Every step is a compare-and-set, so repeated or late events change nothing.
 package fulfillmentsync
 
 import (
@@ -21,6 +21,8 @@ func (h *Handler) Handle(ctx context.Context, e events.DomainEvent) error {
 	switch e.EventType {
 	case events.EventShipmentCreated:
 		return h.move(ctx, e, saga.StateConfirmed, saga.StateInFulfillment)
+	case events.EventShipmentDelivered:
+		return h.move(ctx, e, saga.StateInFulfillment, saga.StateDelivered)
 	}
 	return nil
 }

@@ -71,3 +71,30 @@ func TestUnknownOrdersAndOtherEventsAreIgnored(t *testing.T) {
 		t.Fatalf("other event: %v", err)
 	}
 }
+
+func TestShipmentDeliveredCompletesAnOrderInFulfillmentOnce(t *testing.T) {
+	store := orders.NewMemoryStore()
+	orderIn(t, store, "O-1", "IN_FULFILLMENT")
+	h := &Handler{Orders: store}
+	for range 3 {
+		if err := h.Handle(context.Background(), shipmentEvent(events.EventShipmentDelivered, "O-1")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	o, _ := store.Get(context.Background(), "O-1")
+	if o.Status != "DELIVERED" || o.Version != 2 {
+		t.Fatalf("order = %+v", o)
+	}
+}
+
+func TestShipmentDeliveredDoesNotTouchOrdersThatNeverEnteredFulfillment(t *testing.T) {
+	store := orders.NewMemoryStore()
+	orderIn(t, store, "O-1", "FAILED_CLOSED")
+	h := &Handler{Orders: store}
+	if err := h.Handle(context.Background(), shipmentEvent(events.EventShipmentDelivered, "O-1")); err != nil {
+		t.Fatal(err)
+	}
+	if status(t, store, "O-1") != "FAILED_CLOSED" {
+		t.Fatal("a closed order was delivered")
+	}
+}

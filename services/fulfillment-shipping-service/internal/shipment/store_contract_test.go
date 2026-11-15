@@ -145,6 +145,44 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string, outbo
 		}
 	})
 
+	t.Run("a carrier event id is applied once, with the delivery fields stored", func(t *testing.T) {
+		s := newShipment(uniq("O"))
+		stored, _, _ := store.Create(ctx, s, uniq("evt"), createdEvent(s))
+		cur := stored
+		for _, step := range []func(Shipment) (Shipment, error){
+			func(x Shipment) (Shipment, error) { return x.Scan("SKU-A", 2, now) },
+			func(x Shipment) (Shipment, error) { return x.Scan("SKU-B", 1, now) },
+			func(x Shipment) (Shipment, error) { return x.Pack(now) },
+			func(x Shipment) (Shipment, error) { return x.Handover(now) },
+		} {
+			next, _ := step(cur)
+			if err := store.Save(ctx, next, cur.Version); err != nil {
+				t.Fatal(err)
+			}
+			cur = next
+		}
+		delivered, _ := cur.MarkDelivered(now)
+		carrierID := uniq("carrier")
+		if err := store.SaveCarrierEvent(ctx, delivered, cur.Version, carrierID); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SaveCarrierEvent(ctx, delivered, cur.Version, carrierID); !errors.Is(err, ErrDuplicateEvent) {
+			t.Fatalf("repeat err = %v", err)
+		}
+		got, _ := store.Get(ctx, s.ShipmentID)
+		if got.Status != StatusDelivered || got.DeliveredAt == nil || got.ReturnWindowEndsAt == nil || !got.ReturnWindowEndsAt.Equal(now.Add(ReturnWindow)) || got.Items[0].DeliveredQuantity != 2 {
+			t.Fatalf("stored = %+v", got)
+		}
+		// A failed save does not burn the carrier event id.
+		failedID := uniq("carrier")
+		if err := store.SaveCarrierEvent(ctx, delivered, 1, failedID); !errors.Is(err, ErrStaleVersion) {
+			t.Fatalf("stale err = %v", err)
+		}
+		if err := store.SaveCarrierEvent(ctx, delivered, delivered.Version, failedID); errors.Is(err, ErrDuplicateEvent) {
+			t.Fatal("a rolled back save consumed the carrier event id")
+		}
+	})
+
 	t.Run("twenty concurrent saves of one version store exactly one", func(t *testing.T) {
 		s := newShipment(uniq("O"))
 		stored, _, _ := store.Create(ctx, s, uniq("evt"), createdEvent(s))

@@ -86,15 +86,17 @@ func TestAnonymousCallsToProtectedEndpointsAreRejectedBeforeReachingAnyService(t
 		{http.MethodPost, "/api/v1/carts/me/merge"},
 		{http.MethodGet, "/api/v1/something-unknown"},
 		{http.MethodGet, "/api/v1/admin/inventory/stock"},
-		{http.MethodGet, "/api/v1/inventory/availabilityx"},     // exact path only
-		{http.MethodGet, "/api/v1/inventory/availability/x"},    // exact path only
-		{http.MethodPost, "/api/v1/inventory/availability"},     // read-only endpoint
-		{http.MethodPost, "/api/v1/products"},                   // writing the catalog is not public
-		{http.MethodGet, "/api/v1/productsx"},                   // prefix boundary: not the products collection
-		{http.MethodGet, "/api/v1/payments/webhooks/simulator"}, // only the POST webhook is public
-		{http.MethodPost, "/api/v1/payments/attempts"},          // internal-only, the gateway needs a token first
-		{http.MethodGet, "/api/v1/auth/login"},                  // only POST login is public
-		{http.MethodGet, "/api/v1/auth/refresh"},                // only POST refresh is public
+		{http.MethodGet, "/api/v1/inventory/availabilityx"},      // exact path only
+		{http.MethodGet, "/api/v1/inventory/availability/x"},     // exact path only
+		{http.MethodPost, "/api/v1/inventory/availability"},      // read-only endpoint
+		{http.MethodPost, "/api/v1/products"},                    // writing the catalog is not public
+		{http.MethodGet, "/api/v1/productsx"},                    // prefix boundary: not the products collection
+		{http.MethodGet, "/api/v1/payments/webhooks/simulator"},  // only the POST webhook is public
+		{http.MethodGet, "/api/v1/shipments/webhooks/carrier"},   // only the POST webhook is public
+		{http.MethodPost, "/api/v1/shipments/webhooks/carrierx"}, // exact path only
+		{http.MethodPost, "/api/v1/payments/attempts"},           // internal-only, the gateway needs a token first
+		{http.MethodGet, "/api/v1/auth/login"},                   // only POST login is public
+		{http.MethodGet, "/api/v1/auth/refresh"},                 // only POST refresh is public
 	}
 	for _, tc := range protected {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -135,6 +137,7 @@ func TestPublicAllowlistReachesTheServicesWithoutAToken(t *testing.T) {
 		{http.MethodPost, "/api/v1/auth/logout"},
 		{http.MethodPost, "/auth/refresh"},
 		{http.MethodPost, "/api/v1/payments/webhooks/simulator"},
+		{http.MethodPost, "/api/v1/shipments/webhooks/carrier"},
 	}
 	for _, tc := range public {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
