@@ -129,6 +129,11 @@ func applyNotice(w http.ResponseWriter, r *http.Request, d Deps, n noticeBody) {
 		case err != nil:
 			writeStoreError(w, r, err)
 		default:
+			detail := ""
+			if next.Status == shipment.StatusDeliveryFailed {
+				detail = next.FailureReason
+			}
+			d.record(r, next, statusEntry[next.Status], detail)
 			response.JSON(w, http.StatusOK, "Notice applied", noticeResult{ShipmentID: next.ShipmentID, Status: string(next.Status), Applied: true}, nil)
 		}
 		return

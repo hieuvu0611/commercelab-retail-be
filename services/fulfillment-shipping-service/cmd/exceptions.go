@@ -8,6 +8,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/timeline"
 )
 
 // reportShortage is the pick shortfall (B04): the parcel is blocked, an exception case opens for Support and
@@ -42,6 +43,7 @@ func reportShortage(d Deps) func(http.ResponseWriter, *http.Request, shipment.Sh
 			writeStoreError(w, r, err)
 			return
 		}
+		d.record(r, next, timeline.TypePickBlocked, next.FailureReason)
 		response.JSON(w, http.StatusOK, "Shortage reported", viewOf(next), nil)
 	}
 }

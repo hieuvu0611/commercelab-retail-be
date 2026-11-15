@@ -108,6 +108,8 @@ func (rt *Router) resolveTarget(path string) string {
 		return rt.targets.Catalog
 	case strings.HasPrefix(path, "/api/v1/inventory"):
 		return rt.targets.Inventory
+	case strings.HasPrefix(path, "/api/v1/orders/") && strings.HasSuffix(path, "/tracking"):
+		return rt.targets.Fulfillment // the customer's tracking of one order is a fulfillment read
 	case strings.HasPrefix(path, "/api/v1/orders") || strings.HasPrefix(path, "/api/v1/vouchers"):
 		return rt.targets.Order
 	case strings.HasPrefix(path, "/api/v1/payments"):

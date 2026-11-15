@@ -28,7 +28,7 @@ func (f *fakeStock) Handover(_ context.Context, bearer, orderID, warehouseID str
 func handoverEnv(t *testing.T, stock *fakeStock) *env {
 	t.Helper()
 	e := newEnv(t)
-	e.srv = NewServer(Deps{Shipments: e.store, Stock: stock, Now: func() time.Time { return time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC) }})
+	e.srv = NewServer(Deps{Shipments: e.store, Stock: stock, Timeline: e.tl, Now: func() time.Time { return time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC) }})
 	return e
 }
 

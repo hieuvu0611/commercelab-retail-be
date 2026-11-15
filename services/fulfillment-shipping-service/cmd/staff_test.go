@@ -12,6 +12,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/timeline"
 )
 
 var (
@@ -24,6 +25,7 @@ var (
 type env struct {
 	srv   http.Handler
 	store *shipment.MemoryStore
+	tl    *timeline.Memory
 }
 
 func newEnv(t *testing.T) *env {
@@ -41,7 +43,8 @@ func newEnv(t *testing.T) *env {
 	}
 	seed("O-1", "WH-HCM-01")
 	seed("O-2", "WH-HN-01")
-	return &env{srv: NewServer(Deps{Shipments: store}), store: store}
+	tl := timeline.NewMemory()
+	return &env{srv: NewServer(Deps{Shipments: store, Timeline: tl}), store: store, tl: tl}
 }
 
 func (e *env) call(t *testing.T, method, path, body string, id *auth.Identity) *httptest.ResponseRecorder {

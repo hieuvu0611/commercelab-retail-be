@@ -68,3 +68,6 @@ func (s Shipment) MarkDeliveryFailed(reason string, now time.Time) (Shipment, er
 	}
 	return Shipment{}, ErrNotDispatched
 }
+
+// Dispatched reports whether the parcel left the warehouse (handed over or beyond).
+func (s Shipment) Dispatched() bool { return s.dispatched() }
