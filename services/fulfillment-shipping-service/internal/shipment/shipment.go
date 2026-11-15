@@ -17,6 +17,7 @@ const (
 	StatusPendingPick Status = "PENDING_PICK"
 	StatusPicking     Status = "PICKING"
 	StatusPacked      Status = "PACKED"
+	StatusHandedOver  Status = "HANDED_OVER"
 )
 
 var (
@@ -37,15 +38,16 @@ type Item struct {
 
 // Shipment is one parcel of an order. Version grows with every change (optimistic locking).
 type Shipment struct {
-	ShipmentID  string    `json:"shipmentId"`
-	OrderID     string    `json:"orderId"`
-	UserID      string    `json:"-"`
-	WarehouseID string    `json:"warehouseId"`
-	Status      Status    `json:"status"`
-	Items       []Item    `json:"items"`
-	Version     int64     `json:"version"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ShipmentID   string     `json:"shipmentId"`
+	OrderID      string     `json:"orderId"`
+	UserID       string     `json:"-"`
+	WarehouseID  string     `json:"warehouseId"`
+	Status       Status     `json:"status"`
+	Items        []Item     `json:"items"`
+	Version      int64      `json:"version"`
+	HandedOverAt *time.Time `json:"handedOverAt,omitempty"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	UpdatedAt    time.Time  `json:"updatedAt"`
 }
 
 // ID is the shipment id of an order: derived, so a repeated event always maps to the same parcel.

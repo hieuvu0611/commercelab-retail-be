@@ -113,6 +113,38 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string, outbo
 		}
 	})
 
+	t.Run("a handover is stored with its time and its event", func(t *testing.T) {
+		s := newShipment(uniq("O"))
+		stored, _, _ := store.Create(ctx, s, uniq("evt"), createdEvent(s))
+		cur := stored
+		for _, step := range []func(Shipment) (Shipment, error){
+			func(x Shipment) (Shipment, error) { return x.Scan("SKU-A", 2, now) },
+			func(x Shipment) (Shipment, error) { return x.Scan("SKU-B", 1, now) },
+			func(x Shipment) (Shipment, error) { return x.Pack(now) },
+			func(x Shipment) (Shipment, error) { return x.Handover(now) },
+		} {
+			next, err := step(cur)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var ev []events.DomainEvent
+			if next.Status == StatusHandedOver {
+				ev = append(ev, events.DomainEvent{EventID: uniq("evt-h"), EventType: events.EventShipmentHandedOver, AggregateType: "Shipment", AggregateID: s.ShipmentID, OccurredAt: now, Payload: map[string]any{}})
+			}
+			if err := store.Save(ctx, next, cur.Version, ev...); err != nil {
+				t.Fatal(err)
+			}
+			cur = next
+		}
+		got, _ := store.Get(ctx, s.ShipmentID)
+		if got.Status != StatusHandedOver || got.HandedOverAt == nil || !got.HandedOverAt.Equal(now) {
+			t.Fatalf("stored = %+v", got)
+		}
+		if types := outboxTypes(s.ShipmentID); len(types) != 2 || types[1] != events.EventShipmentHandedOver {
+			t.Fatalf("outbox = %v", types)
+		}
+	})
+
 	t.Run("twenty concurrent saves of one version store exactly one", func(t *testing.T) {
 		s := newShipment(uniq("O"))
 		stored, _, _ := store.Create(ctx, s, uniq("evt"), createdEvent(s))

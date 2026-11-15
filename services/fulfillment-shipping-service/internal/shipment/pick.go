@@ -61,3 +61,20 @@ func (s Shipment) Pack(now time.Time) (Shipment, error) {
 	}
 	return s.with(StatusPacked, append([]Item(nil), s.Items...), now), nil
 }
+
+// ErrHandoverNotAllowed means the parcel is not packed (or was stopped), so it cannot go to the carrier.
+var ErrHandoverNotAllowed = errors.New("only a packed shipment can be handed over")
+
+// Handover records that the carrier took the parcel. A repeated handover changes nothing.
+func (s Shipment) Handover(now time.Time) (Shipment, error) {
+	if s.Status == StatusHandedOver {
+		return s, nil
+	}
+	if s.Status != StatusPacked {
+		return Shipment{}, ErrHandoverNotAllowed
+	}
+	at := now.UTC()
+	next := s.with(StatusHandedOver, append([]Item(nil), s.Items...), now)
+	next.HandedOverAt = &at
+	return next, nil
+}
