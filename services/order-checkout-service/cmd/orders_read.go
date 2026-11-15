@@ -26,6 +26,7 @@ func registerOrderReadRoutes(mux *http.ServeMux, svc *checkout.Service) {
 	customer := func(h http.HandlerFunc) http.Handler { return auth.RequireAuth(auth.RequireRole("CUSTOMER")(h)) }
 	mux.Handle("GET /api/v1/orders", customer(listMyOrders(svc)))
 	mux.Handle("GET /api/v1/orders/{orderId}", customer(getMyOrder(svc)))
+	registerOrderAdminRoutes(mux, svc)
 }
 
 // orderSummary is one row of the customer's order history.

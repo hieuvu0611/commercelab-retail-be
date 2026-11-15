@@ -122,6 +122,9 @@ func matches(o Order, f Filter) bool {
 	if !f.UpdatedBefore.IsZero() && o.UpdatedAt.After(f.UpdatedBefore) {
 		return false
 	}
+	if len(f.WarehouseIDs) > 0 && !contains(f.WarehouseIDs, o.WarehouseID) {
+		return false
+	}
 	if !f.UpdatedAfter.IsZero() && o.UpdatedAt.Before(f.UpdatedAfter) {
 		return false
 	}
@@ -130,6 +133,15 @@ func matches(o Order, f Filter) bool {
 	}
 	for _, st := range f.Statuses {
 		if o.Status == st {
+			return true
+		}
+	}
+	return false
+}
+
+func contains(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
 			return true
 		}
 	}

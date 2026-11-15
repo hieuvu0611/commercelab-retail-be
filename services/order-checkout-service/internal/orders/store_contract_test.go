@@ -177,6 +177,12 @@ func runQueryContract(t *testing.T, newStore func(t *testing.T) Store, uniq func
 	if len(held) != 1 || held[0].OrderID != ids[0] {
 		t.Fatalf("held = %+v", held)
 	}
+	if wh, _, _ := s.Query(ctx, Filter{UserID: user, WarehouseIDs: []string{"WH-HCM-01"}}); len(wh) != 3 {
+		t.Fatalf("own warehouse = %d", len(wh))
+	}
+	if wh, _, _ := s.Query(ctx, Filter{UserID: user, WarehouseIDs: []string{"WH-HN-01"}}); len(wh) != 0 {
+		t.Fatalf("other warehouse = %d", len(wh))
+	}
 	failed, _, _ := s.Query(ctx, Filter{UserID: user, FailureCode: "OUT_OF_STOCK"})
 	if len(failed) != 1 || failed[0].OrderID != ids[1] {
 		t.Fatalf("failed = %+v", failed)

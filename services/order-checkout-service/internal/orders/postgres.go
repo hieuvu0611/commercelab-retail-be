@@ -160,19 +160,24 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	if !f.UpdatedAfter.IsZero() {
 		after = &f.UpdatedAfter
 	}
+	warehouses := f.WarehouseIDs
+	if warehouses == nil {
+		warehouses = []string{}
+	}
 	statuses := f.Statuses
 	if statuses == nil {
 		statuses = []string{}
 	}
 	const where = `WHERE ($1 = '' OR user_id = $1) AND (cardinality($2::text[]) = 0 OR status = ANY($2)) AND ($3 = '' OR failure_code = $3)
-		AND ($4::timestamptz IS NULL OR updated_at <= $4) AND ($5::timestamptz IS NULL OR updated_at >= $5)`
+		AND ($4::timestamptz IS NULL OR updated_at <= $4) AND ($5::timestamptz IS NULL OR updated_at >= $5)
+		AND (cardinality($6::text[]) = 0 OR warehouse_id = ANY($6))`
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders `+where, f.UserID, statuses, f.FailureCode, before, after).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders `+where, f.UserID, statuses, f.FailureCode, before, after, warehouses).Scan(&total); err != nil {
 		return nil, 0, dependency.Wrap(err)
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+orderColumns+`, (SELECT COALESCE(SUM(quantity), 0) FROM orders.order_items i WHERE i.order_id = o.order_id)
-		FROM orders.orders o `+where+` ORDER BY created_at DESC, order_id DESC LIMIT $6 OFFSET $7`,
-		f.UserID, statuses, f.FailureCode, before, after, PageLimit(f.Limit), max(f.Offset, 0))
+		FROM orders.orders o `+where+` ORDER BY created_at DESC, order_id DESC LIMIT $7 OFFSET $8`,
+		f.UserID, statuses, f.FailureCode, before, after, warehouses, PageLimit(f.Limit), max(f.Offset, 0))
 	if err != nil {
 		return nil, 0, dependency.Wrap(err)
 	}
