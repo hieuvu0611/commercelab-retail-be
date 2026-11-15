@@ -100,11 +100,11 @@ func TestStopOfAnUnpickedParcelStopsItOnceAndBlocksHandover_Case2(t *testing.T) 
 	}
 }
 
-func TestStopWhilePickingOrAfterHandoverChangesNothing(t *testing.T) {
+func TestStopWhilePickingRequestsAndAfterHandoverChangesNothing(t *testing.T) {
 	stock := &fakeStock{}
 	e := handoverEnv(t, stock)
 	e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-1/scan", `{"skuId":"SKU-A","quantity":1}`, &hcmStaff)
-	if got := decode[stopResp](t, e.stop(t, "O-1", stopBody, true)); got.Result != "IN_PROGRESS" || got.ShipmentStatus != "PICKING" {
+	if got := decode[stopResp](t, e.stop(t, "O-1", stopBody, true)); got.Result != "STOP_REQUESTED" || got.ShipmentStatus != "PICKING" {
 		t.Fatalf("picking = %+v", got)
 	}
 	pack(t, e, "SHP-O-2", &hnStaff)
@@ -178,7 +178,7 @@ func TestConcurrentStopsAndScansLeaveOneConsistentParcel(t *testing.T) {
 			if s.Items[0].PickedQuantity != 0 {
 				t.Fatalf("a stopped parcel was also picked: %+v", s)
 			}
-		case shipment.StatusPicking:
+		case shipment.StatusPicking: // the scan won; the stop became a request the warehouse must confirm
 		default:
 			t.Fatalf("status = %s", s.Status)
 		}

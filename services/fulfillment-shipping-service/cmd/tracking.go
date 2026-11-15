@@ -75,6 +75,8 @@ func customerMessage(e timeline.Entry) string {
 		return "Delivery failed: " + e.Detail
 	case timeline.TypePartiallyDelivered:
 		return "Part of your order was delivered"
+	case timeline.TypeStopRequested:
+		return "We asked the warehouse to stop your parcel"
 	case timeline.TypeStopped:
 		return "Your order was cancelled before it left the warehouse"
 	}

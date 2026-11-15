@@ -29,7 +29,7 @@ const (
 
 // SweepStats counts what one sweep did.
 type SweepStats struct {
-	Interrupted, Reconciled, Expired, AttemptsClosed, VouchersReleased int
+	Interrupted, Reconciled, Expired, AttemptsClosed, VouchersReleased, CancelsSettled int
 }
 
 // Sweep repairs and times out orders. It is safe to run repeatedly and concurrently with payment callbacks:
@@ -61,6 +61,17 @@ func (s *Service) Sweep(ctx context.Context) SweepStats {
 			continue
 		}
 		st.AttemptsClosed++
+	}
+	waiting := orders.Filter{Statuses: []string{string(saga.StateCancelRequested)}, UpdatedBefore: now.Add(-ReconcileAfter)}
+	for _, o := range s.list(ctx, waiting) {
+		settled, err := s.settleCancel(ctx, o.OrderID)
+		if err != nil {
+			log.Printf("[order] sweep: settling the cancellation of order %s failed: %s", o.OrderID, redact(err))
+			continue
+		}
+		if settled {
+			st.CancelsSettled++
+		}
 	}
 	st.VouchersReleased = s.reconcileVouchers(ctx, now)
 	return st

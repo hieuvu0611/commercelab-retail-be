@@ -140,3 +140,41 @@ func TestReleaseCommittedGivesPaidStockBackOnceAndNeverAfterHandover_B05(t *test
 		t.Fatalf("release after handover = %d, want 409", rec.Code)
 	}
 }
+
+func TestStaffStopReleasesCommittedStockInTheirWarehouseOnly_SC06(t *testing.T) {
+	authtest.Configure(t)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
+	post := func(path, body string, id *auth.Identity) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		if id != nil {
+			req.Header.Set("Authorization", bearerFor(t, *id))
+		}
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+	post("/api/v1/inventory/reservations", `{"orderId":"O-ST","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":2}]}`, nil)
+	post("/api/v1/inventory/reservations/O-ST/commit", "", nil)
+	const stop = "/api/v1/inventory/shipments/stop"
+	customer := auth.Identity{UserID: "user-lan", Roles: []string{"CUSTOMER"}}
+	if rec := post(stop, `{"orderId":"O-ST"}`, &customer); rec.Code != http.StatusForbidden {
+		t.Fatalf("customer = %d", rec.Code)
+	}
+	if rec := post(stop, `{"orderId":"O-ST"}`, &hnStaff); rec.Code != http.StatusForbidden {
+		t.Fatalf("other warehouse = %d", rec.Code)
+	}
+	if rec := post(stop, `{"orderId":"O-ST","warehouseId":"WH-HN-01"}`, &hcmStaff); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "WAREHOUSE_MISMATCH") {
+		t.Fatalf("mismatch = %d %s", rec.Code, rec.Body)
+	}
+	for i := 0; i < 2; i++ {
+		if rec := post(stop, `{"orderId":"O-ST","warehouseId":"WH-HCM-01"}`, &hcmStaff); rec.Code != http.StatusOK {
+			t.Fatalf("stop #%d = %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	if rec := post("/api/v1/inventory/shipments/handover", `{"orderId":"O-ST"}`, &hcmStaff); rec.Code != http.StatusConflict {
+		t.Fatalf("handover after stop = %d, want 409", rec.Code)
+	}
+	if rec := post(stop, `{"orderId":"O-NONE"}`, &hcmStaff); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown order = %d", rec.Code)
+	}
+}

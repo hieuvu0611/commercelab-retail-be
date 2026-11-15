@@ -275,7 +275,7 @@ func (f *Fulfillment) StopShipment(ctx context.Context, r checkout.StopRequest) 
 		return "", err
 	}
 	switch res := checkout.StopResult(out.Result); res {
-	case checkout.StopStopped, checkout.StopRequested, checkout.StopInProgress, checkout.StopTooLate:
+	case checkout.StopStopped, checkout.StopRequested, checkout.StopTooLate:
 		return res, nil
 	}
 	return "", dependency.Wrap(errors.New("fulfillment answered an unknown stop result"))

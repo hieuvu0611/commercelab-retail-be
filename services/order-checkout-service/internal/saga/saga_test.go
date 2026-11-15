@@ -227,3 +227,26 @@ func TestMoneyAfterACancellationIsRefunded(t *testing.T) {
 		t.Fatalf("late capture = %+v %v", got, err)
 	}
 }
+
+func TestCancelRequestAndRejectionByState(t *testing.T) {
+	for _, from := range []State{StateConfirmed, StateInFulfillment, StateCancelRequested} {
+		got, err := Next(from, CancelRequested{})
+		if err != nil || got.State != StateCancelRequested || got.PaymentStatus != PayCaptured || len(got.Effects) != 0 {
+			t.Errorf("%s: request = %+v %v", from, got, err)
+		}
+	}
+	got, err := Next(StateCancelRequested, CancelRejected{})
+	if err != nil || got.State != StateInFulfillment || got.PaymentStatus != PayCaptured || len(got.Effects) != 0 {
+		t.Errorf("rejection = %+v %v, want back to IN_FULFILLMENT with no effect", got, err)
+	}
+	for _, from := range []State{StatePending, StateReserved, StateUnknownHold, StateDelivered, StateFailedClosed, StateCancelled, StateConfirmed, StateInFulfillment} {
+		if _, err := Next(from, CancelRejected{}); !errors.Is(err, ErrInvalidTransition) {
+			t.Errorf("%s: rejection = %v, want ErrInvalidTransition", from, err)
+		}
+	}
+	for _, from := range []State{StatePending, StateReserved, StateUnknownHold, StateDelivered, StateFailedClosed, StateCancelled} {
+		if _, err := Next(from, CancelRequested{}); !errors.Is(err, ErrInvalidTransition) {
+			t.Errorf("%s: request = %v, want ErrInvalidTransition", from, err)
+		}
+	}
+}

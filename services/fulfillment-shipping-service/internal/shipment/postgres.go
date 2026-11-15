@@ -19,7 +19,7 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, created_at, updated_at`
+const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, stop_requested_at, created_at, updated_at`
 
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -29,7 +29,7 @@ type querier interface {
 func load(ctx context.Context, q querier, where string, arg string) (Shipment, error) {
 	var s Shipment
 	err := q.QueryRow(ctx, `SELECT `+shipmentColumns+` FROM fulfillment.shipments WHERE `+where+` = $1`, arg).
-		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.CreatedAt, &s.UpdatedAt)
+		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.StopRequestedAt, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Shipment{}, ErrNotFound
 	}
@@ -165,8 +165,8 @@ func (p *PostgresStore) SaveWith(ctx context.Context, s Shipment, expectedVersio
 		}
 	}
 	tag, err := tx.Exec(ctx, `UPDATE fulfillment.shipments SET status = $3, version = $4, updated_at = $5, handed_over_at = $6,
-		delivered_at = $7, return_window_ends_at = $8, failure_reason = $9 WHERE shipment_id = $1 AND version = $2`,
-		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt, s.HandedOverAt, s.DeliveredAt, s.ReturnWindowEndsAt, s.FailureReason)
+		delivered_at = $7, return_window_ends_at = $8, failure_reason = $9, stop_requested_at = $10 WHERE shipment_id = $1 AND version = $2`,
+		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt, s.HandedOverAt, s.DeliveredAt, s.ReturnWindowEndsAt, s.FailureReason, s.StopRequestedAt)
 	if err != nil {
 		return dependency.Wrap(err)
 	}

@@ -60,6 +60,49 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string, outbo
 		}
 	})
 
+	t.Run("a stop request is stored with the shipment and one stop wins a version race", func(t *testing.T) {
+		s := newShipment(uniq("O"))
+		_, _, _ = store.Create(ctx, s, uniq("evt"), createdEvent(s))
+		picking, _ := s.Scan("SKU-A", 1, now)
+		if err := store.Save(ctx, picking, 1); err != nil {
+			t.Fatal(err)
+		}
+		requested, outcome := picking.StopForCancel(now)
+		if outcome != StopRequested {
+			t.Fatalf("outcome = %s", outcome)
+		}
+		if err := store.Save(ctx, requested, picking.Version); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.Get(ctx, s.ShipmentID)
+		if err != nil || got.StopRequestedAt == nil || got.Status != StatusPicking {
+			t.Fatalf("stored = %+v %v, want the request kept", got, err)
+		}
+		// Confirm-stop and a scan both read the same version: exactly one can save.
+		confirmed, err := got.ConfirmStop(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned, _ := got.Scan("SKU-A", 1, now)
+		var wins atomic.Int64
+		var wg sync.WaitGroup
+		for _, next := range []Shipment{confirmed, scanned} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := store.Save(ctx, next, got.Version); err == nil {
+					wins.Add(1)
+				} else if !errors.Is(err, ErrStaleVersion) {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+		if wins.Load() != 1 {
+			t.Fatalf("%d saves won the version race, want 1", wins.Load())
+		}
+	})
+
 	t.Run("the same event twice creates one shipment and one event", func(t *testing.T) {
 		s := newShipment(uniq("O"))
 		evt := uniq("evt")

@@ -49,3 +49,27 @@ func TestHandoverMapsInventoryAnswers(t *testing.T) {
 		t.Errorf("503: err = %v, want unavailable", err)
 	}
 }
+
+func TestReleaseCommittedForwardsTheTokenAndMapsTheAnswers(t *testing.T) {
+	c, body, hdr := serve(t, 200, "")
+	if err := c.ReleaseCommitted(context.Background(), "tok", "O-1", "WH-HN-01"); err != nil {
+		t.Fatal(err)
+	}
+	if (*body)["orderId"] != "O-1" || (*body)["warehouseId"] != "WH-HN-01" || hdr.Get("Authorization") != "Bearer tok" {
+		t.Fatalf("body %v header %v", *body, *hdr)
+	}
+	for _, tc := range []struct {
+		status int
+		code   string
+		want   error
+	}{{403, "X", ErrForbidden}, {409, "RELEASE_COMMITTED_FAILED", ErrStockLeft}, {409, "WAREHOUSE_MISMATCH", ErrRejected}, {404, "RESERVATION_NOT_FOUND", ErrRejected}} {
+		c, _, _ := serve(t, tc.status, tc.code)
+		if err := c.ReleaseCommitted(context.Background(), "tok", "O-1", "WH"); !errors.Is(err, tc.want) {
+			t.Errorf("%d %s: err = %v, want %v", tc.status, tc.code, err, tc.want)
+		}
+	}
+	c, _, _ = serve(t, 503, "X")
+	if err := c.ReleaseCommitted(context.Background(), "tok", "O-1", "WH"); !dependency.IsUnavailable(err) {
+		t.Errorf("503: err = %v, want unavailable", err)
+	}
+}

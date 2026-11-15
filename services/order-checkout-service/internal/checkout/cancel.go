@@ -17,8 +17,6 @@ var (
 	ErrHandedOver = errors.New("the order was already handed to the carrier")
 	// ErrPaymentUnresolved: the payment outcome is unknown; nothing is cancelled until it is known (case 5).
 	ErrPaymentUnresolved = errors.New("the payment outcome is not known yet")
-	// ErrBeingPacked: the warehouse is picking or packing the parcel (case 3, accepted from P7-T02 on).
-	ErrBeingPacked = errors.New("the warehouse is already packing the order")
 	// ErrStockHandedOver: inventory refused to release committed stock because it already left the warehouse.
 	ErrStockHandedOver = errors.New("the stock was already handed over")
 )
@@ -31,8 +29,6 @@ const (
 	StopStopped StopResult = "STOPPED"
 	// StopRequested: the parcel is being picked or packed; the warehouse must confirm the stop (SC06).
 	StopRequested StopResult = "STOP_REQUESTED"
-	// StopInProgress: the parcel is being picked or packed and stop requests are not accepted yet.
-	StopInProgress StopResult = "IN_PROGRESS"
 	// StopTooLate: the parcel was handed to the carrier or is beyond.
 	StopTooLate StopResult = "TOO_LATE"
 )
@@ -52,7 +48,8 @@ type Fulfillment interface {
 // Cancel applies the customer's cancellation (B05, P06) to the order of userID. Another customer's order looks
 // missing. It is idempotent: a cancelled order is returned as it is and no effect runs again. Every effect is
 // idempotent and runs before the state is stored, so a failure leaves the order as it was and the call can be
-// repeated. Errors: orders.ErrNotFound, ErrNotCancellable, ErrHandedOver, ErrPaymentUnresolved, ErrBeingPacked,
+// repeated. A paid order whose parcel is being picked or packed becomes CANCEL_REQUESTED (case 3, SC06) and is
+// settled later by SettleCancel. Errors: orders.ErrNotFound, ErrNotCancellable, ErrHandedOver, ErrPaymentUnresolved,
 // orders.ErrStaleState and dependency errors (retryable).
 func (s *Service) Cancel(ctx context.Context, userID, orderID string) (orders.Order, error) {
 	defer s.locks.lock(orderID)()
@@ -83,7 +80,7 @@ func (s *Service) cancel(ctx context.Context, o orders.Order) (orders.Order, err
 		return s.repairRefund(ctx, o)
 	case saga.StateReserved, saga.StateUnknownHold:
 		return s.cancelHeld(ctx, o)
-	case saga.StateConfirmed, saga.StateInFulfillment:
+	case saga.StateConfirmed, saga.StateInFulfillment, saga.StateCancelRequested:
 		return s.cancelPaid(ctx, o)
 	}
 	return o, ErrNotCancellable
@@ -146,9 +143,10 @@ func (s *Service) cancelUnpaid(ctx context.Context, o orders.Order) (orders.Orde
 	return s.storeCancelled(ctx, o, payStatus, owed)
 }
 
-// cancelPaid is cases 2 and 4 (and case 3 from P7-T02): fulfillment decides whether the parcel can still be
-// stopped. Only then the committed stock goes back and the captured money is owed to the customer; the voucher
-// use stays consumed.
+// cancelPaid is cases 2, 3 and 4: fulfillment decides whether the parcel can still be stopped. Stopped: the
+// committed stock goes back and the captured money is owed to the customer; the voucher use stays consumed.
+// Being picked or packed: the order waits as CANCEL_REQUESTED for the warehouse's answer. Handed over: the
+// cancellation is refused, and a waiting one is rejected (SC06 branch B).
 func (s *Service) cancelPaid(ctx context.Context, o orders.Order) (orders.Order, error) {
 	res, err := saga.Next(saga.State(o.Status), saga.CustomerCancelled{})
 	if err != nil {
@@ -167,10 +165,19 @@ func (s *Service) cancelPaid(ctx context.Context, o orders.Order) (orders.Order,
 	}
 	switch result {
 	case StopStopped:
+	case StopRequested:
+		return s.awaitStop(ctx, o)
 	case StopTooLate:
+		if o.Status == string(saga.StateCancelRequested) {
+			rejected, err := s.rejectCancel(ctx, o)
+			if err != nil {
+				return o, err
+			}
+			return rejected, ErrHandedOver
+		}
 		return o, ErrHandedOver
 	default:
-		return o, ErrBeingPacked
+		return o, dependency.Wrap(errors.New("fulfillment answered an unknown stop result"))
 	}
 	if hasEffect(res.Effects, saga.ReleaseCommittedStock) {
 		if err := s.Stock.ReleaseCommitted(ctx, o.OrderID); errors.Is(err, ErrStockHandedOver) {
@@ -204,4 +211,54 @@ func (s *Service) storeCancelled(ctx context.Context, o orders.Order, payStatus 
 		moved.CapturedVND, moved.RefundPendingVND = owedVND, owedVND
 	}
 	return moved, nil
+}
+
+// awaitStop stores CANCEL_REQUESTED (an order that already waits stays as it is) and announces the request.
+func (s *Service) awaitStop(ctx context.Context, o orders.Order) (orders.Order, error) {
+	if o.Status == string(saga.StateCancelRequested) {
+		return o, nil
+	}
+	res, err := saga.Next(saga.State(o.Status), saga.CancelRequested{})
+	if err != nil {
+		return o, err
+	}
+	return s.Orders.Transition(ctx, o.OrderID, o.Status, string(res.State), res.PaymentStatus, o.FailureCode, s.orderCancelRequested(o))
+}
+
+// rejectCancel puts a waiting order back into fulfillment because the parcel was handed over first (SC06 B).
+func (s *Service) rejectCancel(ctx context.Context, o orders.Order) (orders.Order, error) {
+	res, err := saga.Next(saga.StateCancelRequested, saga.CancelRejected{})
+	if err != nil {
+		return o, err
+	}
+	return s.Orders.Transition(ctx, o.OrderID, o.Status, string(res.State), res.PaymentStatus, o.FailureCode, s.orderCancelRejected(o))
+}
+
+// SettleCancel applies the warehouse's answer to an order that waits in CANCEL_REQUESTED: the stopped parcel
+// cancels it (stock, refund), a handed over parcel rejects the cancellation. It asks fulfillment, which keeps
+// the answer, so it is the same call for a stopped or handed over event and for the sweeper, and repeating it is
+// harmless. Any other order is left alone. Only retryable (dependency) errors are returned.
+func (s *Service) SettleCancel(ctx context.Context, orderID string) error {
+	_, err := s.settleCancel(ctx, orderID)
+	return err
+}
+
+// settleCancel reports whether the order left CANCEL_REQUESTED.
+func (s *Service) settleCancel(ctx context.Context, orderID string) (bool, error) {
+	defer s.locks.lock(orderID)()
+	o, err := s.Orders.Get(ctx, orderID)
+	if errors.Is(err, orders.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if o.Status != string(saga.StateCancelRequested) {
+		return false, nil
+	}
+	moved, err := s.cancelPaid(ctx, o)
+	if errors.Is(err, ErrHandedOver) || errors.Is(err, orders.ErrStaleState) {
+		err = nil // the rejection is stored, or another instance already settled it
+	}
+	return moved.Status != o.Status, err
 }

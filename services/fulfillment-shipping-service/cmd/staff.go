@@ -36,6 +36,7 @@ type shipmentView struct {
 	Version            int64      `json:"version"`
 	Items              []itemView `json:"items"`
 	HandedOverAt       *time.Time `json:"handedOverAt,omitempty"`
+	StopRequestedAt    *time.Time `json:"stopRequestedAt,omitempty"`
 	DeliveredAt        *time.Time `json:"deliveredAt,omitempty"`
 	ReturnWindowEndsAt *time.Time `json:"returnWindowEndsAt,omitempty"`
 	FailureReason      string     `json:"failureReason,omitempty"`
@@ -45,7 +46,7 @@ type shipmentView struct {
 
 func viewOf(s shipment.Shipment) shipmentView {
 	v := shipmentView{ShipmentID: s.ShipmentID, OrderID: s.OrderID, WarehouseID: s.WarehouseID, Status: string(s.Status),
-		Version: s.Version, HandedOverAt: s.HandedOverAt, DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt, FailureReason: s.FailureReason, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+		Version: s.Version, HandedOverAt: s.HandedOverAt, StopRequestedAt: s.StopRequestedAt, DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt, FailureReason: s.FailureReason, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
 	for i, it := range s.Items {
 		v.Items[i] = itemView{SkuID: it.SkuID, Quantity: it.Quantity, PickedQuantity: it.PickedQuantity, DeliveredQuantity: it.DeliveredQuantity}
 	}
@@ -81,6 +82,7 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/pack", staff(withShipment(d, packParcel(d))))
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/report-shortage", staff(withShipment(d, reportShortage(d))))
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/handover", staff(withShipment(d, handoverParcel(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/confirm-stop", staff(withShipment(d, confirmStop(d))))
 }
 
 func listShipments(d Deps) http.HandlerFunc {
@@ -239,6 +241,10 @@ func writeStepError(w http.ResponseWriter, r *http.Request, err error) {
 		badField(w, r, "reason", "reason is required (at most 255 characters)")
 	case errors.Is(err, shipment.ErrHandoverNotAllowed):
 		response.Error(w, r, http.StatusConflict, "HANDOVER_NOT_ALLOWED", err.Error(), nil)
+	case errors.Is(err, shipment.ErrNoStopRequest):
+		response.Error(w, r, http.StatusConflict, "NO_STOP_REQUEST", err.Error(), nil)
+	case errors.Is(err, shipment.ErrAlreadyHandedOver):
+		response.Error(w, r, http.StatusConflict, "HANDOVER_ALREADY_DONE", err.Error(), nil)
 	case errors.Is(err, shipment.ErrPickIncomplete):
 		response.Error(w, r, http.StatusConflict, "PICK_INCOMPLETE", err.Error(), nil)
 	default:

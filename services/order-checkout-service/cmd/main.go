@@ -129,7 +129,7 @@ func main() {
 	}
 
 	// Shipment events move confirmed orders into fulfillment and on to delivered.
-	shipmentSync := &fulfillmentsync.Handler{Orders: orderStore}
+	shipmentSync := &fulfillmentsync.Handler{Orders: orderStore, Cancels: checkoutSvc}
 	go func() {
 		err := eventconsumer.Run(ctx, eventconsumer.Config{Brokers: config.EnvOrDefault("REDPANDA_BROKERS", "localhost:19092"),
 			Group: "order-checkout-service", Topic: outbox.TopicFor("Shipment")}, shipmentSync.Handle)

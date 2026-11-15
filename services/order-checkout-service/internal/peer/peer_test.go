@@ -284,14 +284,16 @@ func TestFulfillmentStopShipmentSendsTheOrderAndMapsTheResult(t *testing.T) {
 	if err != nil || got != checkout.StopStopped || path != "/api/v1/shipments/internal/orders/O-1/stop" || body["warehouseId"] != "WH-HCM-01" || body["userId"] != "user-lan" {
 		t.Fatalf("got=%q err=%v path=%s body=%v", got, err, path, body)
 	}
-	for _, r := range []string{"TOO_LATE", "IN_PROGRESS", "STOP_REQUESTED"} {
+	for _, r := range []string{"TOO_LATE", "STOP_REQUESTED"} {
 		result = r
 		if got, err := f.StopShipment(context.Background(), req); err != nil || string(got) != r {
 			t.Fatalf("%s = %q %v", r, got, err)
 		}
 	}
-	result = "WHAT"
-	if _, err := f.StopShipment(context.Background(), req); !dependency.IsUnavailable(err) {
-		t.Fatalf("unknown result = %v", err)
+	for _, bad := range []string{"WHAT", "IN_PROGRESS"} {
+		result = bad
+		if _, err := f.StopShipment(context.Background(), req); !dependency.IsUnavailable(err) {
+			t.Fatalf("unknown result %s = %v", bad, err)
+		}
 	}
 }
