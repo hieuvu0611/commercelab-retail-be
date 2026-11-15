@@ -246,7 +246,7 @@ func NewServerFromDeps(d Deps) http.Handler {
 		}
 		resetFailures(r, limiterKey)
 		record(r, audit.LoginSuccess, audit.OutcomeSuccess, u.ID, nil)
-		response.JSON(w, http.StatusOK, "Đăng nhập thành công", profile, nil)
+		response.JSON(w, http.StatusOK, "Signed in", profile, nil)
 	})
 
 	// P1-T03 (D-02): customers self-register with email + password; the role is always CUSTOMER.

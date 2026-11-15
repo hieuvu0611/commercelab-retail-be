@@ -47,8 +47,8 @@ type noticeBody struct {
 	OccurredAt string `json:"occurredAt"` // informational; the service uses its own clock
 }
 
-// noticeResult is the webhook answer. Applied=false with Duplicate=true means the event id was seen before;
-// Applied=false alone means the notice was late (the parcel is already further along).
+// noticeResult is the webhook answer. Applied=false with Duplicate=true means the notice changed nothing: its
+// event id was seen before, or the parcel is already at (or past) the state it reports.
 type noticeResult struct {
 	ShipmentID string `json:"shipmentId"`
 	Status     string `json:"status"`
@@ -115,7 +115,7 @@ func applyNotice(w http.ResponseWriter, r *http.Request, d Deps, n noticeBody) {
 			return
 		}
 		if next.Version == s.Version {
-			response.JSON(w, http.StatusOK, "Notice ignored", noticeResult{ShipmentID: s.ShipmentID, Status: string(s.Status)}, nil)
+			response.JSON(w, http.StatusOK, "Notice ignored", noticeResult{ShipmentID: s.ShipmentID, Status: string(s.Status), Duplicate: true}, nil)
 			return
 		}
 		opts := changeOptions(next, d)
