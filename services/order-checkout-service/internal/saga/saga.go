@@ -27,6 +27,10 @@ const (
 	StateDelivered State = "DELIVERED"
 	// StateFailedClosed: the order is closed and everything it held was released.
 	StateFailedClosed State = "FAILED_CLOSED"
+	// StateCancelRequested: a paid order is being picked or packed; the warehouse must confirm the stop (SC06).
+	StateCancelRequested State = "CANCEL_REQUESTED"
+	// StateCancelled: the customer's cancellation was accepted and everything the order held was given back.
+	StateCancelled State = "CANCELLED"
 )
 
 // Payment statuses stored in orders.orders.payment_status.
@@ -36,6 +40,8 @@ const (
 	PayUnknown30m = "UNKNOWN_30M"
 	PayCaptured   = "CAPTURED"
 	PayFailed     = "FAILED"
+	// PayRefundPending: money is held for an order that will not ship; it is owed back to the customer.
+	PayRefundPending = "REFUND_PENDING"
 )
 
 // Effect is a side effect the caller performs after storing the new state.
@@ -49,6 +55,8 @@ const (
 	HoldStockException     Effect = "HOLD_STOCK_EXCEPTION"
 	OpenExceptionCase      Effect = "OPEN_EXCEPTION_CASE"
 	RecordRefundObligation Effect = "RECORD_REFUND_OBLIGATION"
+	// ReleaseCommittedStock gives committed (paid, not yet handed over) stock back to available.
+	ReleaseCommittedStock Effect = "RELEASE_COMMITTED_STOCK"
 )
 
 // ErrInvalidTransition is returned for a state and event that do not go together.
@@ -70,14 +78,18 @@ type (
 	PaymentUnknown struct{}
 	// HoldExpired: the 10-minute reservation (RESERVED) or the 30-minute window (UNKNOWN_HOLD) ended.
 	HoldExpired struct{}
+	// CustomerCancelled: the cancellation was accepted (B05): before payment, or after payment while the warehouse
+	// has not handed the parcel over.
+	CustomerCancelled struct{}
 )
 
-func (Reserved) sagaEvent()        {}
-func (ReserveFailed) sagaEvent()   {}
-func (PaymentCaptured) sagaEvent() {}
-func (PaymentFailed) sagaEvent()   {}
-func (PaymentUnknown) sagaEvent()  {}
-func (HoldExpired) sagaEvent()     {}
+func (Reserved) sagaEvent()          {}
+func (ReserveFailed) sagaEvent()     {}
+func (PaymentCaptured) sagaEvent()   {}
+func (PaymentFailed) sagaEvent()     {}
+func (PaymentUnknown) sagaEvent()    {}
+func (HoldExpired) sagaEvent()       {}
+func (CustomerCancelled) sagaEvent() {}
 
 // Result is the outcome of a transition.
 type Result struct {
@@ -106,9 +118,19 @@ func Next(s State, e Event) (Result, error) {
 		}
 	case StateReserved, StateUnknownHold:
 		return fromHeld(s, e)
-	case StateConfirmed, StateInFulfillment, StateDelivered:
-		if _, ok := e.(PaymentCaptured); ok {
+	case StateConfirmed, StateInFulfillment, StateDelivered, StateCancelRequested:
+		switch e.(type) {
+		case PaymentCaptured:
 			return result(s, PayCaptured) // a repeated capture notice changes nothing, however far the order got
+		case CustomerCancelled:
+			if s != StateDelivered {
+				return paidCancellation()
+			}
+		}
+	case StateCancelled:
+		if _, ok := e.(PaymentCaptured); ok {
+			// Money arrived after an unpaid order was cancelled (SC05): it goes back to the customer.
+			return result(StateCancelled, PayRefundPending, RecordRefundObligation)
 		}
 	case StateFailedClosed:
 		switch e.(type) {
@@ -120,6 +142,12 @@ func Next(s State, e Event) (Result, error) {
 		}
 	}
 	return invalid(s, e)
+}
+
+// paidCancellation is the accepted cancellation of a paid order: the committed stock goes back, the voucher use
+// stays consumed (P12) and the whole captured amount is owed back (P09).
+func paidCancellation() (Result, error) {
+	return result(StateCancelled, PayRefundPending, ReleaseCommittedStock, RecordRefundObligation)
 }
 
 // fromHeld handles the two states in which stock is held and a payment is expected.
@@ -138,6 +166,11 @@ func fromHeld(s State, e Event) (Result, error) {
 			return result(StateUnknownHold, PayUnknown30m)
 		}
 		return result(StateUnknownHold, PayUnknown30m, HoldStockException)
+	case CustomerCancelled:
+		if s == StateUnknownHold {
+			return invalid(s, e) // the payment is unresolved (case 5): nothing is cancelled until it is known
+		}
+		return result(StateCancelled, PayUnpaid, ReleaseStock, ReleaseVoucher)
 	case HoldExpired:
 		if s == StateUnknownHold {
 			return result(StateFailedClosed, PayUnknown30m, ReleaseStock, ReleaseVoucher, OpenExceptionCase)

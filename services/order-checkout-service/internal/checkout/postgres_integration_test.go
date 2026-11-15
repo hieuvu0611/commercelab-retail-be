@@ -91,3 +91,86 @@ func TestPlaceOrderOnPostgresSC04AndSC10(t *testing.T) {
 		t.Fatalf("buckets reserved=%d consumed=%d, want 1 and 0", c.ReservedQuota, c.ConsumedQuota)
 	}
 }
+
+// Cancellation on the real order and voucher stores: five "instances" (own locks, shared Postgres) cancel at once.
+func TestConcurrentCancelsOnPostgresAreOneCancellation(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL_ORDERS")
+	if dsn == "" {
+		t.Skip("DATABASE_URL_ORDERS is not set; run `make test-integration`")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	pool, err := db.ConnectPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	run := fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000_000)
+	user := "it-cancel-" + run
+	for _, paid := range []bool{true, false} {
+		code := fmt.Sprintf("CAN-%s-%s", map[bool]string{true: "PAID", false: "UNPAID"}[paid], run)
+		t.Cleanup(func() {
+			bg := context.Background()
+			_, _ = pool.Exec(bg, `DELETE FROM orders.voucher_usages WHERE voucher_code = $1`, code)
+			_, _ = pool.Exec(bg, `DELETE FROM orders.voucher_campaigns WHERE voucher_code = $1`, code)
+			_, _ = pool.Exec(bg, `DELETE FROM orders.idempotency_keys WHERE user_id = $1`, user)
+			_, _ = pool.Exec(bg, `DELETE FROM orders.outbox_events WHERE payload->>'userId' = $1`, user)
+			_, _ = pool.Exec(bg, `DELETE FROM orders.orders WHERE user_id = $1`, user)
+		})
+		vouchers := voucher.NewPostgresStore(pool)
+		if _, err := voucher.NewAdmin(vouchers).Create(ctx, code, "it", voucher.Fields{Name: "cancel", DiscountPct: 10, TotalQuota: 5, PerCustomerLimit: 5, Status: voucher.StatusActive}); err != nil {
+			t.Fatal(err)
+		}
+		quotes := &fakeQuotes{quote: sc01Quote()}
+		quotes.quote.VoucherCode, quotes.quote.UserID = code, user
+		stock, payments, ful := &fakeStock{}, &fakePayments{}, &fakeFulfillment{result: StopStopped}
+		build := func() *Service {
+			return New(Deps{Orders: orders.NewPostgresStore(pool), Quotes: quotes, Stock: stock, Payments: payments, Vouchers: vouchers,
+				Addresses: &fakeAddresses{}, Snapshots: snapshot.NewMemoryStore(), Fulfillment: ful, WarehouseID: "WH-HCM-01"}).
+				WithClock(func() time.Time { return now })
+		}
+		o, _, err := build().Place(ctx, Principal{UserID: user, Bearer: "tok"}, "key-"+code, "Q-1")
+		if err != nil || o.Status != string(saga.StateReserved) {
+			t.Fatalf("place = %+v %v", o, err)
+		}
+		if paid {
+			if o, err = build().ApplyPayment(ctx, o.OrderID, report(o, "CAPTURED", 660000)); err != nil || o.Status != "CONFIRMED" {
+				t.Fatalf("capture = %+v %v", o, err)
+			}
+		}
+		services := make([]*Service, 5)
+		for i := range services {
+			services[i] = build()
+		}
+		var wg sync.WaitGroup
+		for i := 0; i < 20; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				got, err := services[i%5].Cancel(ctx, user, o.OrderID)
+				if err != nil || got.Status != "CANCELLED" {
+					t.Errorf("cancel = %+v %v", got, err)
+				}
+			}()
+		}
+		wg.Wait()
+		var cancelled int
+		if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.outbox_events WHERE event_type = 'order.cancelled.v1' AND aggregate_id = $1`, o.OrderID).Scan(&cancelled); err != nil || cancelled != 1 {
+			t.Fatalf("paid=%v: order.cancelled events = %d (%v), want exactly one", paid, cancelled, err)
+		}
+		c, _ := vouchers.Get(ctx, code)
+		wantReserved, wantConsumed := int64(0), int64(0)
+		if paid {
+			wantConsumed = 1 // a paid cancellation never restores the voucher use
+		}
+		if c.ReservedQuota != wantReserved || c.ConsumedQuota != wantConsumed {
+			t.Fatalf("paid=%v: voucher reserved=%d consumed=%d, want %d and %d", paid, c.ReservedQuota, c.ConsumedQuota, wantReserved, wantConsumed)
+		}
+		final, _ := orders.NewPostgresStore(pool).Get(ctx, o.OrderID)
+		if paid && (final.PaymentStatus != PayRefundPending || final.RefundPendingVND != 660000) || !paid && final.PaymentStatus != saga.PayUnpaid {
+			t.Fatalf("paid=%v: final order = %+v", paid, final)
+		}
+		// A new order for the same user in the next round must not see this one.
+		_, _ = pool.Exec(ctx, `DELETE FROM orders.idempotency_keys WHERE user_id = $1`, user)
+	}
+}

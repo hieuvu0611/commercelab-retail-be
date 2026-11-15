@@ -11,6 +11,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/eventconsumer"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
@@ -65,6 +66,7 @@ func NewServer(d Deps) http.Handler {
 		}, nil)
 	})
 	registerStaffRoutes(mux, d)
+	registerInternalRoutes(mux, d)
 	registerWebhookRoutes(mux, d)
 	registerTrackingRoute(mux, d)
 	return middleware.Chain(mux)
@@ -76,6 +78,7 @@ func main() {
 
 	secrets := config.NewLoader()
 	auth.LoadSecrets(secrets)
+	internalauth.LoadToken(secrets)
 	webhookSecret := secrets.Secret("CARRIER_WEBHOOK_SECRET", minWebhookSecretBytes)
 	if err := secrets.Err(); err != nil {
 		log.Fatalf("[fulfillment-shipping-service] %v", err)

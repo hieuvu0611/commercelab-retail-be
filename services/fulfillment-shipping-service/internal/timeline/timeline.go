@@ -19,6 +19,7 @@ const (
 	TypeDelivered          = "DELIVERED"
 	TypeDeliveryFailed     = "DELIVERY_FAILED"
 	TypePartiallyDelivered = "PARTIALLY_DELIVERED"
+	TypeStopped            = "STOPPED_FOR_CANCEL"
 )
 
 // Entry is one thing that happened to a shipment. Detail holds an internal note (a reason); customers see only

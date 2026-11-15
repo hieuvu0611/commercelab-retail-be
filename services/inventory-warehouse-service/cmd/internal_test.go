@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +39,7 @@ func TestReservationRoutesAreInternalOnly(t *testing.T) {
 		{"/api/v1/inventory/reservations/O-GUARD/commit", ""},
 		{"/api/v1/inventory/reservations/O-GUARD/release", ""},
 		{"/api/v1/inventory/reservations/O-GUARD/exception-hold", ""},
+		{"/api/v1/inventory/reservations/O-GUARD/release-committed", ""},
 	}
 	for _, rt := range routes {
 		for name, headers := range map[string]map[string]string{
@@ -79,5 +81,62 @@ func TestInventoryLoadConfigRequiresTheInternalToken(t *testing.T) {
 	t.Cleanup(internalauth.Reset)
 	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "INTERNAL_SERVICE_TOKEN is required") {
 		t.Fatalf("err = %v, want a missing internal token error", err)
+	}
+}
+
+func TestReleaseCommittedGivesPaidStockBackOnceAndNeverAfterHandover_B05(t *testing.T) {
+	authtest.Configure(t)
+	repo := repository.NewInventoryRepository(nil)
+	srv := newTestServer(repo, false)
+	post := func(path, body string, id *auth.Identity) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		if id != nil {
+			req.Header.Set("Authorization", bearerFor(t, *id))
+		}
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+	available := func() float64 {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/inventory/SKU-BALO-BLACK-20L", nil)
+		req.Header.Set("Authorization", bearerFor(t, hcmStaff))
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		var st struct {
+			Data map[string]any `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &st)
+		return st.Data["available"].(float64)
+	}
+	const release = "/api/v1/inventory/reservations/O-RC/release-committed"
+	if rec := post(release, "", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("no reservation = %d", rec.Code)
+	}
+	post("/api/v1/inventory/reservations", `{"orderId":"O-RC","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":2}]}`, nil)
+	if rec := post(release, "", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("a reservation that is not committed = %d, want 409", rec.Code)
+	}
+	post("/api/v1/inventory/reservations/O-RC/commit", "", nil)
+	if available() != 8 {
+		t.Fatalf("available after commit = %v, want 8", available())
+	}
+	for i := 0; i < 3; i++ {
+		if rec := post(release, "", nil); rec.Code != http.StatusOK {
+			t.Fatalf("release #%d = %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	if available() != 10 {
+		t.Fatalf("available after release = %v, want 10 (released once)", available())
+	}
+	// The released reservation can never be handed over any more (SC06 branch A).
+	if rec := post("/api/v1/inventory/shipments/handover", `{"orderId":"O-RC"}`, &hcmStaff); rec.Code != http.StatusConflict {
+		t.Fatalf("handover after release = %d, want 409", rec.Code)
+	}
+	// And a handed over reservation can never be released (SC06 branch B).
+	post("/api/v1/inventory/reservations", `{"orderId":"O-RH","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`, nil)
+	post("/api/v1/inventory/reservations/O-RH/commit", "", nil)
+	post("/api/v1/inventory/shipments/handover", `{"orderId":"O-RH"}`, &hcmStaff)
+	if rec := post("/api/v1/inventory/reservations/O-RH/release-committed", "", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("release after handover = %d, want 409", rec.Code)
 	}
 }

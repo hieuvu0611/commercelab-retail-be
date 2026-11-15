@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
@@ -231,4 +232,51 @@ func (a *Addresses) Get(ctx context.Context, bearer, addressID string) (snapshot
 		return snapshot.Address{}, err
 	}
 	return out, nil
+}
+
+// ReleaseCommitted gives the committed stock of a paid order back. Unlike Release, a refusal is an error:
+// inventory answers 409 when the stock already left the warehouse, which must stop the cancellation.
+func (s *Stock) ReleaseCommitted(ctx context.Context, orderID string) error {
+	_, err := s.client.Do(ctx, http.MethodPost, s.base+"/api/v1/inventory/reservations/"+url.PathEscape(orderID)+"/release-committed",
+		svcclient.Options{Internal: true, IdempotencyKey: "release-committed-" + orderID}, nil, nil)
+	if hasCode(err, http.StatusConflict, "RELEASE_COMMITTED_FAILED") {
+		return checkout.ErrStockHandedOver
+	}
+	return err
+}
+
+// Fulfillment calls the fulfillment service's internal stop route.
+type Fulfillment struct {
+	base   string
+	client *svcclient.Client
+}
+
+func NewFulfillment(fulfillmentURL string, c *svcclient.Client) *Fulfillment {
+	return &Fulfillment{trim(fulfillmentURL), c}
+}
+
+// StopShipment asks fulfillment to stop the parcel of a cancelled order. It is idempotent on both sides.
+func (f *Fulfillment) StopShipment(ctx context.Context, r checkout.StopRequest) (checkout.StopResult, error) {
+	type line struct {
+		SkuID    string `json:"skuId"`
+		Quantity int64  `json:"quantity"`
+	}
+	items := make([]line, len(r.Lines))
+	for i, l := range r.Lines {
+		items[i] = line{SkuID: l.SkuID, Quantity: l.Quantity}
+	}
+	var out struct {
+		Result string `json:"result"`
+	}
+	_, err := f.client.Do(ctx, http.MethodPost, f.base+"/api/v1/shipments/internal/orders/"+url.PathEscape(r.OrderID)+"/stop",
+		svcclient.Options{Internal: true, IdempotencyKey: "stop-" + r.OrderID},
+		map[string]any{"userId": r.UserID, "warehouseId": r.WarehouseID, "items": items}, &out)
+	if err != nil {
+		return "", err
+	}
+	switch res := checkout.StopResult(out.Result); res {
+	case checkout.StopStopped, checkout.StopRequested, checkout.StopInProgress, checkout.StopTooLate:
+		return res, nil
+	}
+	return "", dependency.Wrap(errors.New("fulfillment answered an unknown stop result"))
 }

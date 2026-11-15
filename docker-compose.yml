@@ -299,6 +299,7 @@ services:
       CATALOG_SERVICE_URL: http://catalog-pricing-service:8081
       INVENTORY_SERVICE_URL: http://inventory-warehouse-service:8082
       PAYMENT_SERVICE_URL: http://payment-service:8084
+      FULFILLMENT_SERVICE_URL: http://fulfillment-shipping-service:8085
       REDPANDA_BROKERS: redpanda:9092
       DATABASE_URL_ORDERS: postgres://order_svc_user:order_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=orders
       MIGRATE_ON_START: "true"
@@ -342,7 +343,7 @@ services:
       args:
         SERVICE_NAME: fulfillment-shipping-service
     environment:
-      <<: [*go-env, *store-env, *jwt-env]
+      <<: [*go-env, *store-env, *jwt-env, *internal-env]
       FULFILLMENT_SHIPPING_PORT: 8085
       INVENTORY_SERVICE_URL: http://inventory-warehouse-service:8082
       CARRIER_WEBHOOK_SECRET: ${CARRIER_WEBHOOK_SECRET:-}

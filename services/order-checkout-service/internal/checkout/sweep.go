@@ -159,7 +159,14 @@ func (s *Service) reconcileVouchers(ctx context.Context, now time.Time) int {
 				continue
 			}
 			released++
-		case err == nil && saga.State(o.Status).IsPaid():
+		case err == nil && o.Status == string(saga.StateCancelled) && o.CapturedVND == 0:
+			// An unpaid cancellation gives the use back; a paid one keeps it consumed (P12).
+			if err := s.Vouchers.Release(ctx, u.Code, u.OrderID); err != nil {
+				log.Printf("[order] sweep: voucher release for order %s failed: %s", u.OrderID, redact(err))
+				continue
+			}
+			released++
+		case err == nil && (saga.State(o.Status).IsPaid() || o.Status == string(saga.StateCancelled) || o.Status == string(saga.StateCancelRequested)):
 			if err := s.Vouchers.Consume(ctx, u.Code, u.OrderID); err != nil {
 				log.Printf("[order] sweep: voucher consume for order %s failed: %s", u.OrderID, redact(err))
 			}

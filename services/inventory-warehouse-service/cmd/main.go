@@ -149,6 +149,22 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 		response.JSON(w, http.StatusOK, "Nhả giữ tồn kho về Khả dụng thành công", rec, nil)
 	})))
 
+	// B05: a paid order is cancelled before handover, so its committed stock goes back to available. It cannot
+	// succeed once the stock was handed over (that is the other side of SC06), and repeating it changes nothing.
+	mux.Handle("POST /api/v1/inventory/reservations/{orderId}/release-committed", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec, err := repo.ReleaseCommittedReservation(r.Context(), r.PathValue("orderId"), domain.SystemActor)
+		switch {
+		case dependency.IsUnavailable(err):
+			dependency.WriteUnavailable(w, r, err)
+		case errors.Is(err, repository.ErrReservationNotFound):
+			response.Error(w, r, http.StatusNotFound, "RESERVATION_NOT_FOUND", "No stock reservation exists for this order", nil)
+		case err != nil:
+			response.Error(w, r, http.StatusConflict, "RELEASE_COMMITTED_FAILED", "The committed stock cannot be released: it was handed over or is not committed", nil)
+		default:
+			response.JSON(w, http.StatusOK, "Committed stock released", rec, nil)
+		}
+	})))
+
 	// SC02, I08, SC12: the warehouse hands the parcel to the courier. Only warehouse staff and managers may do it,
 	// and only in a warehouse their token covers. The warehouse is the one the reservation was made in;
 	// it never comes from a client-supplied header or a hard-coded value.

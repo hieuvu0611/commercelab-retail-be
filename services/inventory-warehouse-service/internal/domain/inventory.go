@@ -276,3 +276,23 @@ func (e *LedgerEngine) AddOpening(warehouseID, skuID string, qty int64) error {
 	st.Version++
 	return nil
 }
+
+// ReleaseCommitted gives committed (paid, not yet handed over) stock back to available when a paid order is
+// cancelled before handover. On hand does not change; committed shrinks, so available grows (I01).
+func (e *LedgerEngine) ReleaseCommitted(warehouseID string, lines []ReserveLine) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, line := range lines {
+		st, ok := e.stocks[stockKey{line.SkuID, warehouseID}]
+		if !ok || st.Committed < line.Quantity {
+			return ErrInvalidReservationState
+		}
+	}
+	for _, line := range lines {
+		st := e.stocks[stockKey{line.SkuID, warehouseID}]
+		st.Committed -= line.Quantity
+		st.Version++
+	}
+	return nil
+}

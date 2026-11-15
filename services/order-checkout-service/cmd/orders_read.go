@@ -80,10 +80,10 @@ func statusParam(w http.ResponseWriter, r *http.Request) ([]string, bool) {
 		return nil, true
 	}
 	switch saga.State(v) {
-	case saga.StatePending, saga.StateReserved, saga.StateUnknownHold, saga.StateConfirmed, saga.StateInFulfillment, saga.StateDelivered, saga.StateFailedClosed:
+	case saga.StatePending, saga.StateReserved, saga.StateUnknownHold, saga.StateConfirmed, saga.StateInFulfillment, saga.StateDelivered, saga.StateFailedClosed, saga.StateCancelRequested, saga.StateCancelled:
 		return []string{v}, true
 	}
-	badParam(w, r, "status", "status must be PENDING, RESERVED, UNKNOWN_HOLD, CONFIRMED, IN_FULFILLMENT, DELIVERED or FAILED_CLOSED")
+	badParam(w, r, "status", "status must be PENDING, RESERVED, UNKNOWN_HOLD, CONFIRMED, IN_FULFILLMENT, DELIVERED, FAILED_CLOSED, CANCEL_REQUESTED or CANCELLED")
 	return nil, false
 }
 

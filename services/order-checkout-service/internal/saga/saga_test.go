@@ -188,3 +188,42 @@ func TestDuplicateCaptureAfterFulfillmentStartedIsANoOp(t *testing.T) {
 		}
 	}
 }
+
+func TestCustomerCancellationByState(t *testing.T) {
+	tests := []struct {
+		from    State
+		want    State
+		pay     string
+		effects []Effect
+	}{
+		{StateReserved, StateCancelled, PayUnpaid, []Effect{ReleaseStock, ReleaseVoucher}},
+		{StateConfirmed, StateCancelled, PayRefundPending, []Effect{ReleaseCommittedStock, RecordRefundObligation}},
+		{StateInFulfillment, StateCancelled, PayRefundPending, []Effect{ReleaseCommittedStock, RecordRefundObligation}},
+		{StateCancelRequested, StateCancelled, PayRefundPending, []Effect{ReleaseCommittedStock, RecordRefundObligation}},
+	}
+	for _, tc := range tests {
+		got, err := Next(tc.from, CustomerCancelled{})
+		if err != nil || got.State != tc.want || got.PaymentStatus != tc.pay || !reflect.DeepEqual(got.Effects, tc.effects) {
+			t.Errorf("%s: %+v %v, want %s %s %v", tc.from, got, err, tc.want, tc.pay, tc.effects)
+		}
+	}
+	for _, from := range []State{StatePending, StateUnknownHold, StateDelivered, StateFailedClosed, StateCancelled} {
+		if _, err := Next(from, CustomerCancelled{}); !errors.Is(err, ErrInvalidTransition) {
+			t.Errorf("%s: cancel = %v, want ErrInvalidTransition", from, err)
+		}
+	}
+	// A paid cancellation never gives the voucher back.
+	got, _ := Next(StateConfirmed, CustomerCancelled{})
+	for _, e := range got.Effects {
+		if e == ReleaseVoucher {
+			t.Fatal("a paid cancellation releases the voucher")
+		}
+	}
+}
+
+func TestMoneyAfterACancellationIsRefunded(t *testing.T) {
+	got, err := Next(StateCancelled, PaymentCaptured{CapturedVND: 660000, ExpectedVND: 660000})
+	if err != nil || got.State != StateCancelled || got.PaymentStatus != PayRefundPending || !reflect.DeepEqual(got.Effects, []Effect{RecordRefundObligation}) {
+		t.Fatalf("late capture = %+v %v", got, err)
+	}
+}

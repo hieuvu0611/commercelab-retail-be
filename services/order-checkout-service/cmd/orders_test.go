@@ -36,8 +36,24 @@ func (f *fakeQuotes) Get(_ context.Context, bearer, quoteID string) (checkout.Qu
 }
 
 type fakeStock struct {
-	reserves, releases, commits, holds atomic.Int32
-	err                                error
+	reserves, releases, commits, holds, committedReleases atomic.Int32
+	err                                                   error
+}
+
+func (f *fakeStock) ReleaseCommitted(context.Context, string) error {
+	f.committedReleases.Add(1)
+	return nil
+}
+
+// fakeFulfillment answers every stop request with result.
+type fakeFulfillment struct {
+	result checkout.StopResult
+	calls  atomic.Int32
+}
+
+func (f *fakeFulfillment) StopShipment(context.Context, checkout.StopRequest) (checkout.StopResult, error) {
+	f.calls.Add(1)
+	return f.result, nil
 }
 
 func (f *fakeStock) Reserve(context.Context, string, string, []checkout.StockLine) error {
@@ -85,6 +101,7 @@ type orderFixture struct {
 	stock     *fakeStock
 	payments  *fakePayments
 	vouchers  *voucher.MemoryStore
+	ful       *fakeFulfillment
 }
 
 func newOrderFixture(t *testing.T) *orderFixture {
@@ -101,12 +118,13 @@ func newOrderFixture(t *testing.T) *orderFixture {
 			},
 		}},
 		stock:    &fakeStock{},
+		ful:      &fakeFulfillment{result: checkout.StopStopped},
 		payments: &fakePayments{},
 		vouchers: voucher.NewMemoryStore(voucher.DevCampaigns()...),
 	}
 	f.orders, f.snaps, f.addresses = orders.NewMemoryStore(), snapshot.NewMemoryStore(), &fakeAddresses{}
 	svc := checkout.New(checkout.Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers,
-		Addresses: f.addresses, Snapshots: f.snaps, WarehouseID: "WH-HCM-01"})
+		Addresses: f.addresses, Snapshots: f.snaps, Fulfillment: f.ful, WarehouseID: "WH-HCM-01"})
 	f.srv = NewServer(svc, voucher.NewService(f.vouchers), voucher.NewAdmin(f.vouchers))
 	return f
 }
@@ -114,7 +132,7 @@ func newOrderFixture(t *testing.T) *orderFixture {
 // svcWith builds a service over the fixture's stores with another snapshot store.
 func (f *orderFixture) svcWith(snaps snapshot.Store) *checkout.Service {
 	return checkout.New(checkout.Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers,
-		Addresses: f.addresses, Snapshots: snaps, WarehouseID: "WH-HCM-01"})
+		Addresses: f.addresses, Snapshots: snaps, Fulfillment: f.ful, WarehouseID: "WH-HCM-01"})
 }
 
 func (f *orderFixture) place(t *testing.T, token, key, body string) *httptest.ResponseRecorder {

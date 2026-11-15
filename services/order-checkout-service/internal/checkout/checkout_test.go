@@ -36,16 +36,18 @@ func (f *fakeQuotes) Get(_ context.Context, _, quoteID string) (Quote, error) {
 }
 
 type fakeStock struct {
-	mu        sync.Mutex
-	reserves  int
-	releases  int
-	commits   int
-	holds     int
-	commitErr error
-	holdErr   error
-	reserveFn func() error
-	lastLines []StockLine
-	lastWH    string
+	mu                sync.Mutex
+	reserves          int
+	releases          int
+	committedReleases int
+	committedErr      error
+	commits           int
+	holds             int
+	commitErr         error
+	holdErr           error
+	reserveFn         func() error
+	lastLines         []StockLine
+	lastWH            string
 }
 
 func (f *fakeStock) Reserve(_ context.Context, _ string, warehouseID string, lines []StockLine) error {
@@ -78,6 +80,30 @@ func (f *fakeStock) Release(context.Context, string) error {
 	defer f.mu.Unlock()
 	f.releases++
 	return nil
+}
+
+func (f *fakeStock) ReleaseCommitted(context.Context, string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.committedReleases++
+	return f.committedErr
+}
+
+// fakeFulfillment answers every stop request with result (or err) and counts the calls.
+type fakeFulfillment struct {
+	mu     sync.Mutex
+	calls  int
+	last   StopRequest
+	result StopResult
+	err    error
+}
+
+func (f *fakeFulfillment) StopShipment(_ context.Context, r StopRequest) (StopResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.last = r
+	return f.result, f.err
 }
 
 type fakeAddresses struct {
@@ -123,6 +149,8 @@ type fakePayments struct {
 	amount   int64
 	userID   string
 	failure  error
+	// afterClose, when set, is what AttemptState reports once the attempt was closed (money that slipped in).
+	afterClose *PaymentState
 }
 
 func (f *fakePayments) CreateAttempt(_ context.Context, orderID, userID string, amountVND int64) (Attempt, error) {
@@ -141,6 +169,9 @@ func (f *fakePayments) AttemptState(_ context.Context, orderID string) (PaymentS
 	defer f.mu.Unlock()
 	if f.stateErr != nil {
 		return PaymentState{}, false, f.stateErr
+	}
+	if f.afterClose != nil && len(f.closes) > 0 {
+		return *f.afterClose, true, nil
 	}
 	st, ok := f.states[orderID]
 	return st, ok, nil
@@ -163,6 +194,7 @@ type fixture struct {
 	payments *fakePayments
 	vouchers *voucher.MemoryStore
 	orders   *orders.MemoryStore
+	ful      *fakeFulfillment
 }
 
 func sc01Quote() Quote {
@@ -187,10 +219,11 @@ func newFixture() *fixture {
 		payments: &fakePayments{},
 		vouchers: voucher.NewMemoryStore(voucher.DevCampaigns()...),
 		orders:   orders.NewMemoryStore(),
+		ful:      &fakeFulfillment{result: StopStopped},
 	}
 	n := 0
 	var mu sync.Mutex
-	f.svc = New(Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers, Carts: f.carts, Addresses: f.addrs, Snapshots: f.snaps, WarehouseID: "WH-HCM-01"}).
+	f.svc = New(Deps{Orders: f.orders, Quotes: f.quotes, Stock: f.stock, Payments: f.payments, Vouchers: f.vouchers, Carts: f.carts, Addresses: f.addrs, Snapshots: f.snaps, Fulfillment: f.ful, WarehouseID: "WH-HCM-01"}).
 		WithClock(func() time.Time { return now }).
 		WithIDs(func() string { mu.Lock(); defer mu.Unlock(); n++; return "O-" + string(rune('A'+n)) })
 	return f
