@@ -10,6 +10,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/timeline"
 )
 
 // AggregateShipment is the aggregate type of shipment events (topic commercelab.shipment.events).
@@ -19,6 +20,8 @@ const AggregateShipment = "Shipment"
 type Intake struct {
 	Store shipment.Store
 	Now   func() time.Time
+	// Timeline records the CREATED entry (optional; a failure is logged and never fails the event).
+	Timeline timeline.Recorder
 }
 
 type confirmedPayload struct {
@@ -55,6 +58,11 @@ func (i *Intake) Handle(ctx context.Context, e events.DomainEvent) error {
 	}
 	created := outbox.NewEvent(events.EventShipmentCreated, AggregateShipment, s.ShipmentID, i.Now(),
 		map[string]any{"shipmentId": s.ShipmentID, "orderId": s.OrderID, "warehouseId": s.WarehouseID, "items": items})
-	_, _, err = i.Store.Create(ctx, s, e.EventID, created)
+	_, isNew, err := i.Store.Create(ctx, s, e.EventID, created)
+	if err == nil && isNew && i.Timeline != nil {
+		if tlErr := i.Timeline.Append(ctx, s.ShipmentID, s.OrderID, timeline.Entry{At: i.Now(), Type: timeline.TypeCreated}); tlErr != nil {
+			log.Printf("[fulfillment] timeline entry for shipment %s was not recorded: %v", s.ShipmentID, tlErr)
+		}
+	}
 	return err
 }

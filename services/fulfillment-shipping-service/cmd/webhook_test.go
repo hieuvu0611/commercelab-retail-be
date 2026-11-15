@@ -22,7 +22,7 @@ var t0 = time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
 func webhookEnv(t *testing.T) *env {
 	t.Helper()
 	e := handoverEnv(t, &fakeStock{})
-	e.srv = NewServer(Deps{Shipments: e.store, Stock: &fakeStock{}, WebhookSecret: webhookSecret, Now: func() time.Time { return t0 }})
+	e.srv = NewServer(Deps{Shipments: e.store, Stock: &fakeStock{}, WebhookSecret: webhookSecret, Timeline: e.tl, Now: func() time.Time { return t0 }})
 	return e
 }
 

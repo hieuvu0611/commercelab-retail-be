@@ -12,6 +12,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/inventory"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/timeline"
 )
 
 // aggregateShipment is the aggregate type of shipment events.
@@ -55,6 +56,7 @@ func handoverParcel(d Deps) func(http.ResponseWriter, *http.Request, shipment.Sh
 			writeStoreError(w, r, err)
 			return
 		}
+		d.record(r, next, timeline.TypeHandedOver, "")
 		response.JSON(w, http.StatusOK, "Shipment handed over", viewOf(next), nil)
 	}
 }

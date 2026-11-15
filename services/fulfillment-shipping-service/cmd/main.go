@@ -19,6 +19,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/intake"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/inventory"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/timeline"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/migrations"
 )
 
@@ -38,6 +39,8 @@ type Deps struct {
 	Shipments shipment.Store
 	// Stock hands the order's stock over in inventory.
 	Stock StockHandover
+	// Timeline records and reads shipment histories (optional: nil means no history).
+	Timeline timeline.Recorder
 	// WebhookSecret signs carrier webhook bodies (HMAC-SHA256, hex, X-Signature); empty rejects every notice.
 	WebhookSecret string
 	// Now is the clock (default: UTC wall clock).
@@ -63,6 +66,7 @@ func NewServer(d Deps) http.Handler {
 	})
 	registerStaffRoutes(mux, d)
 	registerWebhookRoutes(mux, d)
+	registerTrackingRoute(mux, d)
 	return middleware.Chain(mux)
 }
 
@@ -97,7 +101,23 @@ func main() {
 	}
 
 	stock := inventory.NewClient(config.EnvOrDefault("INVENTORY_SERVICE_URL", "http://localhost:8082"), svcclient.New(svcclient.Config{MaxRetries: 2}))
-	in := &intake.Intake{Store: store, Now: func() time.Time { return time.Now().UTC() }}
+	// Without MongoDB (ALLOW_MEMORY_FALLBACK=true, dev/test only) timelines are kept in memory.
+	var timelines timeline.Recorder = timeline.NewMemory()
+	mongoStore, _, mongoErr := db.ConnectMongo(ctx, config.EnvOrDefault("MONGO_URI", "mongodb://mongo_admin:mongo_password@localhost:27017/commerce_lab_doc?authSource=admin"),
+		config.EnvOrDefault("MONGO_DATABASE", "commerce_lab_doc"))
+	if err := dependency.CheckStartup("fulfillment-shipping-service", "mongodb", mongoErr); err != nil {
+		log.Fatal(err)
+	}
+	if mongoStore != nil {
+		defer func() { _ = mongoStore.Close(context.Background()) }()
+		mongoTimelines, err := timeline.NewMongoStore(ctx, mongoStore)
+		if err != nil {
+			log.Fatalf("[fulfillment-shipping-service] timeline store: %v", err)
+		}
+		timelines = mongoTimelines
+	}
+
+	in := &intake.Intake{Store: store, Now: func() time.Time { return time.Now().UTC() }, Timeline: timelines}
 	brokers := config.EnvOrDefault("REDPANDA_BROKERS", "localhost:19092")
 	go func() {
 		err := eventconsumer.Run(ctx, eventconsumer.Config{Brokers: brokers, Group: consumerGroup, Topic: outbox.TopicFor("Order")}, in.Handle)
@@ -107,5 +127,5 @@ func main() {
 	}()
 
 	log.Printf("[fulfillment-shipping-service] listening on :%s (schema: fulfillment, brokers: %s)", port, brokers)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(Deps{Shipments: store, Stock: stock, WebhookSecret: webhookSecret})))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(Deps{Shipments: store, Stock: stock, Timeline: timelines, WebhookSecret: webhookSecret})))
 }

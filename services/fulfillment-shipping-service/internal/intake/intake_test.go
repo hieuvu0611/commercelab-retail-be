@@ -9,6 +9,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/timeline"
 )
 
 var at = time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
@@ -54,6 +55,21 @@ func TestTheSameOrderConfirmedTwiceCreatesOneShipment(t *testing.T) {
 	}
 	if got := store.EventTypes("SHP-O-1"); len(got) != 1 {
 		t.Fatalf("events = %v", got)
+	}
+}
+
+func TestTheTimelineStartsOnceWhenTheShipmentIsCreated(t *testing.T) {
+	in, _ := newIntake()
+	tl := timeline.NewMemory()
+	in.Timeline = tl
+	for _, id := range []string{"evt-1", "evt-1", "evt-2"} {
+		if err := in.Handle(context.Background(), confirmed(id, "O-1", nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _ := tl.Get(context.Background(), "SHP-O-1")
+	if len(got) != 1 || got[0].Type != timeline.TypeCreated || !got[0].At.Equal(at) {
+		t.Fatalf("timeline = %+v", got)
 	}
 }
 

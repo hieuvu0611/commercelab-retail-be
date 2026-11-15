@@ -64,6 +64,7 @@ func TestAnonymousCallsToProtectedEndpointsAreRejectedBeforeReachingAnyService(t
 	protected := []struct{ method, path string }{
 		{http.MethodPost, "/api/v1/orders"},
 		{http.MethodGet, "/api/v1/orders/O-1"},
+		{http.MethodGet, "/api/v1/orders/O-1/tracking"},
 		{http.MethodGet, "/api/v1/inventory/SKU-BALO-BLACK-20L"},
 		{http.MethodPost, "/api/v1/inventory/reservations"},
 		{http.MethodPost, "/api/v1/quotes"},

@@ -11,6 +11,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/timeline"
 )
 
 const (
@@ -178,6 +179,9 @@ func scanLine(d Deps) func(http.ResponseWriter, *http.Request, shipment.Shipment
 		if !saveStep(w, r, d, s, next, err) {
 			return
 		}
+		if s.Status == shipment.StatusPendingPick {
+			d.record(r, next, timeline.TypePickingStarted, "")
+		}
 		response.JSON(w, http.StatusOK, "Line scanned", viewOf(next), nil)
 	}
 }
@@ -196,6 +200,9 @@ func packParcel(d Deps) func(http.ResponseWriter, *http.Request, shipment.Shipme
 		next, err := s.Pack(d.now())
 		if !saveStep(w, r, d, s, next, err) {
 			return
+		}
+		if next.Version != s.Version {
+			d.record(r, next, timeline.TypePacked, "")
 		}
 		response.JSON(w, http.StatusOK, "Parcel packed", viewOf(next), nil)
 	}

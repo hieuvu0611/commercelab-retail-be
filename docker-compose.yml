@@ -342,7 +342,7 @@ services:
       args:
         SERVICE_NAME: fulfillment-shipping-service
     environment:
-      <<: [*go-env, *jwt-env]
+      <<: [*go-env, *store-env, *jwt-env]
       FULFILLMENT_SHIPPING_PORT: 8085
       INVENTORY_SERVICE_URL: http://inventory-warehouse-service:8082
       CARRIER_WEBHOOK_SECRET: ${CARRIER_WEBHOOK_SECRET:-}
