@@ -61,3 +61,25 @@ func TestPostgresStoreReadsSeededCampaignsAndCustomerUsage(t *testing.T) {
 		t.Fatalf("eligibility must not change the campaign: before %+v after %+v", last, after)
 	}
 }
+
+func TestPostgresAdminStoreFollowsTheCampaignRules(t *testing.T) {
+	dsn := os.Getenv("DATABASE_URL_ORDERS")
+	if dsn == "" {
+		t.Skip("DATABASE_URL_ORDERS is not set; run `make test-integration`")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	t.Cleanup(cancel)
+	pool, err := db.ConnectPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM orders.voucher_campaigns WHERE voucher_code LIKE 'CTR-%'`)
+	})
+	runAdminStoreContract(t, NewPostgresStore(pool), func(code string, reserved, consumed int64) {
+		if _, err := pool.Exec(ctx, `UPDATE orders.voucher_campaigns SET reserved_quota = $2, consumed_quota = $3 WHERE voucher_code = $1`, code, reserved, consumed); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
