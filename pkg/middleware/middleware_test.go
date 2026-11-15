@@ -56,3 +56,20 @@ func TestCorrelationIDReplacesInvalidHeader(t *testing.T) {
 		t.Error("response and request correlation IDs differ")
 	}
 }
+
+func TestCorrelationIDIsAvailableInTheRequestContext(t *testing.T) {
+	var got string
+	h := CorrelationID(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = CorrelationIDFrom(r.Context()) }))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Correlation-ID", "abc-123")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	if got != "abc-123" {
+		t.Fatalf("context correlation id = %q", got)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if got == "" || got != rec.Header().Get("X-Correlation-ID") {
+		t.Fatalf("generated id %q does not match header %q", got, rec.Header().Get("X-Correlation-ID"))
+	}
+}
