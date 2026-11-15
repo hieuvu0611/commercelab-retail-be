@@ -1,21 +1,40 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/eventconsumer"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/internal/stopalert"
 )
+
+// consumerGroup is the consumer group of this service on the shipment topic.
+const consumerGroup = "notification-service"
 
 func main() {
 	port := config.EnvOrDefault("NOTIFICATION_PORT", "8089")
+	auth.LoadSecrets(config.NewLoader())
 	dispatcher := domain.NewDispatcher()
+
+	// Shipment events feed the warehouse stop alerts (SC06).
+	hub := stopalert.NewHub()
+	brokers := config.EnvOrDefault("REDPANDA_BROKERS", "localhost:19092")
+	go func() {
+		err := eventconsumer.Run(context.Background(), eventconsumer.Config{Brokers: brokers, Group: consumerGroup, Topic: outbox.TopicFor("Shipment")}, hub.HandleEvent)
+		if err != nil {
+			log.Printf("[notification-service] shipment event consumer stopped: %v", err)
+		}
+	}()
 
 	// Seed thông báo mẫu cho khách hàng Lan và nhân viên Kho Minh
 	dispatcher.Dispatch(domain.NotificationItem{
@@ -38,6 +57,7 @@ func main() {
 	})
 
 	mux := http.NewServeMux()
+	registerStopAlertRoutes(mux, hub, defaultKeepAlive)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "notification-service healthy", map[string]any{

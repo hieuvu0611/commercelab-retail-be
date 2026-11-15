@@ -424,8 +424,9 @@ services:
       args:
         SERVICE_NAME: notification-service
     environment:
-      <<: *go-env
+      <<: [*go-env, *jwt-env]
       NOTIFICATION_PORT: 8089
+      REDPANDA_BROKERS: redpanda:9092
     ports:
       - "${NOTIFICATION_SERVICE_HOST_PORT:-8089}:8089"
     depends_on: *infra-healthy
