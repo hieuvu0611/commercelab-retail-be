@@ -292,3 +292,69 @@ func TestExpirySweepAndExceptionHoldAgainstPostgres(t *testing.T) {
 		t.Fatalf("past 30 minutes the hold must wait for the controlled release, got %s", r.Status)
 	}
 }
+
+func TestConcurrentCommittedReleasesGiveStockBackOnceAgainstPostgres_B05(t *testing.T) {
+	pool := integrationPool(t)
+	repo := NewInventoryRepository(pool)
+	ctx := context.Background()
+	sku := seedStock(t, pool, 10)
+	orderID := "IT-RC-" + sku
+	if _, err := repo.ReserveForOrder(ctx, orderID, testWarehouse, []domain.ReserveLine{{SkuID: sku, Quantity: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CommitOrderReservation(ctx, orderID); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := repo.ReleaseCommittedReservation(ctx, orderID, domain.SystemActor); err != nil {
+				t.Errorf("release: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := stockOf(t, repo, sku); got.OnHand != 10 || got.Committed != 0 || got.Available() != 10 {
+		t.Fatalf("stock = %+v, want everything available again", got)
+	}
+	if got := movementTypes(t, repo, sku); fmt.Sprint(got) != fmt.Sprint([]string{"RESERVE", "COMMIT", "RELEASE"}) {
+		t.Fatalf("ledger = %v, want exactly one RELEASE", got)
+	}
+	if _, err := repo.HandoverOrderShipment(ctx, orderID); !errors.Is(err, domain.ErrInvalidReservationState) {
+		t.Fatalf("handover after release = %v, want ErrInvalidReservationState", err)
+	}
+}
+
+func TestHandoverAndCommittedReleaseRaceHasOneWinnerAgainstPostgres_SC06(t *testing.T) {
+	pool := integrationPool(t)
+	repo := NewInventoryRepository(pool)
+	ctx := context.Background()
+	for round := 0; round < 5; round++ {
+		sku := seedStock(t, pool, 10)
+		orderID := fmt.Sprintf("IT-RACE-%d-%s", round, sku)
+		if _, err := repo.ReserveForOrder(ctx, orderID, testWarehouse, []domain.ReserveLine{{SkuID: sku, Quantity: 2}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.CommitOrderReservation(ctx, orderID); err != nil {
+			t.Fatal(err)
+		}
+		var handErr, relErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); _, handErr = repo.HandoverOrderShipment(ctx, orderID) }()
+		go func() {
+			defer wg.Done()
+			_, relErr = repo.ReleaseCommittedReservation(ctx, orderID, domain.SystemActor)
+		}()
+		wg.Wait()
+		if (handErr == nil) == (relErr == nil) {
+			t.Fatalf("round %d: handover err=%v release err=%v, want exactly one winner", round, handErr, relErr)
+		}
+		got := stockOf(t, repo, sku)
+		if handErr == nil && (got.OnHand != 8 || got.Committed != 0) || relErr == nil && (got.OnHand != 10 || got.Committed != 0) {
+			t.Fatalf("round %d: stock = %+v after handover err=%v release err=%v", round, got, handErr, relErr)
+		}
+	}
+}
