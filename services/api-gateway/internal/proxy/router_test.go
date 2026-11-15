@@ -63,6 +63,7 @@ func TestResolveTargetRoutesEveryPublicPrefixToItsService(t *testing.T) {
 		{"/api/v1/backoffice/exception-cases", "backoffice"},
 		{"/api/v1/notifications/user-1", "notification"},
 		{"/api/v1/notifications/dispatch", "notification"},
+		{"/api/v1/notifications/warehouse/WH-HCM-01/stream", "notification"},
 		{"/api/v1/unknown", ""},
 		{"/health-not-proxied", ""},
 	}
