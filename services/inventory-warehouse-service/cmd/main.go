@@ -155,6 +155,9 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	handover := func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			OrderID string `json:"orderId"`
+			// WarehouseID is optional; when the caller names the warehouse (fulfillment sends the shipment's),
+			// it must be the one the stock was reserved in.
+			WarehouseID string `json:"warehouseId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrderID == "" {
 			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "orderId is required for handover", nil)
@@ -172,6 +175,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 		claims, _ := auth.ClaimsFrom(r.Context())
 		if !auth.CanAccessWarehouse(claims, reservation.WarehouseID) {
 			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		if req.WarehouseID != "" && req.WarehouseID != reservation.WarehouseID {
+			response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
 			return
 		}
 		rec, err := repo.HandoverOrderShipment(r.Context(), req.OrderID)

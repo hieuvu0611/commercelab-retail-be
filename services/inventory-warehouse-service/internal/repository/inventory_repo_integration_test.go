@@ -196,6 +196,7 @@ func TestOpeningStockIsOnceAndLedgerFollowsTheOrderLifecycleAgainstPostgres(t *t
 		},
 		func() error { _, e := repo.CommitOrderReservation(ctx, orderID); return e },
 		func() error { _, e := repo.HandoverOrderShipment(ctx, orderID); return e },
+		func() error { _, e := repo.HandoverOrderShipment(ctx, orderID); return e }, // repeated: decrements nothing more
 	}
 	for i, step := range steps {
 		if err := step(); err != nil {

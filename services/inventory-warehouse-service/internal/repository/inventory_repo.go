@@ -389,6 +389,9 @@ func (r *InventoryRepository) HandoverOrderShipment(ctx context.Context, orderID
 				return nil, dependency.Wrap(err)
 			}
 			_ = json.Unmarshal(rawLines, &rec.Lines)
+			if rec.Status == "HANDED_OVER" {
+				return &rec, nil // a repeated handover changes nothing
+			}
 			if rec.Status != "COMMITTED" {
 				return nil, domain.ErrInvalidReservationState
 			}
@@ -423,6 +426,10 @@ func (r *InventoryRepository) HandoverOrderShipment(ctx context.Context, orderID
 	rec, ok := r.reservations[orderID]
 	if !ok {
 		return nil, ErrReservationNotFound
+	}
+	if rec.Status == "HANDED_OVER" {
+		cp := *rec
+		return &cp, nil // a repeated handover changes nothing
 	}
 	if rec.Status != "COMMITTED" {
 		return nil, domain.ErrInvalidReservationState
