@@ -13,8 +13,8 @@ type publicEndpoint struct {
 	prefix bool
 }
 
-// publicAllowlist is the complete list of unauthenticated calls: reading the public catalog, the sign-in flow
-// and health checks. Everything else requires a valid access token.
+// publicAllowlist is the complete list of unauthenticated calls: reading the public catalog, the sign-in flow,
+// the signed payment webhook and health checks. Everything else requires a valid access token.
 //
 // POST /api/v1/auth/logout is public because the refresh token in its body is the proof, and a client whose
 // access token already expired must still be able to sign out.
@@ -24,6 +24,8 @@ var publicAllowlist = []publicEndpoint{
 	{method: http.MethodGet, path: "/api/v1/categories", prefix: true},
 	// Stock state per SKU (IN_STOCK / LOW / OUT, never counts, D-12). The exact-count endpoints stay protected.
 	{method: http.MethodGet, path: "/api/v1/inventory/availability"},
+	// The payment provider cannot hold an access token; the payment service verifies the HMAC signature of the body.
+	{method: http.MethodPost, path: "/api/v1/payments/webhooks/simulator"},
 	{method: http.MethodPost, path: "/api/v1/auth/login"},
 	{method: http.MethodPost, path: "/api/v1/auth/register"},
 	{method: http.MethodPost, path: "/api/v1/auth/refresh"},

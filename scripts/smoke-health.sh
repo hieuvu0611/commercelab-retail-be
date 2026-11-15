@@ -17,7 +17,8 @@ free_port() {
 JWT_ACCESS_SECRET="$(openssl rand -hex 32)"
 JWT_REFRESH_SECRET="$(openssl rand -hex 32)"
 INTERNAL_SERVICE_TOKEN="$(openssl rand -hex 32)"
-export JWT_ACCESS_SECRET JWT_REFRESH_SECRET INTERNAL_SERVICE_TOKEN
+PAYMENT_WEBHOOK_SECRET="$(openssl rand -hex 32)"
+export JWT_ACCESS_SECRET JWT_REFRESH_SECRET INTERNAL_SERVICE_TOKEN PAYMENT_WEBHOOK_SECRET
 
 # Use free host ports so the smoke run never collides with a stack that is already running.
 export POSTGRES_HOST_PORT="$(free_port)" MONGO_HOST_PORT="$(free_port)" REDIS_HOST_PORT="$(free_port)"
