@@ -33,7 +33,7 @@ var (
 func TestInventoryReserveCommitHandoverAndWarehouseScope_SC02_SC12(t *testing.T) {
 	authtest.Configure(t)
 	repo := repository.NewInventoryRepository(nil)
-	srv := NewServer(repo, false)
+	srv := newTestServer(repo, false)
 
 	// 1. Giữ tồn 2 Balo + 1 Bình nước cho đơn O-001 (SC02)
 	resBody := []byte(`{
@@ -98,7 +98,7 @@ func TestStoreOutageAnswers503InsteadOfSeededStock(t *testing.T) {
 		t.Fatalf("create pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
-	srv := NewServer(repository.NewInventoryRepository(pool), true)
+	srv := newTestServer(repository.NewInventoryRepository(pool), true)
 
 	tests := []struct {
 		name   string
@@ -163,7 +163,7 @@ func handoverWith(srv http.Handler, authorization, extraHeader, extraValue strin
 
 func TestHandoverRequiresAValidTokenRoleAndTheReservationsWarehouse(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	reserveOrderForHandover(t, srv)
 
 	customer := auth.Identity{UserID: "user-lan", Roles: []string{"CUSTOMER"}}
@@ -199,7 +199,7 @@ func TestHandoverRequiresAValidTokenRoleAndTheReservationsWarehouse(t *testing.T
 
 func TestHandoverUsesTheReservationsWarehouseNotAHardCodedOne(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	body := []byte(`{"orderId":"O-HN","warehouseId":"WH-HN-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`)
 	for _, step := range []struct {
 		path string
@@ -242,7 +242,7 @@ func TestInventoryLoadConfigRequiresJWTSecrets(t *testing.T) {
 
 func TestReserveRejectsMissingWarehouseAndBadLines(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	for name, body := range map[string]string{
 		"no warehouse":  `{"orderId":"O-W","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`,
 		"no lines":      `{"orderId":"O-W","warehouseId":"WH-HCM-01","lines":[]}`,
@@ -258,7 +258,7 @@ func TestReserveRejectsMissingWarehouseAndBadLines(t *testing.T) {
 
 func TestDuplicateSkuLinesAreSummedBeforeTheStockCheck(t *testing.T) {
 	authtest.Configure(t)
-	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	srv := newTestServer(repository.NewInventoryRepository(nil), false)
 	// HN holds 5 units of the backpack: 3 + 3 must be refused as 6, not accepted line by line.
 	body := `{"orderId":"O-DUP","warehouseId":"WH-HN-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":3},{"skuId":"SKU-BALO-BLACK-20L","quantity":3}]}`
 	rec := httptest.NewRecorder()

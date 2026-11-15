@@ -12,11 +12,14 @@ import (
 type MemoryStore struct {
 	mu        sync.Mutex
 	campaigns map[string]Campaign
-	uses      map[string]int64 // code|user -> RESERVED + CONSUMED
+	uses      map[string]int64    // code|user -> RESERVED + CONSUMED
+	usages    map[string]memUsage // code|order -> the use an order holds
 }
 
+type memUsage struct{ user, state string }
+
 func NewMemoryStore(seed ...Campaign) *MemoryStore {
-	m := &MemoryStore{campaigns: map[string]Campaign{}, uses: map[string]int64{}}
+	m := &MemoryStore{campaigns: map[string]Campaign{}, uses: map[string]int64{}, usages: map[string]memUsage{}}
 	for _, c := range seed {
 		m.campaigns[c.Code] = c
 	}
@@ -116,4 +119,43 @@ func (m *MemoryStore) SetBuckets(code string, reserved, consumed int64) {
 	c := m.campaigns[code]
 	c.ReservedQuota, c.ConsumedQuota = reserved, consumed
 	m.campaigns[code] = c
+}
+
+// Reserve implements Reserver.
+func (m *MemoryStore) Reserve(_ context.Context, code, userID, orderID string, now time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.campaigns[code]
+	if !ok {
+		return &Refusal{Reason: ReasonNotFound}
+	}
+	if u, held := m.usages[code+"|"+orderID]; held && u.state != "RELEASED" {
+		return nil
+	}
+	if reason := Evaluate(c, m.uses[code+"|"+userID], now); reason != "" {
+		return &Refusal{Reason: reason}
+	}
+	c.ReservedQuota++
+	c.Version++
+	m.campaigns[code] = c
+	m.uses[code+"|"+userID]++
+	m.usages[code+"|"+orderID] = memUsage{user: userID, state: "RESERVED"}
+	return nil
+}
+
+// Release implements Reserver.
+func (m *MemoryStore) Release(_ context.Context, code, orderID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, held := m.usages[code+"|"+orderID]
+	if !held || u.state != "RESERVED" {
+		return nil
+	}
+	c := m.campaigns[code]
+	c.ReservedQuota--
+	c.Version++
+	m.campaigns[code] = c
+	m.uses[code+"|"+u.user]--
+	m.usages[code+"|"+orderID] = memUsage{user: u.user, state: "RELEASED"}
+	return nil
 }

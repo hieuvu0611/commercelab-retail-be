@@ -107,3 +107,68 @@ func (s *PostgresStore) Update(ctx context.Context, code string, f Fields) (Camp
 	}
 	return updated, dependency.Wrap(tx.Commit(ctx))
 }
+
+// Reserve implements Reserver. The campaign row lock serialises every reservation of one code, so the quota
+// and the per-customer limit are checked and taken atomically (SC10: the last use goes to exactly one order).
+func (s *PostgresStore) Reserve(ctx context.Context, code, userID, orderID string, now time.Time) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	campaign, err := scanCampaign(tx.QueryRow(ctx, `SELECT `+campaignColumns+` FROM orders.voucher_campaigns WHERE voucher_code = $1 FOR UPDATE`, code))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &Refusal{Reason: ReasonNotFound}
+	}
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	var state string
+	err = tx.QueryRow(ctx, `SELECT state FROM orders.voucher_usages WHERE voucher_code = $1 AND order_id = $2`, code, orderID).Scan(&state)
+	if err == nil && state != "RELEASED" {
+		return nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return dependency.Wrap(err)
+	}
+	var uses int64
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM orders.voucher_usages
+		WHERE voucher_code = $1 AND user_id = $2 AND state IN ('RESERVED', 'CONSUMED')`, code, userID).Scan(&uses); err != nil {
+		return dependency.Wrap(err)
+	}
+	if reason := Evaluate(campaign, uses, now); reason != "" {
+		return &Refusal{Reason: reason}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO orders.voucher_usages (voucher_code, user_id, order_id, state) VALUES ($1, $2, $3, 'RESERVED')
+		ON CONFLICT (voucher_code, order_id) DO UPDATE SET state = 'RESERVED', user_id = EXCLUDED.user_id`, code, userID, orderID); err != nil {
+		return dependency.Wrap(err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE orders.voucher_campaigns SET reserved_quota = reserved_quota + 1, version = version + 1, updated_at = NOW()
+		WHERE voucher_code = $1`, code); err != nil {
+		return dependency.Wrap(err)
+	}
+	return dependency.Wrap(tx.Commit(ctx))
+}
+
+// Release implements Reserver.
+func (s *PostgresStore) Release(ctx context.Context, code, orderID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM orders.voucher_campaigns WHERE voucher_code = $1 FOR UPDATE`, code); err != nil {
+		return dependency.Wrap(err)
+	}
+	tag, err := tx.Exec(ctx, `UPDATE orders.voucher_usages SET state = 'RELEASED' WHERE voucher_code = $1 AND order_id = $2 AND state = 'RESERVED'`, code, orderID)
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 1 {
+		if _, err := tx.Exec(ctx, `UPDATE orders.voucher_campaigns SET reserved_quota = reserved_quota - 1, version = version + 1, updated_at = NOW()
+			WHERE voucher_code = $1`, code); err != nil {
+			return dependency.Wrap(err)
+		}
+	}
+	return dependency.Wrap(tx.Commit(ctx))
+}

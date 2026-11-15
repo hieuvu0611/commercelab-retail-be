@@ -9,14 +9,13 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
-	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
 )
 
 func newTestServer(t *testing.T, store *voucher.MemoryStore) http.Handler {
 	t.Helper()
 	authtest.Configure(t)
-	return NewServer(domain.NewCheckoutEngine(), voucher.NewService(store), voucher.NewAdmin(store))
+	return NewServer(nil, voucher.NewService(store), voucher.NewAdmin(store))
 }
 
 func bearer(t *testing.T, userID string, roles ...string) string {
