@@ -85,14 +85,14 @@ func TestMongoStorefrontQueries(t *testing.T) {
 	want("price asc", list(domain.StorefrontQuery{Sort: "price_asc"}), "steel-flask", "mini-pack", "city-pack")
 	max := int64(200000)
 	want("max price", list(domain.StorefrontQuery{MaxPrice: &max, Sort: "price_desc"}), "mini-pack", "steel-flask")
-	want("attribute is case-insensitive", list(domain.StorefrontQuery{Attrs: map[string]string{"color": "bLaCk"}}), "city-pack")
+	want("attribute is case-insensitive", list(domain.StorefrontQuery{Attrs: map[string][]string{"color": {"bLaCk"}}}), "city-pack")
 	want("text word search", list(domain.StorefrontQuery{Q: "backpack"}), "mini-pack", "city-pack")
 	want("drafts are never found by text", list(domain.StorefrontQuery{Q: "draft"}))
 
 	// Injection attempts match nothing.
 	want("regex text", list(domain.StorefrontQuery{Q: ".*"}))
-	want("regex attribute", list(domain.StorefrontQuery{Attrs: map[string]string{"color": ".*"}}))
-	want("regex attribute anchored", list(domain.StorefrontQuery{Attrs: map[string]string{"color": "Bla.k"}}))
+	want("regex attribute", list(domain.StorefrontQuery{Attrs: map[string][]string{"color": {".*"}}}))
+	want("regex attribute anchored", list(domain.StorefrontQuery{Attrs: map[string][]string{"color": {"Bla.k"}}}))
 
 	page2 := list(domain.StorefrontQuery{Page: 2, Limit: 2})
 	if page2.Total != 3 || page2.PageCount != 2 || len(page2.Items) != 1 || page2.Items[0].Slug != "city-pack" {

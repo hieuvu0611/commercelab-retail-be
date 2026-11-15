@@ -205,7 +205,7 @@ func (m *MemoryProductStore) FindPublished(_ context.Context, text string, categ
 }
 
 // ActiveSKUs implements StorefrontStore.
-func (m *MemoryProductStore) ActiveSKUs(_ context.Context, productIDs []string, attrs map[string]string) ([]SKU, error) {
+func (m *MemoryProductStore) ActiveSKUs(_ context.Context, productIDs []string, attrs map[string][]string) ([]SKU, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var out []SKU
@@ -214,8 +214,9 @@ func (m *MemoryProductStore) ActiveSKUs(_ context.Context, productIDs []string, 
 			continue
 		}
 		ok := true
-		for axis, want := range attrs {
-			if !strings.EqualFold(strings.TrimSpace(s.Attributes[axis]), strings.TrimSpace(want)) {
+		for axis, wanted := range attrs {
+			have := strings.TrimSpace(s.Attributes[axis])
+			if !slices.ContainsFunc(wanted, func(want string) bool { return strings.EqualFold(have, strings.TrimSpace(want)) }) {
 				ok = false
 			}
 		}

@@ -47,7 +47,7 @@ type StorefrontStore interface {
 	// (word search, not a pattern; empty means no text filter).
 	FindPublished(ctx context.Context, text string, categoryIDs []string) ([]PublishedRef, error)
 	// ActiveSKUs returns the active SKUs of the products whose attributes equal attrs (case-insensitive).
-	ActiveSKUs(ctx context.Context, productIDs []string, attrs map[string]string) ([]SKU, error)
+	ActiveSKUs(ctx context.Context, productIDs []string, attrs map[string][]string) ([]SKU, error)
 	// PublishedByIDs returns the published products with the given ids, in that order.
 	PublishedByIDs(ctx context.Context, ids []string) ([]Product, error)
 	// PublishedBySlug returns ErrProductNotFound for unknown or unpublished products.
@@ -65,7 +65,7 @@ type StorefrontQuery struct {
 	Q            string
 	MinPrice     *int64
 	MaxPrice     *int64
-	Attrs        map[string]string // variant axis -> value
+	Attrs        map[string][]string // variant axis -> accepted values (any of them matches)
 	Sort         string
 	Page         int
 	Limit        int
@@ -165,9 +165,13 @@ func (q *StorefrontQuery) validate() error {
 	if len(q.Q) > maxSearchTextLen {
 		add("q", fmt.Sprintf("q must be at most %d characters", maxSearchTextLen))
 	}
-	for axis, value := range q.Attrs {
-		if !axisPattern.MatchString(axis) || strings.TrimSpace(value) == "" || len(value) > maxAttributeLen {
-			add("attr."+axis, "attribute filters need a variant axis name and a value of up to 64 characters")
+	for axis, values := range q.Attrs {
+		valid := axisPattern.MatchString(axis) && len(values) > 0
+		for _, value := range values {
+			valid = valid && strings.TrimSpace(value) != "" && len(value) <= maxAttributeLen
+		}
+		if !valid {
+			add("attr."+axis, "attribute filters need a variant axis name and values of up to 64 characters")
 		}
 	}
 	if len(fields) > 0 {

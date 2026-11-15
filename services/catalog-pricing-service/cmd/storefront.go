@@ -62,9 +62,10 @@ func parseStorefrontQuery(r *http.Request) (domain.StorefrontQuery, map[string][
 	for key, values := range v {
 		if axis, ok := strings.CutPrefix(key, "attr."); ok && len(values) > 0 {
 			if q.Attrs == nil {
-				q.Attrs = map[string]string{}
+				q.Attrs = map[string][]string{}
 			}
-			q.Attrs[axis] = values[0]
+			// One request may list several values, comma separated (attr.color=Black,Navy): any of them matches.
+			q.Attrs[axis] = strings.Split(strings.Join(values, ","), ",")
 		}
 	}
 	return q, bad

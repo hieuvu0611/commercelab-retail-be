@@ -180,17 +180,17 @@ func TestListAttributeFilterAppliesToTheSameSKUAsThePrice(t *testing.T) {
 	s.publish(t, "pack", "Pack", "city", skuSpec{"A", "Black", "20 L", 500000}, skuSpec{"B", "Red", "20 L", 100000})
 	max := int64(200000)
 	// Black exists and a SKU under 200,000 exists, but not the same SKU.
-	if got := s.list(t, StorefrontQuery{Attrs: map[string]string{"color": "black"}, MaxPrice: &max}).Items; len(got) != 0 {
+	if got := s.list(t, StorefrontQuery{Attrs: map[string][]string{"color": {"black"}}, MaxPrice: &max}).Items; len(got) != 0 {
 		t.Fatalf("matched through different SKUs: %v", slugs(got))
 	}
-	if got := s.list(t, StorefrontQuery{Attrs: map[string]string{"color": "BLACK"}}).Items; len(got) != 1 {
+	if got := s.list(t, StorefrontQuery{Attrs: map[string][]string{"color": {"BLACK"}}}).Items; len(got) != 1 {
 		t.Fatalf("case-insensitive attribute: %v", slugs(got))
 	}
-	if got := s.list(t, StorefrontQuery{Attrs: map[string]string{"color": "red"}, MaxPrice: &max}).Items; len(got) != 1 {
+	if got := s.list(t, StorefrontQuery{Attrs: map[string][]string{"color": {"red"}}, MaxPrice: &max}).Items; len(got) != 1 {
 		t.Fatalf("red under max: %v", slugs(got))
 	}
 	// Attribute values are literal text.
-	if got := s.list(t, StorefrontQuery{Attrs: map[string]string{"color": ".*"}}).Items; len(got) != 0 {
+	if got := s.list(t, StorefrontQuery{Attrs: map[string][]string{"color": {".*"}}}).Items; len(got) != 0 {
 		t.Fatalf("regex attribute matched %v", slugs(got))
 	}
 }
@@ -236,7 +236,7 @@ func TestListValidation(t *testing.T) {
 		{"min above max", StorefrontQuery{MinPrice: &one, MaxPrice: new(int64)}, "maxPrice"},
 		{"limit too big", StorefrontQuery{Limit: 101}, "limit"},
 		{"negative page", StorefrontQuery{Page: -1}, "page"},
-		{"bad attribute name", StorefrontQuery{Attrs: map[string]string{"$where": "x"}}, "attr.$where"},
+		{"bad attribute name", StorefrontQuery{Attrs: map[string][]string{"$where": {"x"}}}, "attr.$where"},
 		{"long q", StorefrontQuery{Q: string(make([]byte, 101))}, "q"},
 	}
 	for _, tc := range tests {
@@ -281,5 +281,16 @@ func TestDetailShowsActiveSKUsWithCurrentPricesAndUnknownAvailability(t *testing
 	}
 	if got := s.list(t, StorefrontQuery{}); got.Total != 0 {
 		t.Fatalf("unpublished product listed: %+v", got)
+	}
+}
+
+func TestListAttributeFilterAcceptsSeveralValuesForOneAxis(t *testing.T) {
+	s := newStorefrontEnv(t)
+	s.publish(t, "pack", "Pack", "city", skuSpec{"A", "Black", "20 L", 500000})
+	s.publish(t, "bag", "Bag", "city", skuSpec{"B", "Navy", "20 L", 400000})
+	s.publish(t, "tote", "Tote", "city", skuSpec{"C", "Red", "20 L", 300000})
+	got := s.list(t, StorefrontQuery{Attrs: map[string][]string{"color": {"black", "NAVY"}}}).Items
+	if len(got) != 2 {
+		t.Fatalf("black or navy: %v", slugs(got))
 	}
 }
