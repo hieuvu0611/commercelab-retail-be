@@ -19,6 +19,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cache"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cart"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/inventory"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
@@ -37,6 +38,8 @@ type Deps struct {
 	Images     *domain.ImageService
 	Storefront *domain.StorefrontService
 	Cache      cache.Cache
+	// Carts defaults to an in-memory store (development and tests).
+	Carts cart.Store
 	// Availability supplies stock states for the storefront; nil reports every availability as unknown.
 	Availability domain.AvailabilityLookup
 }
@@ -71,6 +74,10 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 		deps.Prices = domain.NewPriceService(deps.Products, repo)
 	}
 	registerPriceRoutes(mux, deps.Prices)
+	if deps.Carts == nil {
+		deps.Carts = cart.NewMemoryStore()
+	}
+	registerCartRoutes(mux, cart.NewService(deps.Carts, repo))
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "catalog-pricing-service healthy", map[string]any{
@@ -228,6 +235,7 @@ func main() {
 	if redisClient != nil {
 		defer func() { _ = redisClient.Close() }()
 		deps.Cache = cache.NewRedis(redisClient)
+		deps.Carts = cart.NewRedisStore(redisClient)
 	}
 
 	repo := repository.NewCatalogPricingRepository(pgPool, mongoStore)
