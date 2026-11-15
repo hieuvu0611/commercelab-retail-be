@@ -24,6 +24,8 @@ const (
 	EventShipmentCreated       = "fulfillment.shipment_created.v1"
 	EventShipmentHandedOver    = "fulfillment.shipment_handed_over.v1"
 	EventShipmentDelivered     = "fulfillment.shipment_delivered.v1"
+	EventShipmentStopRequested = "fulfillment.stop_requested.v1"
+	EventShipmentStopped       = "fulfillment.shipment_stopped.v1"
 	EventReturnApproved        = "support.return_approved.v1"
 	EventReconDiscrepancyFound = "ledger.reconciliation_discrepancy.v1"
 	EventExceptionCaseOpened   = "support.exception_case_opened.v1"

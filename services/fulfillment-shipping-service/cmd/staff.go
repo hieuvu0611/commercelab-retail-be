@@ -55,7 +55,7 @@ func viewOf(s shipment.Shipment) shipmentView {
 var knownStatuses = map[shipment.Status]bool{
 	shipment.StatusPendingPick: true, shipment.StatusPicking: true, shipment.StatusPacked: true, shipment.StatusPickBlocked: true,
 	shipment.StatusHandedOver: true, shipment.StatusInTransit: true, shipment.StatusDelivered: true,
-	shipment.StatusDeliveryFailed: true, shipment.StatusPartiallyDelivered: true,
+	shipment.StatusDeliveryFailed: true, shipment.StatusPartiallyDelivered: true, shipment.StatusStoppedForCancel: true,
 }
 
 func badParam(w http.ResponseWriter, r *http.Request, name, msg string) {

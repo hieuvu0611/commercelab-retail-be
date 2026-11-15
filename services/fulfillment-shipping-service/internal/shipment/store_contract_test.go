@@ -44,6 +44,22 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string, outbo
 		}
 	})
 
+	t.Run("a stopped parcel created before the order's event stays stopped and the late event adds nothing", func(t *testing.T) {
+		s := newShipment(uniq("O"))
+		stopped := s
+		stopped.Status = StatusStoppedForCancel
+		if got, created, err := store.Create(ctx, stopped, uniq("evt"), createdEvent(s)); err != nil || !created || got.Status != StatusStoppedForCancel {
+			t.Fatalf("create stopped = %+v %v %v", got, created, err)
+		}
+		got, created, err := store.Create(ctx, s, uniq("evt"), createdEvent(s)) // the late order.confirmed
+		if err != nil || created || got.Status != StatusStoppedForCancel {
+			t.Fatalf("late create = %+v created=%v %v, want the stopped parcel back", got, created, err)
+		}
+		if types := outboxTypes(s.ShipmentID); len(types) != 1 {
+			t.Fatalf("outbox = %v, the late event must add none", types)
+		}
+	})
+
 	t.Run("the same event twice creates one shipment and one event", func(t *testing.T) {
 		s := newShipment(uniq("O"))
 		evt := uniq("evt")

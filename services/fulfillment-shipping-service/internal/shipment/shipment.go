@@ -23,6 +23,8 @@ const (
 	StatusDeliveryFailed     Status = "DELIVERY_FAILED"
 	StatusPartiallyDelivered Status = "PARTIALLY_DELIVERED"
 	StatusPickBlocked        Status = "PICK_BLOCKED"
+	// StatusStoppedForCancel: the order was cancelled before handover; the parcel can never be handed over (B05, SC06).
+	StatusStoppedForCancel Status = "STOPPED_FOR_CANCEL"
 )
 
 var (
