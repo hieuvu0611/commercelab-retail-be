@@ -143,6 +143,26 @@ func TestADuplicateEventIdIsAcknowledgedWithoutChange(t *testing.T) {
 	}
 }
 
+func TestARepeatedNoticeForAStateAlreadyReachedIsADuplicate(t *testing.T) {
+	e := webhookEnv(t)
+	dispatched(t, e)
+	e.carrier(t, `{"eventId":"c-1","shipmentId":"SHP-O-1","type":"IN_TRANSIT"}`, "sign")
+	e.carrier(t, `{"eventId":"c-2","shipmentId":"SHP-O-1","type":"DELIVERED"}`, "sign")
+	s1, _ := e.store.Get(context.Background(), "SHP-O-1")
+	// The same event again, and the same state under another event id: both change nothing and say so.
+	for _, body := range []string{
+		`{"eventId":"c-2","shipmentId":"SHP-O-1","type":"DELIVERED"}`,
+		`{"eventId":"c-3","shipmentId":"SHP-O-1","type":"DELIVERED"}`,
+	} {
+		rec := e.carrier(t, body, "sign")
+		got := decode[noticeResult](t, rec)
+		s2, _ := e.store.Get(context.Background(), "SHP-O-1")
+		if rec.Code != 200 || !got.Duplicate || got.Applied || s2.Version != s1.Version {
+			t.Fatalf("%s: %d %+v, version %d (was %d)", body, rec.Code, got, s2.Version, s1.Version)
+		}
+	}
+}
+
 func TestAFailedDeliveryKeepsTheReason(t *testing.T) {
 	e := webhookEnv(t)
 	dispatched(t, e)

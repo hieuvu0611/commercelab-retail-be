@@ -34,10 +34,14 @@ func TestAuthLoginMeAndRefreshFlow(t *testing.T) {
 	}
 
 	var loginResp struct {
-		Data UserProfile `json:"data"`
+		Message string      `json:"message"`
+		Data    UserProfile `json:"data"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &loginResp); err != nil {
 		t.Fatalf("failed to decode login response: %v", err)
+	}
+	if loginResp.Message != "Signed in" {
+		t.Fatalf("expected the English login message, got %q", loginResp.Message)
 	}
 	if loginResp.Data.WarehouseScope != "WH-HCM-01" || loginResp.Data.AccessToken == "" || loginResp.Data.RefreshToken == "" {
 		t.Fatalf("unexpected login data: %+v", loginResp.Data)
