@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
@@ -27,6 +29,7 @@ func registerPriceRoutes(mux *http.ServeMux, svc *domain.PriceService) {
 	marketing := func(h http.HandlerFunc) http.Handler {
 		return auth.RequireAuth(auth.RequireRole(RoleMarketing)(h))
 	}
+	mux.Handle("GET /api/v1/admin/prices", marketing(api.list))
 	mux.Handle("PUT /api/v1/admin/skus/{skuId}/price", marketing(api.set))
 	mux.Handle("GET /api/v1/admin/skus/{skuId}/price", marketing(api.get))
 }
@@ -52,6 +55,24 @@ func (a *priceAPI) set(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.JSON(w, http.StatusOK, "Price saved", view, nil)
+}
+
+func (a *priceAPI) list(w http.ResponseWriter, r *http.Request) {
+	page, okPage := queryInt(r, "page", 1)
+	limit, okLimit := queryInt(r, "limit", 20)
+	if !okPage || !okLimit {
+		response.Error(w, r, http.StatusBadRequest, "VALIDATION_FAILED", "page and limit must be positive integers", nil)
+		return
+	}
+	limit = min(limit, 100)
+	rows, total, err := a.svc.ListPrices(r.Context(), strings.TrimSpace(r.URL.Query().Get("q")), page, limit)
+	if err != nil {
+		writePriceError(w, r, err)
+		return
+	}
+	response.JSON(w, http.StatusOK, "Prices", rows, &response.Metadata{
+		Total: total, Page: page, Limit: limit, PageCount: int(math.Ceil(float64(total) / float64(limit))),
+	})
 }
 
 func (a *priceAPI) get(w http.ResponseWriter, r *http.Request) {

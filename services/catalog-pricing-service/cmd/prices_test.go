@@ -135,3 +135,35 @@ func TestQuoteIgnoresClientPricesAndRejectsClosedSKUs(t *testing.T) {
 		t.Fatalf("unknown SKU: %d %s", code, body)
 	}
 }
+
+type priceListResp struct {
+	Data []domain.PriceRow `json:"data"`
+	Meta struct {
+		Total int64 `json:"total"`
+	} `json:"metadata"`
+}
+
+func TestPriceListShowsEverySKUWithItsCurrentPrice(t *testing.T) {
+	e, _ := newPriceEnv(t)
+	mkt := token(t, "MARKETING")
+	for _, role := range []string{"PRODUCT_STAFF", "CUSTOMER"} {
+		if rec := e.do(http.MethodGet, "/api/v1/admin/prices", token(t, role), ""); rec.Code != http.StatusForbidden {
+			t.Fatalf("as %s: %d", role, rec.Code)
+		}
+	}
+	rec := e.do(http.MethodGet, "/api/v1/admin/prices", mkt, "")
+	list := decode[priceListResp](t, rec)
+	if rec.Code != 200 || len(list.Data) != 1 || list.Data[0].UnitPriceVND != nil || list.Data[0].ProductName == "" {
+		t.Fatalf("unpriced: %d %s", rec.Code, rec.Body)
+	}
+	e.do(http.MethodPut, "/api/v1/admin/skus/SKU-CITY-BLACK/price", mkt, `{"unitPriceVnd":300000}`)
+	rec = e.do(http.MethodGet, "/api/v1/admin/prices?q=city", mkt, "")
+	list = decode[priceListResp](t, rec)
+	if len(list.Data) != 1 || list.Data[0].UnitPriceVND == nil || *list.Data[0].UnitPriceVND != 300000 || list.Data[0].SkuID != "SKU-CITY-BLACK" {
+		t.Fatalf("priced: %s", rec.Body)
+	}
+	rec = e.do(http.MethodGet, "/api/v1/admin/prices?q=nothing-matches", mkt, "")
+	if list = decode[priceListResp](t, rec); len(list.Data) != 0 {
+		t.Fatalf("filter: %s", rec.Body)
+	}
+}
