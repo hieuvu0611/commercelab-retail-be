@@ -342,7 +342,7 @@ services:
       args:
         SERVICE_NAME: fulfillment-shipping-service
     environment:
-      <<: *go-env
+      <<: [*go-env, *jwt-env]
       FULFILLMENT_SHIPPING_PORT: 8085
       REDPANDA_BROKERS: redpanda:9092
       DATABASE_URL_FULFILLMENT: postgres://fulfillment_svc_user:fulfillment_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=fulfillment

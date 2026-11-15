@@ -90,6 +90,83 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string, outbo
 		}
 	})
 
+	t.Run("save is a compare-and-set on the version and keeps pick progress", func(t *testing.T) {
+		s := newShipment(uniq("O"))
+		stored, _, _ := store.Create(ctx, s, uniq("evt"), createdEvent(s))
+		picked, err := stored.Scan("SKU-A", 2, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Save(ctx, picked, stored.Version); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := store.Get(ctx, s.ShipmentID)
+		if got.Version != 2 || got.Status != StatusPicking || got.Items[0].PickedQuantity != 2 {
+			t.Fatalf("saved = %+v", got)
+		}
+		if err := store.Save(ctx, picked, stored.Version); !errors.Is(err, ErrStaleVersion) {
+			t.Fatalf("stale save err = %v", err)
+		}
+		ghost := newShipment(uniq("O"))
+		if err := store.Save(ctx, ghost, 1); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("ghost save err = %v", err)
+		}
+	})
+
+	t.Run("twenty concurrent saves of one version store exactly one", func(t *testing.T) {
+		s := newShipment(uniq("O"))
+		stored, _, _ := store.Create(ctx, s, uniq("evt"), createdEvent(s))
+		next, _ := stored.Scan("SKU-B", 1, now)
+		var wg sync.WaitGroup
+		var won atomic.Int64
+		for range 20 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := store.Save(ctx, next, stored.Version); err == nil {
+					won.Add(1)
+				} else if !errors.Is(err, ErrStaleVersion) {
+					t.Error(err)
+				}
+			}()
+		}
+		wg.Wait()
+		if won.Load() != 1 {
+			t.Fatalf("%d saves won", won.Load())
+		}
+	})
+
+	t.Run("list filters by status and warehouse scope and pages", func(t *testing.T) {
+		wh := uniq("WH")
+		mk := func(wh string) Shipment {
+			s, _ := New(uniq("O"), "u", wh, []Item{{SkuID: "A", Quantity: 1}}, now)
+			_, _, _ = store.Create(ctx, s, uniq("evt"), createdEvent(s))
+			return s
+		}
+		a, b := mk(wh), mk(wh)
+		mk(uniq("WH-OTHER"))
+		got, total, err := store.List(ctx, Filter{Warehouses: []string{wh}})
+		if err != nil || total != 2 || len(got) != 2 {
+			t.Fatalf("scoped list = %d/%d, %v", len(got), total, err)
+		}
+		if _, total, _ := store.List(ctx, Filter{Warehouses: nil}); total != 0 {
+			t.Fatalf("no scope listed %d", total)
+		}
+		page, total, _ := store.List(ctx, Filter{Warehouses: []string{wh}, Limit: 1, Offset: 1})
+		if total != 2 || len(page) != 1 {
+			t.Fatalf("page = %d/%d", len(page), total)
+		}
+		picked, _ := a.Scan("A", 1, now)
+		_ = store.Save(ctx, picked, 1)
+		onlyPicking, total, _ := store.List(ctx, Filter{Warehouses: []string{wh}, Status: StatusPicking})
+		if total != 1 || onlyPicking[0].ShipmentID != a.ShipmentID || b.ShipmentID == a.ShipmentID {
+			t.Fatalf("status filter = %+v", onlyPicking)
+		}
+		if _, total, _ := store.List(ctx, Filter{AllWarehouses: true}); total < 3 {
+			t.Fatalf("all warehouses listed %d", total)
+		}
+	})
+
 	t.Run("missing shipments are not found", func(t *testing.T) {
 		if _, err := store.Get(ctx, "SHP-"+uniq("none")); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("get err = %v", err)
