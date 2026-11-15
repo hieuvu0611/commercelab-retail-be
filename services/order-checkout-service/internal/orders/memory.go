@@ -76,6 +76,18 @@ func (s *MemoryStore) Get(_ context.Context, orderID string) (Order, error) {
 	return clone(o), nil
 }
 
+func (s *MemoryStore) RecordCapture(_ context.Context, orderID string, capturedVND, refundPendingVND int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orders[orderID]
+	if !ok {
+		return ErrNotFound
+	}
+	o.CapturedVND, o.RefundPendingVND, o.UpdatedAt = capturedVND, refundPendingVND, s.now()
+	s.orders[orderID] = o
+	return nil
+}
+
 func (s *MemoryStore) Transition(_ context.Context, orderID, from, to, paymentStatus, failureCode string) (Order, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

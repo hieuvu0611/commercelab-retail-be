@@ -238,7 +238,7 @@ services:
       args:
         SERVICE_NAME: catalog-pricing-service
     environment:
-      <<: [*go-env, *store-env, *jwt-env]
+      <<: [*go-env, *store-env, *jwt-env, *internal-env]
       CATALOG_PRICING_PORT: 8081
       INVENTORY_SERVICE_URL: http://inventory-warehouse-service:8082
       ORDER_SERVICE_URL: http://order-checkout-service:8083
@@ -311,6 +311,7 @@ services:
     environment:
       <<: [*go-env, *jwt-env, *internal-env]
       PAYMENT_PORT: 8084
+      ORDER_SERVICE_URL: http://order-checkout-service:8083
       DATABASE_URL_PAYMENTS: postgres://payment_svc_user:payment_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=payments
       MIGRATE_ON_START: "true"
       PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-}

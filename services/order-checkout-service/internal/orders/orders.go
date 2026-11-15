@@ -37,24 +37,26 @@ type Item struct {
 
 // Order is a placed order. Status is the saga state; PaymentStatus is tracked separately.
 type Order struct {
-	OrderID         string     `json:"orderId"`
-	UserID          string     `json:"-"`
-	QuoteID         string     `json:"quoteId"`
-	AddressID       string     `json:"addressId"`
-	WarehouseID     string     `json:"warehouseId,omitempty"`
-	VoucherCode     string     `json:"voucherCode,omitempty"`
-	Status          string     `json:"status"`
-	PaymentStatus   string     `json:"paymentStatus"`
-	FailureCode     string     `json:"failureCode,omitempty"`
-	SubtotalVND     int64      `json:"subtotalVnd"`
-	DiscountVND     int64      `json:"discountVnd"`
-	ShippingFeeVND  int64      `json:"shippingFeeVnd"`
-	TotalPayableVND int64      `json:"totalPayableVnd"`
-	Items           []Item     `json:"items"`
-	Version         int64      `json:"version"`
-	ExpiresAt       *time.Time `json:"expiresAt,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
+	OrderID          string     `json:"orderId"`
+	UserID           string     `json:"-"`
+	QuoteID          string     `json:"quoteId"`
+	AddressID        string     `json:"addressId"`
+	WarehouseID      string     `json:"warehouseId,omitempty"`
+	VoucherCode      string     `json:"voucherCode,omitempty"`
+	Status           string     `json:"status"`
+	PaymentStatus    string     `json:"paymentStatus"`
+	FailureCode      string     `json:"failureCode,omitempty"`
+	SubtotalVND      int64      `json:"subtotalVnd"`
+	DiscountVND      int64      `json:"discountVnd"`
+	ShippingFeeVND   int64      `json:"shippingFeeVnd"`
+	TotalPayableVND  int64      `json:"totalPayableVnd"`
+	CapturedVND      int64      `json:"capturedAmountVnd"`
+	RefundPendingVND int64      `json:"refundPendingVnd"`
+	Items            []Item     `json:"items"`
+	Version          int64      `json:"version"`
+	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
 // Store persists orders. Implementations must be safe for concurrent use.
@@ -68,6 +70,9 @@ type Store interface {
 	Lookup(ctx context.Context, userID, key, hash string) (o Order, found bool, err error)
 	// Get returns the order or ErrNotFound.
 	Get(ctx context.Context, orderID string) (Order, error)
+	// RecordCapture stores how much money the payment captured and how much of it is owed back (absolute values,
+	// so repeating it changes nothing); ErrNotFound when the order does not exist.
+	RecordCapture(ctx context.Context, orderID string, capturedVND, refundPendingVND int64) error
 	// Transition moves the order from one status to another (compare-and-set); ErrStaleState when the order
 	// is not in from, ErrNotFound when it does not exist.
 	Transition(ctx context.Context, orderID, from, to, paymentStatus, failureCode string) (Order, error)

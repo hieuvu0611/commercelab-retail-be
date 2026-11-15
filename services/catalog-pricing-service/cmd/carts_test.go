@@ -10,6 +10,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cart"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
 )
@@ -198,3 +199,41 @@ func TestCartStoreOutageAnswers503(t *testing.T) {
 		}
 	}
 }
+
+func TestOrderedItemsRouteIsInternalOnlyAndRemovesOnlyThoseSkus(t *testing.T) {
+	srv := cartServer(t)
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("test-internal-token-0123456789abcdef")
+	alice := cartToken(t, "alice")
+	cartDo(srv, http.MethodPut, "/api/v1/carts/me/items/"+skuBackpack, alice, `{"quantity":2}`)
+	cartDo(srv, http.MethodPut, "/api/v1/carts/me/items/"+skuBottle, alice, `{"quantity":1}`)
+	body := `{"userId":"alice","skuIds":["` + skuBackpack + `"]}`
+
+	for name, req := range map[string]*http.Request{
+		"anonymous":      newJSONRequest(http.MethodPost, "/api/v1/carts/internal/ordered-items", body),
+		"customer token": withHeader(newJSONRequest(http.MethodPost, "/api/v1/carts/internal/ordered-items", body), "Authorization", "Bearer "+alice),
+	} {
+		if rec := serve(srv, req); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: %d", name, rec.Code)
+		}
+	}
+	internal := func(b string) *httptest.ResponseRecorder {
+		return serve(srv, withHeader(newJSONRequest(http.MethodPost, "/api/v1/carts/internal/ordered-items", b), "X-Internal-Token", "test-internal-token-0123456789abcdef"))
+	}
+	for i := 0; i < 2; i++ { // repeating it is harmless
+		if rec := internal(body); rec.Code != http.StatusOK {
+			t.Fatalf("remove #%d: %d %s", i, rec.Code, rec.Body)
+		}
+	}
+	view := decode[cartResp](t, cartDo(srv, http.MethodGet, "/api/v1/carts/me", alice, "")).Data
+	if len(view.Items) != 1 || view.Items[0].SkuID != skuBottle {
+		t.Fatalf("cart = %+v, want only the bottle left", view.Items)
+	}
+	for _, bad := range []string{`{}`, `{"userId":"alice"}`, `{"userId":"alice","skuIds":["bad sku"]}`, `{"skuIds":["` + skuBottle + `"]}`} {
+		if rec := internal(bad); rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d", bad, rec.Code)
+		}
+	}
+}
+
+func withHeader(r *http.Request, k, v string) *http.Request { r.Header.Set(k, v); return r }

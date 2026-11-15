@@ -150,6 +150,29 @@ func (s *PostgresStore) Reserve(ctx context.Context, code, userID, orderID strin
 	return dependency.Wrap(tx.Commit(ctx))
 }
 
+// Consume implements Reserver.
+func (s *PostgresStore) Consume(ctx context.Context, code, orderID string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM orders.voucher_campaigns WHERE voucher_code = $1 FOR UPDATE`, code); err != nil {
+		return dependency.Wrap(err)
+	}
+	tag, err := tx.Exec(ctx, `UPDATE orders.voucher_usages SET state = 'CONSUMED' WHERE voucher_code = $1 AND order_id = $2 AND state = 'RESERVED'`, code, orderID)
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 1 {
+		if _, err := tx.Exec(ctx, `UPDATE orders.voucher_campaigns SET reserved_quota = reserved_quota - 1, consumed_quota = consumed_quota + 1,
+			version = version + 1, updated_at = NOW() WHERE voucher_code = $1`, code); err != nil {
+			return dependency.Wrap(err)
+		}
+	}
+	return dependency.Wrap(tx.Commit(ctx))
+}
+
 // Release implements Reserver.
 func (s *PostgresStore) Release(ctx context.Context, code, orderID string) error {
 	tx, err := s.pool.Begin(ctx)

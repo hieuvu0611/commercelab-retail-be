@@ -16,6 +16,9 @@ type Reserver interface {
 	// Reserve takes one use of the campaign for the order if the rules allow it at now (status, window, quota,
 	// per-customer limit); otherwise it returns a *Refusal and changes nothing.
 	Reserve(ctx context.Context, code, userID, orderID string, now time.Time) error
+	// Consume turns the RESERVED use of the order into a CONSUMED one (payment captured). It is idempotent and a
+	// no-op for an order that holds no reserved use.
+	Consume(ctx context.Context, code, orderID string) error
 	// Release gives a RESERVED use of the order back.
 	Release(ctx context.Context, code, orderID string) error
 }

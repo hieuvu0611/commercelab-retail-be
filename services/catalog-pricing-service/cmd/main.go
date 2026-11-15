@@ -9,6 +9,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
@@ -109,6 +110,7 @@ func main() {
 
 	secretsLoader := config.NewLoader()
 	auth.LoadSecrets(secretsLoader)
+	internalauth.LoadToken(secretsLoader)
 	if err := secretsLoader.Err(); err != nil {
 		log.Fatalf("[catalog-pricing-service] %v", err)
 	}

@@ -133,6 +133,33 @@ func runStoreContract(t *testing.T, newStore func(t *testing.T) Store, uniq func
 	})
 }
 
+func runCaptureContract(t *testing.T, newStore func(t *testing.T) Store, uniq func(string) string) {
+	ctx := context.Background()
+	s := newStore(t)
+	user := uniq("u")
+	o, _, _ := s.Create(ctx, uniq("k"), HashIntent(user, "Q-1"), sampleOrder(uniq("O"), user, "Q-1"))
+	if o.CapturedVND != 0 || o.RefundPendingVND != 0 {
+		t.Fatalf("new order = %+v", o)
+	}
+	for i := 0; i < 2; i++ { // setting the same amounts again changes nothing
+		if err := s.RecordCapture(ctx, o.OrderID, 660000, 660000); err != nil {
+			t.Fatalf("RecordCapture: %v", err)
+		}
+	}
+	got, _ := s.Get(ctx, o.OrderID)
+	if got.CapturedVND != 660000 || got.RefundPendingVND != 660000 {
+		t.Fatalf("order = %+v", got)
+	}
+	if err := s.RecordCapture(ctx, "O-missing", 1, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing order = %v", err)
+	}
+}
+
+func TestMemoryStoreCapture(t *testing.T) {
+	var n int
+	runCaptureContract(t, func(*testing.T) Store { return NewMemoryStore() }, func(p string) string { n++; return fmt.Sprintf("%s-%d", p, n) })
+}
+
 func TestMemoryStoreContract(t *testing.T) {
 	var n int
 	var mu sync.Mutex

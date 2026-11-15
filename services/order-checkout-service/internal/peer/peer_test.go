@@ -118,3 +118,79 @@ func TestPaymentsCreateAttemptUsesTheOrderIdAsIdempotencyKey(t *testing.T) {
 		t.Fatalf("headers=%v body=%v", hdr, got)
 	}
 }
+
+func TestStockCommitAndExceptionHoldMapAGoneReservation(t *testing.T) {
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("0123456789abcdef0123456789abcdef")
+	var paths []string
+	var key string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		key = r.Header.Get("Idempotency-Key")
+		switch r.URL.Path {
+		case "/api/v1/inventory/reservations/O-1/commit":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"COMMIT_RESERVATION_FAILED","status":409}`))
+		case "/api/v1/inventory/reservations/O-1/exception-hold":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"RESERVATION_EXPIRED","status":409}`))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":{}}`))
+		}
+	}))
+	defer srv.Close()
+	s := NewStock(srv.URL, client())
+	if err := s.Commit(context.Background(), "O-1"); !errors.Is(err, checkout.ErrReservationLost) || key != "commit-O-1" {
+		t.Fatalf("commit err = %v key=%q", err, key)
+	}
+	if err := s.ExceptionHold(context.Background(), "O-1"); !errors.Is(err, checkout.ErrReservationLost) {
+		t.Fatalf("hold err = %v", err)
+	}
+	if err := s.Commit(context.Background(), "O-2"); err != nil {
+		t.Fatalf("commit of a held reservation = %v", err)
+	}
+}
+
+func TestPaymentsCloseAttemptTreatsAnUnknownAttemptAsClosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/payments/attempts/PAY-O-1/close" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"PAYMENT_NOT_FOUND","status":404}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+	p := NewPayments(srv.URL, client())
+	if err := p.CloseAttempt(context.Background(), "PAY-O-1"); err != nil {
+		t.Fatalf("close of an unknown attempt = %v", err)
+	}
+	if err := p.CloseAttempt(context.Background(), "PAY-O-2"); err != nil {
+		t.Fatalf("close = %v", err)
+	}
+}
+
+func TestCartsRemoveOrderedSendsTheUserAndTheSkus(t *testing.T) {
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("0123456789abcdef0123456789abcdef")
+	var got map[string]any
+	var hdr http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr = r.Header.Clone()
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		if r.URL.Path != "/api/v1/carts/internal/ordered-items" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+	if err := NewCarts(srv.URL, client()).RemoveOrdered(context.Background(), "user-lan", []string{"SKU-A", "SKU-B"}); err != nil {
+		t.Fatal(err)
+	}
+	if got["userId"] != "user-lan" || len(got["skuIds"].([]any)) != 2 || hdr.Get(internalauth.Header) == "" || hdr.Get("Idempotency-Key") == "" {
+		t.Fatalf("headers=%v body=%v", hdr, got)
+	}
+}
