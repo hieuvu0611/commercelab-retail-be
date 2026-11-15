@@ -16,6 +16,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/saga"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
 )
 
@@ -44,6 +45,8 @@ var (
 	ErrQuoteExpired = errors.New("quote has expired")
 	// ErrQuoteChanged: a price changed or a SKU stopped being orderable since the quote; the customer must accept a new one.
 	ErrQuoteChanged = errors.New("quote no longer matches the catalog")
+	// ErrAddressNotFound: the delivery address of the quote is not in the customer's address book any more.
+	ErrAddressNotFound = errors.New("delivery address not found")
 	// ErrQuoteInvalid: the stored quote is internally inconsistent, so no money amount can be trusted.
 	ErrQuoteInvalid = errors.New("quote is not usable")
 	// ErrReservationLost: the stock reservation of the order is gone (expired, released or never made).
@@ -110,6 +113,12 @@ type Payments interface {
 	CloseAttempt(ctx context.Context, attemptID string) error
 }
 
+// Addresses reads the customer's delivery address with their own token, so IAM applies its owner check.
+// ErrAddressNotFound when it does not exist. The address is personal data: it goes into the snapshot only.
+type Addresses interface {
+	Get(ctx context.Context, bearer, addressID string) (snapshot.Address, error)
+}
+
 // Carts removes what the customer just bought from their cart (best effort, idempotent).
 type Carts interface {
 	RemoveOrdered(ctx context.Context, userID string, skuIDs []string) error
@@ -123,6 +132,8 @@ type Deps struct {
 	Payments    Payments
 	Vouchers    voucher.Reserver
 	Carts       Carts // optional
+	Addresses   Addresses
+	Snapshots   snapshot.Store
 	WarehouseID string
 }
 
@@ -171,13 +182,35 @@ func (s *Service) Place(ctx context.Context, p Principal, key, quoteID string) (
 	if err := s.checkQuote(quote, p.UserID); err != nil {
 		return orders.Order{}, false, err
 	}
+	address, err := s.Addresses.Get(ctx, p.Bearer, quote.AddressID)
+	if err != nil {
+		return orders.Order{}, false, err
+	}
 	expires := s.now().Add(ReservationTTL)
 	built := s.buildOrder(quote, expires)
 	stored, replayed, err := s.Orders.Create(ctx, key, hash, built, s.orderCreated(built))
 	if err != nil || replayed {
 		return stored, replayed, err
 	}
+	// The frozen snapshot (I04) exists before anything is reserved: without it the order is closed.
+	if err := s.Snapshots.Save(ctx, buildSnapshot(quote, stored, address)); err != nil {
+		log.Printf("[order] cannot store the snapshot of order %s: %s", stored.OrderID, redact(err))
+		return s.close(ctx, stored, saga.StatePending, saga.ReserveFailed{}, FailureDependencyUnavailable), false, nil
+	}
 	return s.run(ctx, p, stored), false, nil
+}
+
+func buildSnapshot(q Quote, o orders.Order, address snapshot.Address) snapshot.Snapshot {
+	lines := make([]snapshot.Line, len(q.Lines))
+	for i, l := range q.Lines {
+		lines[i] = snapshot.Line{SkuID: l.SkuID, SkuName: l.SkuName, Quantity: l.Quantity, UnitPriceVND: l.UnitPriceVND,
+			LineDiscountVND: l.LineDiscountVND, AllocatedUnitPaidVND: l.AllocatedUnitPaidVND}
+	}
+	return snapshot.Snapshot{
+		OrderID: o.OrderID, UserID: o.UserID, QuoteID: q.ID, VoucherCode: q.VoucherCode, Lines: lines,
+		SubtotalVND: q.SubtotalVND, DiscountVND: q.DiscountVND, ShippingFeeVND: q.ShippingFeeVND, TotalPayableVND: q.TotalPayableVND,
+		ShippingAddress: address, CreatedAt: o.CreatedAt,
+	}
 }
 
 func (s *Service) checkQuote(q Quote, userID string) error {

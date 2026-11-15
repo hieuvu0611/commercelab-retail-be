@@ -25,6 +25,7 @@ var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 func registerOrderRoutes(mux *http.ServeMux, svc *checkout.Service) {
 	mux.Handle("POST /api/v1/orders", auth.RequireAuth(auth.RequireRole("CUSTOMER")(http.HandlerFunc(placeOrder(svc)))))
 	registerPaymentOutcomeRoute(mux, svc)
+	registerOrderReadRoutes(mux, svc)
 }
 
 // orderView is the order as the customer sees it.
@@ -93,6 +94,8 @@ func writePlaceError(w http.ResponseWriter, r *http.Request, err error) {
 		response.Error(w, r, http.StatusNotFound, "QUOTE_NOT_FOUND", "Quote not found", nil)
 	case errors.Is(err, checkout.ErrQuoteExpired):
 		response.Error(w, r, http.StatusConflict, "QUOTE_EXPIRED", "The quote has expired; review the order again to get a new one", nil)
+	case errors.Is(err, checkout.ErrAddressNotFound):
+		response.Error(w, r, http.StatusUnprocessableEntity, "ADDRESS_NOT_FOUND", "The delivery address no longer exists; choose another and review the order again", nil)
 	case errors.Is(err, checkout.ErrQuoteChanged):
 		response.Error(w, r, http.StatusConflict, "QUOTE_CHANGED", "A price or item changed since the quote; review the order again to get a new one", nil)
 	case errors.Is(err, checkout.ErrQuoteInvalid):

@@ -166,8 +166,8 @@ func runQueryContract(t *testing.T, newStore func(t *testing.T) Store, uniq func
 	if all[0].OrderID != ids[2] || all[2].OrderID != ids[0] {
 		t.Fatalf("order = %s %s %s, want newest first", all[0].OrderID, all[1].OrderID, all[2].OrderID)
 	}
-	if len(all[0].Items) != 0 {
-		t.Fatal("a list does not carry items")
+	if len(all[0].Items) != 0 || all[0].ItemCount != 3 {
+		t.Fatalf("a list carries the item count (2 + 1 = 3) and no items: %+v", all[0])
 	}
 	page, total, _ := s.Query(ctx, Filter{UserID: user, Limit: 2, Offset: 2})
 	if total != 3 || len(page) != 1 || page[0].OrderID != ids[0] {

@@ -218,3 +218,25 @@ func TestPaymentsAttemptStateReadsTheAttemptAndMapsMissing(t *testing.T) {
 		t.Fatalf("missing = found=%v err=%v", found, err)
 	}
 }
+
+func TestAddressesReadsTheAddressWithTheCallersTokenAndMapsMissing(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		if r.URL.Path == "/api/v1/users/me/addresses/addr-gone" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"ADDRESS_NOT_FOUND","status":404}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"id":"addr-1","recipient":"Nguyen Van Lan","phone":"0901234567","line1":"1 Le Loi","ward":"Ben Nghe","district":"District 1","province":"Ho Chi Minh","isDefault":true}}`))
+	}))
+	defer srv.Close()
+	a := NewAddresses(srv.URL, client())
+	got, err := a.Get(context.Background(), "tok", "addr-1")
+	if err != nil || auth != "Bearer tok" || got.Recipient != "Nguyen Van Lan" || got.District != "District 1" || got.Province != "Ho Chi Minh" || got.Phone != "0901234567" {
+		t.Fatalf("address = %+v err=%v auth=%q", got, err, auth)
+	}
+	if _, err := a.Get(context.Background(), "tok", "addr-gone"); !errors.Is(err, checkout.ErrAddressNotFound) {
+		t.Fatalf("missing = %v", err)
+	}
+}

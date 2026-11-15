@@ -19,6 +19,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/peer"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/migrations"
 )
@@ -85,6 +86,21 @@ func main() {
 		store = voucher.NewPostgresStore(pool)
 		orderStore = orders.NewPostgresStore(pool)
 	}
+	// Without MongoDB (ALLOW_MEMORY_FALLBACK=true, dev/test only) snapshots are kept in memory.
+	var snapshots snapshot.Store = snapshot.NewMemoryStore()
+	mongoStore, _, mongoErr := db.ConnectMongo(ctx, config.EnvOrDefault("MONGO_URI", "mongodb://mongo_admin:mongo_password@localhost:27017/commerce_lab_doc?authSource=admin"),
+		config.EnvOrDefault("MONGO_DATABASE", "commerce_lab_doc"))
+	if err := dependency.CheckStartup("order-checkout-service", "mongodb", mongoErr); err != nil {
+		log.Fatal(err)
+	}
+	if mongoStore != nil {
+		defer func() { _ = mongoStore.Close(context.Background()) }()
+		mongoSnapshots, err := snapshot.NewMongoStore(ctx, mongoStore)
+		if err != nil {
+			log.Fatalf("[order-checkout-service] snapshot store: %v", err)
+		}
+		snapshots = mongoSnapshots
+	}
 	peers := svcclient.New(svcclient.Config{MaxRetries: 2})
 	checkoutSvc := checkout.New(checkout.Deps{
 		Orders:      orderStore,
@@ -92,6 +108,8 @@ func main() {
 		Stock:       peer.NewStock(config.EnvOrDefault("INVENTORY_SERVICE_URL", "http://localhost:8082"), peers),
 		Payments:    peer.NewPayments(config.EnvOrDefault("PAYMENT_SERVICE_URL", "http://localhost:8084"), peers),
 		Vouchers:    store,
+		Addresses:   peer.NewAddresses(config.EnvOrDefault("IAM_SERVICE_URL", "http://localhost:8087"), peers),
+		Snapshots:   snapshots,
 		Carts:       peer.NewCarts(config.EnvOrDefault("CATALOG_SERVICE_URL", "http://localhost:8081"), peers),
 		WarehouseID: config.EnvOrDefault("ORDER_WAREHOUSE_ID", defaultWarehouseID),
 	})

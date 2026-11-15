@@ -54,6 +54,7 @@ type Order struct {
 	TotalPayableVND  int64      `json:"totalPayableVnd"`
 	CapturedVND      int64      `json:"capturedAmountVnd"`
 	RefundPendingVND int64      `json:"refundPendingVnd"`
+	ItemCount        int64      `json:"itemCount,omitempty"` // set by Query, which does not load items
 	Items            []Item     `json:"items"`
 	Version          int64      `json:"version"`
 	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
