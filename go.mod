@@ -31,7 +31,11 @@ require (
 	github.com/jackc/puddle/v2 v2.2.3 // indirect
 	github.com/klauspost/compress v1.20.4 // indirect
 	github.com/mfridman/interpolate v0.2.0 // indirect
+	github.com/pierrec/lz4/v4 v4.1.33 // indirect
 	github.com/sethvargo/go-retry v0.5.0 // indirect
+	github.com/twmb/franz-go v1.22.3 // indirect
+	github.com/twmb/franz-go/pkg/kadm v1.20.0 // indirect
+	github.com/twmb/franz-go/pkg/kmsg v1.15.1 // indirect
 	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/xdg-go/scram v1.2.0 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect

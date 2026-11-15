@@ -15,6 +15,7 @@ type DomainEvent struct {
 const (
 	EventOrderCreated          = "order.created.v1"
 	EventOrderConfirmed        = "order.confirmed.v1"
+	EventOrderFailed           = "order.failed.v1"
 	EventOrderCancelRequested  = "order.cancel_requested.v1"
 	EventOrderCancelled        = "order.cancelled.v1"
 	EventPaymentUnknown30m     = "payment.unknown_30m.v1"

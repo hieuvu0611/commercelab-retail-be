@@ -2,6 +2,8 @@ package attempt
 
 import (
 	"context"
+
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 	"sync"
 	"time"
 )
@@ -15,7 +17,15 @@ type MemoryStore struct {
 	summaries   map[string]*Summary
 	obligations map[string][]Obligation
 	events      map[string]bool
+	outbox      []events.DomainEvent
 	now         func() time.Time
+}
+
+// Outbox returns the events written so far, oldest first (tests).
+func (s *MemoryStore) Outbox() []events.DomainEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]events.DomainEvent(nil), s.outbox...)
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -94,6 +104,7 @@ func (s *MemoryStore) Apply(_ context.Context, attemptID string, o Outcome, amou
 
 // store saves the new attempt and its money effects. The caller holds the lock.
 func (s *MemoryStore) store(cur, next Attempt, ch Change) {
+	s.outbox = append(s.outbox, EventsFor(cur, next, ch, s.now())...)
 	s.byID[cur.AttemptID] = next
 	sum := s.summaries[cur.OrderID]
 	sum.CapturedVND += ch.CapturedVND

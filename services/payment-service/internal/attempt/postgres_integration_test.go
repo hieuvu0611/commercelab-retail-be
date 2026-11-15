@@ -38,6 +38,23 @@ func TestPostgresStoreContractAndLateCapture(t *testing.T) {
 	})
 	store := NewPostgresStore(pool)
 	runStoreContract(t, store, uniq)
+	runOutboxContract(t, store, uniq, func(orderID string) []string {
+		rows, err := pool.Query(ctx, `SELECT event_type FROM payments.outbox_events WHERE aggregate_id = $1 ORDER BY id`, orderID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var typ string
+			_ = rows.Scan(&typ)
+			out = append(out, typ)
+		}
+		return out
+	})
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM payments.outbox_events WHERE aggregate_id LIKE '%'||$1||'%'`, run)
+	})
 	runLateCaptureContract(t, store, uniq, func(attemptID string) {
 		if _, err := pool.Exec(ctx, `UPDATE payments.payment_attempts SET unknown_deadline = NOW() - INTERVAL '1 minute' WHERE attempt_id = $1`, attemptID); err != nil {
 			t.Fatal(err)

@@ -13,6 +13,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/internal/attempt"
@@ -89,6 +90,11 @@ func main() {
 		store = attempt.NewPostgresStore(pool)
 	}
 
+	if pool != nil {
+		if err := outbox.Start(ctx, "payment-service", pool, outbox.PaymentsTable); err != nil {
+			log.Fatalf("[payment-service] %v", err)
+		}
+	}
 	orders := orderclient.New(config.EnvOrDefault("ORDER_SERVICE_URL", "http://localhost:8083"), svcclient.New(svcclient.Config{MaxRetries: 2}))
 	log.Printf("[payment-service] listening on :%s (schema: payments, simulator: %v)", port, simulator)
 	log.Fatal(http.ListenAndServe(":"+port, NewServer(domain.NewPaymentEngine(), store, Options{SimulatorEnabled: simulator, WebhookSecret: webhookSecret, Orders: orders})))

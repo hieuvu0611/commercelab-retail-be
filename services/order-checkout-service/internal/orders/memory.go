@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 	"sort"
 	"sync"
 	"time"
@@ -19,7 +20,15 @@ type MemoryStore struct {
 	mu     sync.Mutex
 	keys   map[memKey]memEntry
 	orders map[string]Order
+	outbox []events.DomainEvent
 	now    func() time.Time
+}
+
+// Outbox returns the events written so far, oldest first (tests).
+func (s *MemoryStore) Outbox() []events.DomainEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]events.DomainEvent(nil), s.outbox...)
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -34,7 +43,7 @@ func clone(o Order) Order {
 	return o
 }
 
-func (s *MemoryStore) Create(_ context.Context, key, hash string, o Order) (Order, bool, error) {
+func (s *MemoryStore) Create(_ context.Context, key, hash string, o Order, ev ...events.DomainEvent) (Order, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := memKey{o.UserID, key}
@@ -54,6 +63,7 @@ func (s *MemoryStore) Create(_ context.Context, key, hash string, o Order) (Orde
 	}
 	s.keys[k] = memEntry{hash: hash, orderID: o.OrderID}
 	s.orders[o.OrderID] = clone(o)
+	s.outbox = append(s.outbox, ev...)
 	return clone(o), false, nil
 }
 
@@ -143,7 +153,7 @@ func (s *MemoryStore) RecordCapture(_ context.Context, orderID string, capturedV
 	return nil
 }
 
-func (s *MemoryStore) Transition(_ context.Context, orderID, from, to, paymentStatus, failureCode string) (Order, error) {
+func (s *MemoryStore) Transition(_ context.Context, orderID, from, to, paymentStatus, failureCode string, ev ...events.DomainEvent) (Order, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	o, ok := s.orders[orderID]
@@ -157,5 +167,6 @@ func (s *MemoryStore) Transition(_ context.Context, orderID, from, to, paymentSt
 	o.Version++
 	o.UpdatedAt = s.now()
 	s.orders[orderID] = o
+	s.outbox = append(s.outbox, ev...)
 	return clone(o), nil
 }

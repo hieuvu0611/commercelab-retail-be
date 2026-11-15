@@ -172,7 +172,8 @@ func (s *Service) Place(ctx context.Context, p Principal, key, quoteID string) (
 		return orders.Order{}, false, err
 	}
 	expires := s.now().Add(ReservationTTL)
-	stored, replayed, err := s.Orders.Create(ctx, key, hash, s.buildOrder(quote, expires))
+	built := s.buildOrder(quote, expires)
+	stored, replayed, err := s.Orders.Create(ctx, key, hash, built, s.orderCreated(built))
 	if err != nil || replayed {
 		return stored, replayed, err
 	}
@@ -273,7 +274,8 @@ func (s *Service) close(ctx context.Context, o orders.Order, from saga.State, ev
 			log.Printf("[order] payment attempt close failed for order %s (the sweeper repeats it): %s", o.OrderID, redact(err))
 		}
 	}
-	closed, err := s.Orders.Transition(ctx, o.OrderID, string(from), string(res.State), res.PaymentStatus, failureCode)
+	closed, err := s.Orders.Transition(ctx, o.OrderID, string(from), string(res.State), res.PaymentStatus, failureCode,
+		s.orderFailed(o, failureCode, res.PaymentStatus))
 	if err != nil {
 		log.Printf("[order] cannot store the closed state of order %s: %v", o.OrderID, err)
 		o.Status, o.PaymentStatus, o.FailureCode = string(res.State), res.PaymentStatus, failureCode

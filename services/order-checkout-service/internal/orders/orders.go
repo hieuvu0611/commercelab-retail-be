@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"time"
+
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 )
 
 // Initial states of a new order. Later states belong to the saga (P5-T02).
@@ -91,7 +93,8 @@ type Store interface {
 	// Create claims (user, key) and stores o in one step. When the key already exists with the same hash it
 	// returns the stored order and replayed=true; with a different hash it returns ErrIdempotencyConflict.
 	// A concurrent duplicate waits for the first call and then replays it, so one key never yields two orders.
-	Create(ctx context.Context, key, hash string, o Order) (stored Order, replayed bool, err error)
+	// The events (see pkg/outbox) are written in the same transaction as the order; a replay writes none.
+	Create(ctx context.Context, key, hash string, o Order, ev ...events.DomainEvent) (stored Order, replayed bool, err error)
 	// Lookup finds the order a key already produced (found=false when the key is new).
 	// A key stored with a different hash is ErrIdempotencyConflict.
 	Lookup(ctx context.Context, userID, key, hash string) (o Order, found bool, err error)
@@ -104,7 +107,8 @@ type Store interface {
 	RecordCapture(ctx context.Context, orderID string, capturedVND, refundPendingVND int64) error
 	// Transition moves the order from one status to another (compare-and-set); ErrStaleState when the order
 	// is not in from, ErrNotFound when it does not exist.
-	Transition(ctx context.Context, orderID, from, to, paymentStatus, failureCode string) (Order, error)
+	// The events are written in the same transaction as the state change, and not at all when it is refused.
+	Transition(ctx context.Context, orderID, from, to, paymentStatus, failureCode string, ev ...events.DomainEvent) (Order, error)
 }
 
 // HashIntent fingerprints what a place-order call asks for. The payload (the quote) is part of it, so reusing

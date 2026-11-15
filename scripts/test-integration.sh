@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the integration tests (go test -tags=integration) against real Postgres, Mongo and Redis started in a
+# Runs the integration tests (go test -tags=integration) against real Postgres, Mongo, Redis, object storage and Redpanda started in a
 # uniquely named, throw-away Compose project with temporary volumes. Everything is removed afterwards and the
 # script fails if any container of the project is left behind.
 set -euo pipefail
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 
 PROJECT="commerce-it-$$-${RANDOM}"
 COMPOSE=(docker compose -p "$PROJECT")
-STORES=(postgres mongodb redis object-storage)
+STORES=(postgres mongodb redis object-storage redpanda)
 
 free_port() {
   python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
@@ -18,6 +18,8 @@ POSTGRES_PORT="$(free_port)"
 MONGO_PORT="$(free_port)"
 REDIS_PORT="$(free_port)"
 S3_PORT="$(free_port)"
+REDPANDA_PORT="$(free_port)"
+export REDPANDA_KAFKA_HOST_PORT="$REDPANDA_PORT" REDPANDA_ADMIN_HOST_PORT="$(free_port)"
 export POSTGRES_HOST_PORT="$POSTGRES_PORT" MONGO_HOST_PORT="$MONGO_PORT" REDIS_HOST_PORT="$REDIS_PORT" S3_HOST_PORT="$S3_PORT"
 
 cleanup() {
@@ -51,6 +53,7 @@ export DATABASE_URL_NOTIFICATIONS="$(service_dsn notify_svc_user notify_secret n
 export MONGO_URI="mongodb://mongo_admin:mongo_password@localhost:${MONGO_PORT}/commerce_lab_doc?authSource=admin"
 export MONGO_DATABASE="commerce_lab_doc"
 export REDIS_ADDR="localhost:${REDIS_PORT}"
+export REDPANDA_BROKERS="localhost:${REDPANDA_PORT}"
 export S3_ENDPOINT="http://localhost:${S3_PORT}" AWS_REGION="us-east-1" AWS_S3_BUCKET="it-assets"
 export AWS_ACCESS_KEY_ID="devstorage" AWS_SECRET_ACCESS_KEY="devstorage-secret"
 
