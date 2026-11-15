@@ -219,3 +219,23 @@ func TestOpeningStockIsOnceAndLedgerFollowsTheOrderLifecycleAgainstPostgres(t *t
 		t.Fatalf("ledger rows = %d, want 4", n)
 	}
 }
+
+func TestAvailableBySkuUsesTheBucketFormulaAgainstPostgres(t *testing.T) {
+	pool := integrationPool(t)
+	repo := NewInventoryRepository(pool)
+	ctx := context.Background()
+	sku := seedStock(t, pool, 100)
+	if _, err := pool.Exec(ctx, `UPDATE stock_items SET unsellable = 5, reserved = 10, committed = 15 WHERE sku_id = $1`, sku); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.AvailableBySku(ctx, testWarehouse, []string{sku, "IT-NO-SUCH-SKU"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[sku] != 70 { // I01 example: 100 - 5 - 10 - 15
+		t.Fatalf("available = %d, want 70", got[sku])
+	}
+	if _, ok := got["IT-NO-SUCH-SKU"]; ok {
+		t.Fatal("an unknown SKU must be absent (reported OUT by the handler)")
+	}
+}
