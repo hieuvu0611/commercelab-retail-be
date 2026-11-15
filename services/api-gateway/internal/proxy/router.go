@@ -96,7 +96,7 @@ func (rt *Router) resolveTarget(path string) string {
 		return rt.targets.Catalog
 	case strings.HasPrefix(path, "/api/v1/admin/inventory"):
 		return rt.targets.Inventory
-	case path == "/auth/refresh" || strings.HasPrefix(path, "/api/v1/auth") || strings.HasPrefix(path, "/api/v1/admin"):
+	case path == "/auth/refresh" || strings.HasPrefix(path, "/api/v1/auth") || strings.HasPrefix(path, "/api/v1/users") || strings.HasPrefix(path, "/api/v1/admin"):
 		return rt.targets.IAM
 	case strings.HasPrefix(path, "/api/v1/products") || strings.HasPrefix(path, "/api/v1/categories") || strings.HasPrefix(path, "/api/v1/quotes") || strings.HasPrefix(path, "/api/v1/carts"):
 		return rt.targets.Catalog
