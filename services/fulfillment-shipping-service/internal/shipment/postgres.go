@@ -144,6 +144,11 @@ func (p *PostgresStore) Save(ctx context.Context, s Shipment, expectedVersion in
 }
 
 func (p *PostgresStore) SaveCarrierEvent(ctx context.Context, s Shipment, expectedVersion int64, carrierEventID string, ev ...events.DomainEvent) error {
+	return p.SaveWith(ctx, s, expectedVersion, SaveOptions{CarrierEventID: carrierEventID, Events: ev})
+}
+
+func (p *PostgresStore) SaveWith(ctx context.Context, s Shipment, expectedVersion int64, o SaveOptions) error {
+	carrierEventID, ev := o.CarrierEventID, o.Events
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return dependency.Wrap(err)
@@ -181,10 +186,50 @@ func (p *PostgresStore) SaveCarrierEvent(ctx context.Context, s Shipment, expect
 			return dependency.Wrap(err)
 		}
 	}
+	if c := o.Case; c != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO fulfillment.cases (case_id, case_type, status, shipment_id, order_id, warehouse_id, sku_id, quantity, reason, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT DO NOTHING`,
+			c.CaseID, c.Type, c.Status, c.ShipmentID, c.OrderID, c.WarehouseID, c.SkuID, c.Quantity, c.Reason, c.CreatedAt); err != nil {
+			return dependency.Wrap(err)
+		}
+	}
 	for _, e := range ev {
 		if err := outbox.Insert(ctx, tx, OutboxTable, e); err != nil {
 			return dependency.Wrap(err)
 		}
 	}
 	return dependency.Wrap(tx.Commit(ctx))
+}
+
+func (p *PostgresStore) ListCases(ctx context.Context, f CaseFilter) ([]Case, int, error) {
+	warehouses := f.Warehouses
+	if warehouses == nil {
+		warehouses = []string{}
+	}
+	const where = `WHERE ($1 = '' OR status = $1) AND ($2 = '' OR case_type = $2) AND ($3 OR warehouse_id = ANY($4))`
+	var total int
+	if err := p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM fulfillment.cases `+where, f.Status, f.Type, f.AllWarehouses, warehouses).Scan(&total); err != nil {
+		return nil, 0, dependency.Wrap(err)
+	}
+	limit := f.Limit
+	if limit <= 0 {
+		limit = DefaultLimit
+	}
+	rows, err := p.pool.Query(ctx, `SELECT case_id, case_type, status, shipment_id, order_id, warehouse_id, sku_id, quantity, reason, created_at
+		FROM fulfillment.cases `+where+` ORDER BY created_at, case_id LIMIT $5 OFFSET $6`,
+		f.Status, f.Type, f.AllWarehouses, warehouses, limit, max(f.Offset, 0))
+	if err != nil {
+		return nil, 0, dependency.Wrap(err)
+	}
+	defer rows.Close()
+	var out []Case
+	for rows.Next() {
+		var c Case
+		if err := rows.Scan(&c.CaseID, &c.Type, &c.Status, &c.ShipmentID, &c.OrderID, &c.WarehouseID, &c.SkuID, &c.Quantity, &c.Reason, &c.CreatedAt); err != nil {
+			return nil, 0, dependency.Wrap(err)
+		}
+		c.SkuBlocked = c.Type == CasePickShortage && c.Status == CaseOpen
+		out = append(out, c)
+	}
+	return out, total, dependency.Wrap(rows.Err())
 }

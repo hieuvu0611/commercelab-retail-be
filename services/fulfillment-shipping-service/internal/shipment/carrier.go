@@ -14,7 +14,7 @@ const MaxFailureReason = 255
 
 func (s Shipment) dispatched() bool {
 	switch s.Status {
-	case StatusHandedOver, StatusInTransit, StatusDelivered, StatusDeliveryFailed:
+	case StatusHandedOver, StatusInTransit, StatusDelivered, StatusDeliveryFailed, StatusPartiallyDelivered:
 		return true
 	}
 	return false
@@ -26,7 +26,7 @@ func (s Shipment) MarkInTransit(now time.Time) (Shipment, error) {
 	switch s.Status {
 	case StatusHandedOver:
 		return s.with(StatusInTransit, append([]Item(nil), s.Items...), now), nil
-	case StatusInTransit, StatusDelivered, StatusDeliveryFailed:
+	case StatusInTransit, StatusDelivered, StatusDeliveryFailed, StatusPartiallyDelivered:
 		return s, nil
 	}
 	return Shipment{}, ErrNotDispatched
@@ -59,7 +59,7 @@ func (s Shipment) MarkDeliveryFailed(reason string, now time.Time) (Shipment, er
 		return Shipment{}, ErrInvalid
 	}
 	switch s.Status {
-	case StatusDeliveryFailed, StatusDelivered:
+	case StatusDeliveryFailed, StatusDelivered, StatusPartiallyDelivered:
 		return s, nil
 	case StatusHandedOver, StatusInTransit:
 		next := s.with(StatusDeliveryFailed, append([]Item(nil), s.Items...), now)
