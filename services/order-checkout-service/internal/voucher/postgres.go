@@ -150,6 +150,25 @@ func (s *PostgresStore) Reserve(ctx context.Context, code, userID, orderID strin
 	return dependency.Wrap(tx.Commit(ctx))
 }
 
+// ReservedBefore implements Reserver.
+func (s *PostgresStore) ReservedBefore(ctx context.Context, cutoff time.Time, limit int) ([]Reservation, error) {
+	rows, err := s.pool.Query(ctx, `SELECT voucher_code, user_id, order_id FROM orders.voucher_usages
+		WHERE state = 'RESERVED' AND created_at <= $1 ORDER BY created_at LIMIT $2`, cutoff, limit)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+	var out []Reservation
+	for rows.Next() {
+		var r Reservation
+		if err := rows.Scan(&r.Code, &r.UserID, &r.OrderID); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		out = append(out, r)
+	}
+	return out, dependency.Wrap(rows.Err())
+}
+
 // Consume implements Reserver.
 func (s *PostgresStore) Consume(ctx context.Context, code, orderID string) error {
 	tx, err := s.pool.Begin(ctx)

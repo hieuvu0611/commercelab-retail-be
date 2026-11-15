@@ -30,6 +30,7 @@ const (
 	FailureReservationExpired    = "RESERVATION_EXPIRED"
 	FailureUnknownExpired        = "PAYMENT_UNKNOWN_EXPIRED"
 	FailureStockLost             = "STOCK_RESERVATION_LOST"
+	FailurePlacementInterrupted  = "PLACEMENT_INTERRUPTED"
 )
 
 // PayRefundPending is the payment status of an order that is closed while the customer's money is held: it is
@@ -92,9 +93,18 @@ type Stock interface {
 	ExceptionHold(ctx context.Context, orderID string) error
 }
 
+// PaymentState is the payment service's view of an order's attempt.
+type PaymentState struct {
+	AttemptID   string
+	Status      string
+	CapturedVND int64
+}
+
 // Payments creates the single payment attempt of an order.
 type Payments interface {
 	CreateAttempt(ctx context.Context, orderID, userID string, amountVND int64) (Attempt, error)
+	// AttemptState reads where the order's payment stands; found=false when the payment service has no attempt.
+	AttemptState(ctx context.Context, orderID string) (state PaymentState, found bool, err error)
 	// CloseAttempt tells the payment service the order is closed: money that arrives later is refunded, and
 	// money already captured is owed back. Idempotent; an unknown attempt counts as closed.
 	CloseAttempt(ctx context.Context, attemptID string) error

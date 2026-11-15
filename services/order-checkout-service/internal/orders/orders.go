@@ -59,6 +59,33 @@ type Order struct {
 	UpdatedAt        time.Time  `json:"updatedAt"`
 }
 
+// Filter selects orders for Query. Zero values mean "any".
+type Filter struct {
+	UserID        string
+	Statuses      []string
+	FailureCode   string
+	UpdatedBefore time.Time // updated at or before
+	UpdatedAfter  time.Time // updated at or after
+	Offset, Limit int       // Limit 0 means 50
+}
+
+// DefaultLimit is the page size of Query when Filter.Limit is 0; MaxLimit caps it.
+const (
+	DefaultLimit = 50
+	MaxLimit     = 100
+)
+
+// PageLimit applies the default and the cap to a requested page size.
+func PageLimit(n int) int {
+	switch {
+	case n <= 0:
+		return DefaultLimit
+	case n > MaxLimit:
+		return MaxLimit
+	}
+	return n
+}
+
 // Store persists orders. Implementations must be safe for concurrent use.
 type Store interface {
 	// Create claims (user, key) and stores o in one step. When the key already exists with the same hash it
@@ -70,6 +97,8 @@ type Store interface {
 	Lookup(ctx context.Context, userID, key, hash string) (o Order, found bool, err error)
 	// Get returns the order or ErrNotFound.
 	Get(ctx context.Context, orderID string) (Order, error)
+	// Query lists orders newest first (without their items) and the total number of matches ignoring paging.
+	Query(ctx context.Context, f Filter) (list []Order, total int, err error)
 	// RecordCapture stores how much money the payment captured and how much of it is owed back (absolute values,
 	// so repeating it changes nothing); ErrNotFound when the order does not exist.
 	RecordCapture(ctx context.Context, orderID string, capturedVND, refundPendingVND int64) error

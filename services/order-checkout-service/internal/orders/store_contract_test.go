@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 )
 
 func sampleOrder(id, user, quote string) Order {
@@ -131,6 +132,67 @@ func runStoreContract(t *testing.T, newStore func(t *testing.T) Store, uniq func
 			t.Fatalf("Get of missing order = %v, want ErrNotFound", err)
 		}
 	})
+}
+
+func runQueryContract(t *testing.T, newStore func(t *testing.T) Store, uniq func(string) string) {
+	ctx := context.Background()
+	s := newStore(t)
+	user, other := uniq("u"), uniq("u")
+	var ids []string
+	for i := 0; i < 3; i++ {
+		o, _, err := s.Create(ctx, uniq("k"), HashIntent(user, uniq("Q")), sampleOrder(uniq("O"), user, uniq("Q")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, o.OrderID)
+	}
+	if _, _, err := s.Create(ctx, uniq("k"), HashIntent(other, "Q-x"), sampleOrder(uniq("O"), other, "Q-x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Transition(ctx, ids[0], StatusPending, "RESERVED", "PROCESSING", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Transition(ctx, ids[1], StatusPending, "FAILED_CLOSED", "UNPAID", "OUT_OF_STOCK"); err != nil {
+		t.Fatal(err)
+	}
+
+	all, total, err := s.Query(ctx, Filter{UserID: user})
+	if err != nil || total != 3 || len(all) != 3 {
+		t.Fatalf("all = %d total=%d %v", len(all), total, err)
+	}
+	if all[0].OrderID != ids[2] || all[2].OrderID != ids[0] {
+		t.Fatalf("order = %s %s %s, want newest first", all[0].OrderID, all[1].OrderID, all[2].OrderID)
+	}
+	if len(all[0].Items) != 0 {
+		t.Fatal("a list does not carry items")
+	}
+	page, total, _ := s.Query(ctx, Filter{UserID: user, Limit: 2, Offset: 2})
+	if total != 3 || len(page) != 1 || page[0].OrderID != ids[0] {
+		t.Fatalf("page = %+v total=%d", page, total)
+	}
+	held, _, _ := s.Query(ctx, Filter{UserID: user, Statuses: []string{"RESERVED", "UNKNOWN_HOLD"}})
+	if len(held) != 1 || held[0].OrderID != ids[0] {
+		t.Fatalf("held = %+v", held)
+	}
+	failed, _, _ := s.Query(ctx, Filter{UserID: user, FailureCode: "OUT_OF_STOCK"})
+	if len(failed) != 1 || failed[0].OrderID != ids[1] {
+		t.Fatalf("failed = %+v", failed)
+	}
+	future := time.Now().Add(time.Hour)
+	if before, _, _ := s.Query(ctx, Filter{UserID: user, UpdatedBefore: future}); len(before) != 3 {
+		t.Fatalf("updated before the future = %d", len(before))
+	}
+	if after, _, _ := s.Query(ctx, Filter{UserID: user, UpdatedAfter: future}); len(after) != 0 {
+		t.Fatalf("updated after the future = %d", len(after))
+	}
+	if before, _, _ := s.Query(ctx, Filter{UserID: user, UpdatedBefore: time.Now().Add(-time.Hour)}); len(before) != 0 {
+		t.Fatalf("updated before an hour ago = %d", len(before))
+	}
+}
+
+func TestMemoryStoreQuery(t *testing.T) {
+	var n int
+	runQueryContract(t, func(*testing.T) Store { return NewMemoryStore() }, func(p string) string { n++; return fmt.Sprintf("%s-%d", p, n) })
 }
 
 func runCaptureContract(t *testing.T, newStore func(t *testing.T) Store, uniq func(string) string) {

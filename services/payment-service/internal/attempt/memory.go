@@ -61,6 +61,16 @@ func (s *MemoryStore) Get(_ context.Context, attemptID string) (Attempt, error) 
 	return a, nil
 }
 
+func (s *MemoryStore) GetByOrder(_ context.Context, orderID string) (Attempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.byOrder[orderID]
+	if !ok {
+		return Attempt{}, ErrNotFound
+	}
+	return s.byID[id], nil
+}
+
 func (s *MemoryStore) Apply(_ context.Context, attemptID string, o Outcome, amountVND int64, eventID string) (Attempt, Change, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

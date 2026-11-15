@@ -16,7 +16,10 @@ type MemoryStore struct {
 	usages    map[string]memUsage // code|order -> the use an order holds
 }
 
-type memUsage struct{ user, state string }
+type memUsage struct {
+	user, state string
+	at          time.Time
+}
 
 func NewMemoryStore(seed ...Campaign) *MemoryStore {
 	m := &MemoryStore{campaigns: map[string]Campaign{}, uses: map[string]int64{}, usages: map[string]memUsage{}}
@@ -139,7 +142,7 @@ func (m *MemoryStore) Reserve(_ context.Context, code, userID, orderID string, n
 	c.Version++
 	m.campaigns[code] = c
 	m.uses[code+"|"+userID]++
-	m.usages[code+"|"+orderID] = memUsage{user: userID, state: "RESERVED"}
+	m.usages[code+"|"+orderID] = memUsage{user: userID, state: "RESERVED", at: now}
 	return nil
 }
 
@@ -156,7 +159,7 @@ func (m *MemoryStore) Consume(_ context.Context, code, orderID string) error {
 	c.ConsumedQuota++
 	c.Version++
 	m.campaigns[code] = c
-	m.usages[code+"|"+orderID] = memUsage{user: u.user, state: "CONSUMED"}
+	m.usages[code+"|"+orderID] = memUsage{user: u.user, state: "CONSUMED", at: u.at}
 	return nil
 }
 
@@ -173,6 +176,25 @@ func (m *MemoryStore) Release(_ context.Context, code, orderID string) error {
 	c.Version++
 	m.campaigns[code] = c
 	m.uses[code+"|"+u.user]--
-	m.usages[code+"|"+orderID] = memUsage{user: u.user, state: "RELEASED"}
+	m.usages[code+"|"+orderID] = memUsage{user: u.user, state: "RELEASED", at: u.at}
 	return nil
+}
+
+// ReservedBefore implements Reserver.
+func (m *MemoryStore) ReservedBefore(_ context.Context, cutoff time.Time, limit int) ([]Reservation, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Reservation
+	for key, u := range m.usages {
+		if u.state != "RESERVED" || u.at.After(cutoff) {
+			continue
+		}
+		code, order, _ := strings.Cut(key, "|")
+		out = append(out, Reservation{Code: code, UserID: u.user, OrderID: order})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].OrderID < out[j].OrderID })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

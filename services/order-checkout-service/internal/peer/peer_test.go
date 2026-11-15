@@ -194,3 +194,27 @@ func TestCartsRemoveOrderedSendsTheUserAndTheSkus(t *testing.T) {
 		t.Fatalf("headers=%v body=%v", hdr, got)
 	}
 }
+
+func TestPaymentsAttemptStateReadsTheAttemptAndMapsMissing(t *testing.T) {
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("0123456789abcdef0123456789abcdef")
+	var token string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token = r.Header.Get(internalauth.Header)
+		if r.URL.Path == "/api/v1/payments/orders/O-none/attempt" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"code":"PAYMENT_NOT_FOUND","status":404}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"attemptId":"PAY-O-1","status":"CAPTURED","capturedAmountVnd":660000}}`))
+	}))
+	defer srv.Close()
+	p := NewPayments(srv.URL, client())
+	st, found, err := p.AttemptState(context.Background(), "O-1")
+	if err != nil || !found || st.Status != "CAPTURED" || st.CapturedVND != 660000 || st.AttemptID != "PAY-O-1" || token == "" {
+		t.Fatalf("state = %+v found=%v err=%v token=%q", st, found, err, token)
+	}
+	if _, found, err := p.AttemptState(context.Background(), "O-none"); err != nil || found {
+		t.Fatalf("missing = found=%v err=%v", found, err)
+	}
+}

@@ -115,8 +115,9 @@ func (s *Service) step(ctx context.Context, o orders.Order, ev saga.Event) (orde
 		return o, err
 	}
 	payStatus, failure := res.PaymentStatus, failureAfter(o, res, ev)
-	if hasEffect(res.Effects, saga.RecordRefundObligation) {
-		payStatus = PayRefundPending
+	if hasEffect(res.Effects, saga.RecordRefundObligation) ||
+		(res.State == saga.StateFailedClosed && from != saga.StateFailedClosed && o.CapturedVND > 0) {
+		payStatus = PayRefundPending // money is held for a closed order: it goes back to the customer
 	}
 	if lost, err := s.runEffects(ctx, o, res.Effects); lost {
 		return s.closeLost(ctx, o, from)
@@ -137,6 +138,12 @@ func (s *Service) step(ctx context.Context, o orders.Order, ev saga.Event) (orde
 	}
 	if res.State == saga.StateConfirmed && from != saga.StateConfirmed {
 		s.clearCart(ctx, moved)
+	}
+	if payStatus == PayRefundPending && moved.CapturedVND > 0 && moved.RefundPendingVND != moved.CapturedVND {
+		if err := s.Orders.RecordCapture(ctx, moved.OrderID, moved.CapturedVND, moved.CapturedVND); err != nil {
+			return moved, err
+		}
+		moved.RefundPendingVND = moved.CapturedVND
 	}
 	return moved, nil
 }

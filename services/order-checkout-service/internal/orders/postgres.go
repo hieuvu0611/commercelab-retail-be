@@ -144,6 +144,42 @@ func (s *PostgresStore) Get(ctx context.Context, orderID string) (Order, error) 
 	return loadOrder(ctx, s.pool, orderID)
 }
 
+func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, error) {
+	var before *time.Time
+	if !f.UpdatedBefore.IsZero() {
+		before = &f.UpdatedBefore
+	}
+	var after *time.Time
+	if !f.UpdatedAfter.IsZero() {
+		after = &f.UpdatedAfter
+	}
+	statuses := f.Statuses
+	if statuses == nil {
+		statuses = []string{}
+	}
+	const where = `WHERE ($1 = '' OR user_id = $1) AND (cardinality($2::text[]) = 0 OR status = ANY($2)) AND ($3 = '' OR failure_code = $3)
+		AND ($4::timestamptz IS NULL OR updated_at <= $4) AND ($5::timestamptz IS NULL OR updated_at >= $5)`
+	var total int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders `+where, f.UserID, statuses, f.FailureCode, before, after).Scan(&total); err != nil {
+		return nil, 0, dependency.Wrap(err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT `+orderColumns+` FROM orders.orders `+where+` ORDER BY created_at DESC, order_id DESC LIMIT $6 OFFSET $7`,
+		f.UserID, statuses, f.FailureCode, before, after, PageLimit(f.Limit), max(f.Offset, 0))
+	if err != nil {
+		return nil, 0, dependency.Wrap(err)
+	}
+	defer rows.Close()
+	out := []Order{}
+	for rows.Next() {
+		o, err := scanOrder(rows)
+		if err != nil {
+			return nil, 0, dependency.Wrap(err)
+		}
+		out = append(out, o)
+	}
+	return out, total, dependency.Wrap(rows.Err())
+}
+
 func (s *PostgresStore) RecordCapture(ctx context.Context, orderID string, capturedVND, refundPendingVND int64) error {
 	tag, err := s.pool.Exec(ctx, `UPDATE orders.orders SET captured_amount_vnd = $2, refund_pending_vnd = $3, updated_at = $4 WHERE order_id = $1`,
 		orderID, capturedVND, refundPendingVND, time.Now().UTC())

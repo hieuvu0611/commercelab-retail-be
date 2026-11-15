@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 )
@@ -24,6 +25,9 @@ type MemoryStore struct {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{keys: map[memKey]memEntry{}, orders: map[string]Order{}, now: func() time.Time { return time.Now().UTC() }}
 }
+
+// WithClock replaces the clock that stamps created and updated times (tests).
+func (s *MemoryStore) WithClock(now func() time.Time) *MemoryStore { s.now = now; return s }
 
 func clone(o Order) Order {
 	o.Items = append([]Item(nil), o.Items...)
@@ -74,6 +78,57 @@ func (s *MemoryStore) Get(_ context.Context, orderID string) (Order, error) {
 		return Order{}, ErrNotFound
 	}
 	return clone(o), nil
+}
+
+func (s *MemoryStore) Query(_ context.Context, f Filter) ([]Order, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := []Order{}
+	for _, o := range s.orders {
+		if matches(o, f) {
+			c := clone(o)
+			c.Items = nil
+			out = append(out, c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].OrderID > out[j].OrderID
+	})
+	total := len(out)
+	from, to := pageBounds(f, total)
+	return out[from:to], total, nil
+}
+
+func matches(o Order, f Filter) bool {
+	if f.UserID != "" && o.UserID != f.UserID || f.FailureCode != "" && o.FailureCode != f.FailureCode {
+		return false
+	}
+	if !f.UpdatedBefore.IsZero() && o.UpdatedAt.After(f.UpdatedBefore) {
+		return false
+	}
+	if !f.UpdatedAfter.IsZero() && o.UpdatedAt.Before(f.UpdatedAfter) {
+		return false
+	}
+	if len(f.Statuses) == 0 {
+		return true
+	}
+	for _, st := range f.Statuses {
+		if o.Status == st {
+			return true
+		}
+	}
+	return false
+}
+
+func pageBounds(f Filter, total int) (int, int) {
+	from, limit := max(f.Offset, 0), PageLimit(f.Limit)
+	if from > total {
+		from = total
+	}
+	return from, min(from+limit, total)
 }
 
 func (s *MemoryStore) RecordCapture(_ context.Context, orderID string, capturedVND, refundPendingVND int64) error {
