@@ -77,10 +77,14 @@ func TestAnonymousCallsToProtectedEndpointsAreRejectedBeforeReachingAnyService(t
 		{http.MethodGet, "/api/v1/carts/me"},
 		{http.MethodPut, "/api/v1/carts/me"},
 		{http.MethodGet, "/api/v1/something-unknown"},
-		{http.MethodPost, "/api/v1/products"},    // writing the catalog is not public
-		{http.MethodGet, "/api/v1/productsx"},    // prefix boundary: not the products collection
-		{http.MethodGet, "/api/v1/auth/login"},   // only POST login is public
-		{http.MethodGet, "/api/v1/auth/refresh"}, // only POST refresh is public
+		{http.MethodGet, "/api/v1/admin/inventory/stock"},
+		{http.MethodGet, "/api/v1/inventory/availabilityx"},  // exact path only
+		{http.MethodGet, "/api/v1/inventory/availability/x"}, // exact path only
+		{http.MethodPost, "/api/v1/inventory/availability"},  // read-only endpoint
+		{http.MethodPost, "/api/v1/products"},                // writing the catalog is not public
+		{http.MethodGet, "/api/v1/productsx"},                // prefix boundary: not the products collection
+		{http.MethodGet, "/api/v1/auth/login"},               // only POST login is public
+		{http.MethodGet, "/api/v1/auth/refresh"},             // only POST refresh is public
 	}
 	for _, tc := range protected {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -114,6 +118,7 @@ func TestPublicAllowlistReachesTheServicesWithoutAToken(t *testing.T) {
 		{http.MethodGet, "/api/v1/products/PROD-BALO-CITY"},
 		{http.MethodGet, "/api/v1/categories"},
 		{http.MethodGet, "/api/v1/categories/backpacks"},
+		{http.MethodGet, "/api/v1/inventory/availability"},
 		{http.MethodPost, "/api/v1/auth/login"},
 		{http.MethodPost, "/api/v1/auth/register"},
 		{http.MethodPost, "/api/v1/auth/refresh"},

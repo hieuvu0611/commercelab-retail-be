@@ -79,6 +79,7 @@ func TestInventoryReserveCommitHandoverAndWarehouseScope_SC02_SC12(t *testing.T)
 
 	// 5. Kiểm tra tồn kho Balo sau bàn giao: OnHand = 8, Committed = 0, Available = 8
 	stReq := httptest.NewRequest(http.MethodGet, "/api/v1/inventory/SKU-BALO-BLACK-20L", nil)
+	stReq.Header.Set("Authorization", bearerFor(t, hcmStaff))
 	stRec := httptest.NewRecorder()
 	srv.ServeHTTP(stRec, stReq)
 	var stResp struct {

@@ -205,3 +205,37 @@ func (r *InventoryRepository) listMovementsInMemory(f MovementFilter, offset int
 	end := min(offset+f.Limit, len(matched))
 	return matched[offset:end], total, nil
 }
+
+// AvailableBySku returns the available quantity of each requested SKU in one warehouse. SKUs without a stock
+// record are absent from the result (callers treat them as out of stock).
+func (r *InventoryRepository) AvailableBySku(ctx context.Context, warehouseID string, skuIDs []string) (map[string]int64, error) {
+	out := make(map[string]int64, len(skuIDs))
+	if r.pool == nil {
+		for _, sku := range skuIDs {
+			if st, ok := r.engine.GetStock(warehouseID, sku); ok {
+				out[sku] = st.Available()
+			}
+		}
+		return out, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT sku_id, on_hand - unsellable - reserved - committed
+		FROM stock_items WHERE warehouse_id = $1 AND sku_id = ANY($2)
+	`, warehouseID, skuIDs)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sku string
+		var available int64
+		if err := rows.Scan(&sku, &available); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		out[sku] = available
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	return out, nil
+}

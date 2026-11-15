@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
@@ -19,7 +20,22 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/migrations"
 )
 
-func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Handler {
+// serverOptions are the runtime settings of the HTTP handler.
+type serverOptions struct{ lowStockThreshold int64 }
+
+// ServerOption changes a runtime setting of NewServer.
+type ServerOption func(*serverOptions)
+
+// WithLowStockThreshold sets the largest available quantity that is still reported as LOW.
+func WithLowStockThreshold(n int64) ServerOption {
+	return func(o *serverOptions) { o.lowStockThreshold = n }
+}
+
+func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...ServerOption) http.Handler {
+	options := serverOptions{lowStockThreshold: domain.DefaultLowStockThreshold}
+	for _, opt := range opts {
+		opt(&options)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -31,11 +47,17 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 		}, nil)
 	})
 
-	mux.HandleFunc("GET /api/v1/inventory/{skuId}", func(w http.ResponseWriter, r *http.Request) {
+	// Exact counts are for warehouse staff only; customers get states from the availability endpoint.
+	mux.Handle("GET /api/v1/inventory/{skuId}", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		skuID := r.PathValue("skuId")
 		warehouseID := r.URL.Query().Get("warehouseId")
 		if warehouseID == "" {
 			warehouseID = domain.DefaultWarehouseID
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, warehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
 		}
 		st, ok, err := repo.GetStock(r.Context(), warehouseID, skuID)
 		if dependency.IsUnavailable(err) {
@@ -47,7 +69,9 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 			return
 		}
 		response.JSON(w, http.StatusOK, "Lấy thông tin tồn kho thành công", stockView(st), nil)
-	})
+	}))))
+
+	mux.HandleFunc("GET /api/v1/inventory/availability", availabilityHandler(repo, options.lowStockThreshold))
 
 	// P03, SC02, SC03: Giữ tồn kho nguyên tử 10 phút cho toàn bộ đơn
 	mux.HandleFunc("POST /api/v1/inventory/reservations", func(w http.ResponseWriter, r *http.Request) {
@@ -152,8 +176,9 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 
 // Config is the typed start-up configuration of the inventory service.
 type Config struct {
-	Port        string
-	DatabaseURL string
+	Port              string
+	DatabaseURL       string
+	LowStockThreshold int64
 }
 
 // loadConfig reads and validates the environment, including the mandatory JWT secrets (needed to verify
@@ -164,6 +189,14 @@ func loadConfig() (Config, error) {
 	cfg := Config{
 		Port:        l.Optional("INVENTORY_WAREHOUSE_PORT", "8082"),
 		DatabaseURL: l.Optional("DATABASE_URL_INVENTORY", "postgres://inventory_svc_user:inventory_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=inventory"),
+	}
+	cfg.LowStockThreshold = domain.DefaultLowStockThreshold
+	if raw := l.Optional("INVENTORY_LOW_STOCK_THRESHOLD", ""); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 0 {
+			return cfg, errors.New("INVENTORY_LOW_STOCK_THRESHOLD must be a non-negative integer")
+		}
+		cfg.LowStockThreshold = n
 	}
 	return cfg, l.Err()
 }
@@ -191,5 +224,5 @@ func main() {
 
 	repo := repository.NewInventoryRepository(pgPool)
 	log.Printf("[inventory-warehouse-service] listening on :%s (schema: inventory, pgConnected: %v)", port, pgPool != nil)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, pgPool != nil)))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, pgPool != nil, WithLowStockThreshold(cfg.LowStockThreshold))))
 }

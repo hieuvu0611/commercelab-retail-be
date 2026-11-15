@@ -64,6 +64,29 @@ type Movement struct {
 	At          time.Time `json:"at"`
 }
 
+// Availability states shown on the storefront instead of counts (decision D-12).
+const (
+	StateInStock = "IN_STOCK"
+	StateLow     = "LOW"
+	StateOut     = "OUT"
+)
+
+// DefaultLowStockThreshold is the largest available quantity that still counts as LOW.
+const DefaultLowStockThreshold int64 = 3
+
+// AvailabilityState maps an available quantity to its storefront state: OUT at 0 or below,
+// LOW from 1 up to the threshold, IN_STOCK above it.
+func AvailabilityState(available, lowThreshold int64) string {
+	switch {
+	case available <= 0:
+		return StateOut
+	case available <= lowThreshold:
+		return StateLow
+	default:
+		return StateInStock
+	}
+}
+
 type ReserveLine struct {
 	SkuID    string `json:"skuId"`
 	Quantity int64  `json:"quantity"`

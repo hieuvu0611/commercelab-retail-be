@@ -22,6 +22,8 @@ var publicAllowlist = []publicEndpoint{
 	{method: http.MethodGet, path: "/health"},
 	{method: http.MethodGet, path: "/api/v1/products", prefix: true},
 	{method: http.MethodGet, path: "/api/v1/categories", prefix: true},
+	// Stock state per SKU (IN_STOCK / LOW / OUT, never counts, D-12). The exact-count endpoints stay protected.
+	{method: http.MethodGet, path: "/api/v1/inventory/availability"},
 	{method: http.MethodPost, path: "/api/v1/auth/login"},
 	{method: http.MethodPost, path: "/api/v1/auth/register"},
 	{method: http.MethodPost, path: "/api/v1/auth/refresh"},
