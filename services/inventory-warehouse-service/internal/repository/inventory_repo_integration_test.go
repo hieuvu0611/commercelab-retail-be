@@ -239,3 +239,55 @@ func TestAvailableBySkuUsesTheBucketFormulaAgainstPostgres(t *testing.T) {
 		t.Fatal("an unknown SKU must be absent (reported OUT by the handler)")
 	}
 }
+
+// SC05 on real Postgres: a plain reservation expires at 10:10, a held one survives until the controlled release.
+func TestExpirySweepAndExceptionHoldAgainstPostgres(t *testing.T) {
+	pool := integrationPool(t)
+	repo := NewInventoryRepository(pool)
+	ctx := context.Background()
+	clock := &fakeClock{t: time.Now().UTC().Truncate(time.Second)}
+	repo.SetClock(clock.Now)
+	start := clock.Now()
+
+	sku := seedStock(t, pool, 10)
+	suffix := fmt.Sprint(time.Now().UnixNano())
+	plain, held := "IT-EXP-PLAIN-"+suffix, "IT-EXP-HELD-"+suffix
+	for _, id := range []string{plain, held} {
+		if _, err := repo.ReserveForOrder(ctx, id, testWarehouse, []domain.ReserveLine{{SkuID: sku, Quantity: 2}}); err != nil {
+			t.Fatalf("reserve %s: %v", id, err)
+		}
+	}
+	clock.Set(start.Add(9 * time.Minute))
+	rec, err := repo.PlaceExceptionHold(ctx, held)
+	if err != nil || rec.Status != "EXCEPTION_HOLD_30M" || !rec.ExpiresAt.Equal(start.Add(30*time.Minute)) {
+		t.Fatalf("hold = %+v, err %v; want EXCEPTION_HOLD_30M until start+30m", rec, err)
+	}
+
+	clock.Set(start.Add(11 * time.Minute))
+	if _, err := repo.ExpireDueReservations(ctx); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	// Other tests' reservations may also expire in this sweep; only ours are asserted.
+	if got := stockOf(t, repo, sku); got.Reserved != 2 || got.Available() != 8 {
+		t.Fatalf("after the sweep %+v; want only the held 2 units reserved", got)
+	}
+	if r, _ := repo.GetReservation(ctx, plain); r.Status != "RELEASED" {
+		t.Fatalf("plain reservation = %s, want RELEASED", r.Status)
+	}
+	if r, _ := repo.GetReservation(ctx, held); r.Status != "EXCEPTION_HOLD_30M" {
+		t.Fatalf("held reservation = %s, want EXCEPTION_HOLD_30M", r.Status)
+	}
+	if _, err := repo.PlaceExceptionHold(ctx, plain); !errors.Is(err, domain.ErrInvalidReservationState) {
+		t.Fatalf("hold on a released reservation = %v", err)
+	}
+	if got := fmt.Sprint(movementTypes(t, repo, sku)); got != "[RESERVE RESERVE RELEASE]" {
+		t.Fatalf("ledger = %s", got)
+	}
+	clock.Set(start.Add(31 * time.Minute))
+	if _, err := repo.ExpireDueReservations(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := repo.GetReservation(ctx, held); r.Status != "EXCEPTION_HOLD_30M" {
+		t.Fatalf("past 30 minutes the hold must wait for the controlled release, got %s", r.Status)
+	}
+}

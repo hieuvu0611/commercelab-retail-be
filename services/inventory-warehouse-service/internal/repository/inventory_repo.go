@@ -18,6 +18,16 @@ var (
 	ErrWarehouseRequired   = errors.New("warehouseId is required to reserve stock")
 )
 
+const (
+	// ReservationTTL is how long unpaid stock is held (P03); ExceptionHoldTTL is the whole hold of an order
+	// whose payment is unknown, counted from the reservation (P05, SC05).
+	ReservationTTL   = 10 * time.Minute
+	ExceptionHoldTTL = 30 * time.Minute
+
+	statusActive    = "ACTIVE_10M"
+	statusException = "EXCEPTION_HOLD_30M"
+)
+
 type ReservationRecord struct {
 	ReservationID string               `json:"reservationId"`
 	OrderID       string               `json:"orderId"`
@@ -33,7 +43,11 @@ type InventoryRepository struct {
 	mu           sync.Mutex
 	reservations map[string]*ReservationRecord
 	movements    []domain.Movement // memory mode only; guarded by mu
+	now          func() time.Time
 }
+
+// SetClock replaces the time source (tests use a fake clock for expiry rules).
+func (r *InventoryRepository) SetClock(now func() time.Time) { r.now = now }
 
 func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 	seed := []domain.StockItem{
@@ -45,6 +59,7 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 		pool:         pool,
 		engine:       domain.NewLedgerEngine(seed),
 		reservations: make(map[string]*ReservationRecord),
+		now:          time.Now,
 	}
 	for _, it := range seed { // the memory ledger explains the seeded stock like the migration does for Postgres
 		repo.appendMovement(domain.Movement{
@@ -86,7 +101,7 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 	if err != nil {
 		return nil, err
 	}
-	expiresAt := time.Now().UTC().Add(10 * time.Minute)
+	expiresAt := r.now().UTC().Add(ReservationTTL)
 	linesJSON, _ := json.Marshal(lines)
 
 	if r.pool != nil {
@@ -289,22 +304,8 @@ func (r *InventoryRepository) ReleaseOrderReservation(ctx context.Context, order
 			if rec.Status != "ACTIVE_10M" && rec.Status != "EXCEPTION_HOLD_30M" {
 				return nil, domain.ErrInvalidReservationState
 			}
-			for _, line := range rec.Lines {
-				if _, err := tx.Exec(ctx, `
-					UPDATE stock_items
-					SET reserved = reserved - $1, version = version + 1, updated_at = NOW()
-					WHERE sku_id = $2 AND warehouse_id = $3
-				`, line.Quantity, line.SkuID, rec.WarehouseID); err != nil {
-					return nil, dependency.Wrap(err)
-				}
-				if err := insertMovement(ctx, tx, lineMovement(domain.MovementRelease, rec.WarehouseID, orderID, line, "reservation released")); err != nil {
-					return nil, err
-				}
-			}
-			if _, err := tx.Exec(ctx, `
-				UPDATE reservations SET status = 'RELEASED', version = version + 1 WHERE order_id = $1
-			`, orderID); err != nil {
-				return nil, dependency.Wrap(err)
+			if err := releaseHeldStock(ctx, tx, &rec, domain.SystemActor, "reservation released"); err != nil {
+				return nil, err
 			}
 			if err := tx.Commit(ctx); err != nil {
 				return nil, dependency.Wrap(err)
@@ -325,7 +326,7 @@ func (r *InventoryRepository) ReleaseOrderReservation(ctx context.Context, order
 		cp := *rec
 		return &cp, nil
 	}
-	if rec.Status != "ACTIVE_10M" && rec.Status != "EXCEPTION_HOLD_30M" {
+	if rec.Status != statusActive && rec.Status != statusException {
 		return nil, domain.ErrInvalidReservationState
 	}
 	// Nhả Reserved bằng cách trừ lại từ r.engine

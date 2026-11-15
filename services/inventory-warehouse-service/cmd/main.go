@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
@@ -115,6 +116,23 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 		response.JSON(w, http.StatusOK, "Cam kết giữ tồn kho thành công (SC02)", rec, nil)
 	})
 
+	// P05, SC05: payment is unknown, so keep the stock for 30 minutes (from the reservation) instead of 10.
+	mux.HandleFunc("POST /api/v1/inventory/reservations/{orderId}/exception-hold", func(w http.ResponseWriter, r *http.Request) {
+		rec, err := repo.PlaceExceptionHold(r.Context(), r.PathValue("orderId"))
+		switch {
+		case dependency.IsUnavailable(err):
+			dependency.WriteUnavailable(w, r, err)
+		case errors.Is(err, repository.ErrReservationNotFound):
+			response.Error(w, r, http.StatusNotFound, "RESERVATION_NOT_FOUND", err.Error(), nil)
+		case errors.Is(err, repository.ErrReservationExpired):
+			response.Error(w, r, http.StatusConflict, "RESERVATION_EXPIRED", err.Error(), nil)
+		case err != nil:
+			response.Error(w, r, http.StatusConflict, "EXCEPTION_HOLD_FAILED", err.Error(), nil)
+		default:
+			response.JSON(w, http.StatusOK, "Reservation held for 30 minutes (P05)", rec, nil)
+		}
+	})
+
 	// SC05: Nhả Giữ tạm về lại Khả dụng khi thanh toán thất bại hoặc hết hạn
 	mux.HandleFunc("POST /api/v1/inventory/reservations/{orderId}/release", func(w http.ResponseWriter, r *http.Request) {
 		orderID := r.PathValue("orderId")
@@ -174,11 +192,14 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	return middleware.Chain(mux)
 }
 
+const defaultExpirySweepInterval = 30 * time.Second
+
 // Config is the typed start-up configuration of the inventory service.
 type Config struct {
 	Port              string
 	DatabaseURL       string
 	LowStockThreshold int64
+	ExpirySweepEvery  time.Duration
 }
 
 // loadConfig reads and validates the environment, including the mandatory JWT secrets (needed to verify
@@ -197,6 +218,14 @@ func loadConfig() (Config, error) {
 			return cfg, errors.New("INVENTORY_LOW_STOCK_THRESHOLD must be a non-negative integer")
 		}
 		cfg.LowStockThreshold = n
+	}
+	cfg.ExpirySweepEvery = defaultExpirySweepInterval
+	if raw := l.Optional("INVENTORY_EXPIRY_SWEEP_INTERVAL", ""); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			return cfg, errors.New("INVENTORY_EXPIRY_SWEEP_INTERVAL must be a positive duration such as 30s")
+		}
+		cfg.ExpirySweepEvery = d
 	}
 	return cfg, l.Err()
 }
@@ -223,6 +252,7 @@ func main() {
 	}
 
 	repo := repository.NewInventoryRepository(pgPool)
+	go repo.RunExpiryWorker(context.Background(), cfg.ExpirySweepEvery)
 	log.Printf("[inventory-warehouse-service] listening on :%s (schema: inventory, pgConnected: %v)", port, pgPool != nil)
 	log.Fatal(http.ListenAndServe(":"+port, NewServer(repo, pgPool != nil, WithLowStockThreshold(cfg.LowStockThreshold))))
 }
