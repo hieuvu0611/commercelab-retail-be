@@ -250,11 +250,15 @@ func (s *MongoProductStore) FindPublished(ctx context.Context, text string, cate
 }
 
 // ActiveSKUs implements domain.StorefrontStore; attribute values are matched as escaped, anchored text.
-func (s *MongoProductStore) ActiveSKUs(ctx context.Context, productIDs []string, attrs map[string]string) ([]domain.SKU, error) {
+func (s *MongoProductStore) ActiveSKUs(ctx context.Context, productIDs []string, attrs map[string][]string) ([]domain.SKU, error) {
 	filter := bson.D{{Key: "productId", Value: bson.D{{Key: "$in", Value: productIDs}}}, {Key: "isActive", Value: true}}
-	for axis, value := range attrs {
+	for axis, values := range attrs {
+		quoted := make([]string, len(values))
+		for i, value := range values {
+			quoted[i] = regexp.QuoteMeta(strings.TrimSpace(value))
+		}
 		filter = append(filter, bson.E{Key: "attributes." + axis, Value: bson.D{
-			{Key: "$regex", Value: "^" + regexp.QuoteMeta(strings.TrimSpace(value)) + "$"}, {Key: "$options", Value: "i"},
+			{Key: "$regex", Value: "^(" + strings.Join(quoted, "|") + ")$"}, {Key: "$options", Value: "i"},
 		}})
 	}
 	cur, err := s.skus.Find(ctx, filter)

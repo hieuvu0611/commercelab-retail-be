@@ -299,3 +299,24 @@ func httpRec(code int, body []byte) *httptest.ResponseRecorder {
 	_, _ = rec.Body.Write(body)
 	return rec
 }
+
+func TestAdminCategoryListIncludesInactiveCategories(t *testing.T) {
+	e := newCategoryEnv(t)
+	staff := token(t, "PRODUCT_STAFF")
+	if rec := e.do(http.MethodGet, "/api/v1/admin/categories", "", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: %d", rec.Code)
+	}
+	if rec := e.do(http.MethodGet, "/api/v1/admin/categories", token(t, "CUSTOMER"), ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("customer: %d", rec.Code)
+	}
+	bags := e.create(t, "", "Bags", "bags")
+	e.do(http.MethodPatch, "/api/v1/admin/categories/"+bags.ID, staff, `{"isActive":false}`)
+
+	rec := e.do(http.MethodGet, "/api/v1/admin/categories", staff, "")
+	list := decode[struct {
+		Data []domain.Category `json:"data"`
+	}](t, rec).Data
+	if rec.Code != 200 || len(list) != 1 || list[0].IsActive {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body)
+	}
+}

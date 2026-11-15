@@ -90,6 +90,7 @@ func TestStorefrontListFilters(t *testing.T) {
 		{"?minPrice=200000", []string{"city-pack"}},
 		{"?maxPrice=200000", []string{"mini-pack"}},
 		{"?attr.color=red", []string{"mini-pack"}},
+		{"?attr.color=red,black", []string{"mini-pack", "city-pack"}},
 		{"?q=mini", []string{"mini-pack"}},
 		{"?q=.*", nil},
 		{"?attr.color=.*", nil},

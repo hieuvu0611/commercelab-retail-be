@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -133,4 +134,48 @@ func (s *PriceService) GetPrice(ctx context.Context, skuID string) (PriceView, e
 		}
 	}
 	return view, nil
+}
+
+// PriceRow is the current price of one SKU in the price list; UnitPriceVND is nil when no price is in effect.
+type PriceRow struct {
+	SkuID         string            `json:"skuId"`
+	ProductID     string            `json:"productId"`
+	ProductName   string            `json:"productName"`
+	Attributes    map[string]string `json:"attributes"`
+	UnitPriceVND  *int64            `json:"unitPriceVnd"`
+	EffectiveFrom *time.Time        `json:"effectiveFrom"`
+}
+
+// ListPrices returns the SKUs of one page of products (any status, matched by q on name and slug) with the price
+// in effect now. Pagination counts products, so a page can hold more rows than limit.
+func (s *PriceService) ListPrices(ctx context.Context, q string, page, limit int) ([]PriceRow, int64, error) {
+	products, total, err := s.products.ListProducts(ctx, ProductFilter{Q: q, Page: page, Limit: limit})
+	if err != nil {
+		return nil, 0, err
+	}
+	now := s.now()
+	rows := []PriceRow{}
+	for _, p := range products {
+		skus, err := s.products.siblings(ctx, p.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+		sort.Slice(skus, func(i, j int) bool { return skus[i].SkuID < skus[j].SkuID })
+		for _, k := range skus {
+			row := PriceRow{SkuID: k.SkuID, ProductID: p.ID, ProductName: p.Name, Attributes: k.Attributes}
+			history, err := s.prices.SkuPriceHistory(ctx, k.SkuID)
+			if err != nil {
+				return nil, 0, err
+			}
+			for _, period := range history {
+				if period.activeAt(now) {
+					amount, from := period.UnitPriceVND, period.EffectiveFrom
+					row.UnitPriceVND, row.EffectiveFrom = &amount, &from
+					break
+				}
+			}
+			rows = append(rows, row)
+		}
+	}
+	return rows, total, nil
 }

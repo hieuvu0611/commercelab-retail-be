@@ -142,6 +142,11 @@ func TestAdminProductPatchOptimisticConcurrency(t *testing.T) {
 	if got = decode[productResp](t, rec).Data; rec.Code != 200 || got.Brand != "Acme" || got.Version != 3 {
 		t.Fatalf("body version: %d %s", rec.Code, rec.Body)
 	}
+	// Version from the query string (the only option for DELETE, which has no body).
+	rec = e.do(http.MethodPatch, path+"?version=3", staff, `{"brand":"Acme 2"}`)
+	if got = decode[productResp](t, rec).Data; rec.Code != 200 || got.Brand != "Acme 2" || got.Version != 4 {
+		t.Fatalf("query version: %d %s", rec.Code, rec.Body)
+	}
 	// Stale version.
 	rec = e.doWith(http.MethodPatch, path, staff, `{"name":"Stale"}`, "1")
 	if rec.Code != 409 || decode[errorBody](t, rec).Code != "VERSION_CONFLICT" {

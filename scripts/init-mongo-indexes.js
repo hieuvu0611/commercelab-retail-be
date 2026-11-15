@@ -6,10 +6,12 @@
 const dbRef = db.getSiblingDB('commerce_lab_doc');
 
 // 1. Catalog Products (B01 — Thông số kỹ thuật đa ngành hàng)
-dbRef.catalog_products.createIndex({ slug: 1 }, { unique: true });
+// Index names match the ones catalog-pricing-service creates at start-up; a different name makes it fail with
+// IndexOptionsConflict on a fresh database.
+dbRef.catalog_products.createIndex({ slug: 1 }, { unique: true, name: 'uniq_slug' });
 dbRef.catalog_products.createIndex({ status: 1, primaryCategoryId: 1 });
 dbRef.catalog_products.createIndex({ categoryIds: 1 });
-dbRef.catalog_sku_specs.createIndex({ productId: 1 });
+dbRef.catalog_sku_specs.createIndex({ productId: 1 }, { name: 'by_product' });
 
 // 2. Order Commercial Snapshots (I04 — Hợp đồng đóng băng lúc mua)
 dbRef.order_commercial_snapshots.createIndex({ order_id: 1 }, { unique: true });

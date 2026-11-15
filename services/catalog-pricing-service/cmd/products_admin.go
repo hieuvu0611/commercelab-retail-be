@@ -52,9 +52,13 @@ func actorOf(r *http.Request) string {
 }
 
 // expectedVersion reads the version the client edited: the If-Match header (quoted or plain) wins over the
-// body's "version". It writes the error response itself and returns false when there is none or it is invalid.
+// body's "version", then the "version" query parameter (for DELETE requests, which carry no body). It writes
+// the error response itself and returns false when there is none or it is invalid.
 func expectedVersion(w http.ResponseWriter, r *http.Request, bodyVersion *int64) (int64, bool) {
 	raw := strings.TrimSpace(r.Header.Get("If-Match"))
+	if raw == "" && bodyVersion == nil {
+		raw = strings.TrimSpace(r.URL.Query().Get("version"))
+	}
 	if raw == "" {
 		if bodyVersion == nil {
 			response.Error(w, r, http.StatusPreconditionRequired, "VERSION_REQUIRED", "Send the product version in the If-Match header or the version field", nil)

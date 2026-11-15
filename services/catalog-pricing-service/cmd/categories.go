@@ -36,6 +36,7 @@ func registerCategoryRoutes(mux *http.ServeMux, svc *domain.CategoryService, c c
 	}
 	mux.HandleFunc("GET /api/v1/categories", api.publicTree)
 	mux.HandleFunc("GET /api/v1/categories/{path...}", api.publicByPath)
+	mux.Handle("GET /api/v1/admin/categories", staff(api.adminList))
 	mux.Handle("POST /api/v1/admin/categories", staff(api.create))
 	mux.Handle("PATCH /api/v1/admin/categories/{id}", staff(api.update))
 	mux.Handle("POST /api/v1/admin/categories/{id}/move", staff(api.move))
@@ -89,6 +90,19 @@ func (a *categoryAPI) publicTree(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response.JSON(w, http.StatusOK, "Categories", tree, nil)
+}
+
+// adminList returns every category, inactive ones included, as a flat list (the storefront tree hides them).
+func (a *categoryAPI) adminList(w http.ResponseWriter, r *http.Request) {
+	cats, err := a.svc.List(r.Context())
+	if err != nil {
+		writeCategoryError(w, r, err)
+		return
+	}
+	if cats == nil {
+		cats = []domain.Category{}
+	}
+	response.JSON(w, http.StatusOK, "Categories", cats, nil)
 }
 
 func (a *categoryAPI) publicByPath(w http.ResponseWriter, r *http.Request) {
