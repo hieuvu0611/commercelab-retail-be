@@ -216,6 +216,48 @@ func runStoreContract(t *testing.T, store Store, uniq func(string) string) {
 	})
 }
 
+// runOutboxContract checks that outcomes write their events once, in the same step as the state change.
+func runOutboxContract(t *testing.T, store Store, uniq func(string) string, eventTypes func(orderID string) []string) {
+	t.Helper()
+	ctx := context.Background()
+	order := uniq("O")
+	a := Attempt{AttemptID: "PAY-" + order, OrderID: order, UserID: uniq("u"), IdempotencyKey: "pay-" + order, AmountVND: 660000}
+	_, _, _ = store.Create(ctx, a)
+	_, _, _ = store.Apply(ctx, a.AttemptID, OutcomeUnknown, 0, "")
+	_, _, _ = store.Apply(ctx, a.AttemptID, OutcomeUnknown, 0, "") // a repeat announces nothing
+	if _, _, err := store.Apply(ctx, a.AttemptID, OutcomeCaptured, 660000, ""); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = store.Apply(ctx, a.AttemptID, OutcomeCaptured, 660000, "") // replay
+	if got := fmt.Sprint(eventTypes(order)); got != "[payment.unknown_30m.v1 payment.captured.v1]" {
+		t.Fatalf("events = %s", got)
+	}
+	// Closing money that was captured owes it back, once.
+	for i := 0; i < 2; i++ {
+		if _, _, err := store.Close(ctx, a.AttemptID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := fmt.Sprint(eventTypes(order)); got != "[payment.unknown_30m.v1 payment.captured.v1 payment.late_refund_required.v1]" {
+		t.Fatalf("events after close = %s", got)
+	}
+}
+
+func TestMemoryStoreOutbox(t *testing.T) {
+	var n atomic.Int64
+	uniq := func(p string) string { return fmt.Sprintf("%s-%d", p, n.Add(1)) }
+	store := NewMemoryStore()
+	runOutboxContract(t, store, uniq, func(orderID string) []string {
+		var out []string
+		for _, e := range store.Outbox() {
+			if e.AggregateID == orderID {
+				out = append(out, e.EventType)
+			}
+		}
+		return out
+	})
+}
+
 // runLateCaptureContract needs a store whose window can be passed: setDeadline makes the attempt's UNKNOWN window
 // end in the past.
 func runLateCaptureContract(t *testing.T, store Store, uniq func(string) string, expireWindow func(attemptID string)) {

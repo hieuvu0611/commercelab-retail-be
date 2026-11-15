@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -156,6 +157,11 @@ func (s *PostgresStore) Close(ctx context.Context, attemptID string) (Attempt, C
 // persist writes the new attempt, the order's money totals and a refund obligation inside the caller's transaction.
 func persist(ctx context.Context, tx pgx.Tx, cur, next Attempt, ch Change) error {
 	attemptID := cur.AttemptID
+	for _, e := range EventsFor(cur, next, ch, time.Now().UTC()) {
+		if err := outbox.Insert(ctx, tx, outbox.PaymentsTable, e); err != nil {
+			return dependency.Wrap(err)
+		}
+	}
 	if _, err := tx.Exec(ctx, `UPDATE payments.payment_attempts SET status = $2, captured_amount_vnd = $3, unknown_deadline = $4, outcome_at = $5
 		WHERE attempt_id = $1`, attemptID, next.Status, next.CapturedAmountVND, next.UnknownDeadline, next.OutcomeAt); err != nil {
 		return dependency.Wrap(err)

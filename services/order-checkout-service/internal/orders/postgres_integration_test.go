@@ -36,5 +36,22 @@ func TestPostgresStoreContract(t *testing.T) {
 	})
 	runStoreContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
 	runCaptureContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
+	runOutboxContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq, func(_ Store, orderID string) []string {
+		rows, err := pool.Query(ctx, `SELECT event_type FROM orders.outbox_events WHERE aggregate_id = $1 ORDER BY id`, orderID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var typ string
+			_ = rows.Scan(&typ)
+			out = append(out, typ)
+		}
+		return out
+	})
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM orders.outbox_events WHERE aggregate_id LIKE '%'||$1||'%'`, run)
+	})
 	runQueryContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
 }

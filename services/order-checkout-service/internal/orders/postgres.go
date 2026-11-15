@@ -5,7 +5,9 @@ import (
 	"errors"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -71,7 +73,7 @@ func replay(ctx context.Context, q queryer, userID, key, hash string) (Order, er
 	return loadOrder(ctx, q, orderID)
 }
 
-func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order) (Order, bool, error) {
+func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, ev ...events.DomainEvent) (Order, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Order{}, false, dependency.Wrap(err)
@@ -113,6 +115,11 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order) (
 	for _, it := range o.Items {
 		if _, err := tx.Exec(ctx, `INSERT INTO orders.order_items (order_id, sku_id, sku_name, quantity, unit_price_vnd, line_discount_vnd, allocated_unit_paid_vnd)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)`, o.OrderID, it.SkuID, it.SkuName, it.Quantity, it.UnitPriceVND, it.LineDiscountVND, it.AllocatedUnitPaidVND); err != nil {
+			return Order{}, false, dependency.Wrap(err)
+		}
+	}
+	for _, e := range ev {
+		if err := outbox.Insert(ctx, tx, outbox.OrdersTable, e); err != nil {
 			return Order{}, false, dependency.Wrap(err)
 		}
 	}
@@ -192,8 +199,13 @@ func (s *PostgresStore) RecordCapture(ctx context.Context, orderID string, captu
 	return nil
 }
 
-func (s *PostgresStore) Transition(ctx context.Context, orderID, from, to, paymentStatus, failureCode string) (Order, error) {
-	tag, err := s.pool.Exec(ctx, `UPDATE orders.orders SET status = $3, payment_status = $4, failure_code = $5,
+func (s *PostgresStore) Transition(ctx context.Context, orderID, from, to, paymentStatus, failureCode string, ev ...events.DomainEvent) (Order, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Order{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `UPDATE orders.orders SET status = $3, payment_status = $4, failure_code = $5,
 		version = version + 1, updated_at = $6 WHERE order_id = $1 AND status = $2`,
 		orderID, from, to, paymentStatus, failureCode, time.Now().UTC())
 	if err != nil {
@@ -205,5 +217,14 @@ func (s *PostgresStore) Transition(ctx context.Context, orderID, from, to, payme
 		}
 		return Order{}, ErrStaleState
 	}
-	return loadOrder(ctx, s.pool, orderID)
+	for _, e := range ev {
+		if err := outbox.Insert(ctx, tx, outbox.OrdersTable, e); err != nil {
+			return Order{}, dependency.Wrap(err)
+		}
+	}
+	moved, err := loadOrder(ctx, tx, orderID)
+	if err != nil {
+		return Order{}, err
+	}
+	return moved, dependency.Wrap(tx.Commit(ctx))
 }

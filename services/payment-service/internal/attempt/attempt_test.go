@@ -4,6 +4,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 )
 
 var t0 = time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
@@ -164,6 +166,44 @@ func TestUnknownOutcomeIsRejected(t *testing.T) {
 	}
 	if _, _, err := Apply(fresh(), OutcomeCaptured, 0, t0); !errors.Is(err, ErrInvalidOutcome) {
 		t.Fatalf("zero capture err = %v", err)
+	}
+}
+
+func eventTypes(evs []events.DomainEvent) []string {
+	out := make([]string, len(evs))
+	for i, e := range evs {
+		out[i] = e.EventType
+	}
+	return out
+}
+
+func TestEventsForAnnounceCaptureUnknownAndLateRefund(t *testing.T) {
+	cur := fresh()
+	captured, ch := apply(t, cur, OutcomeCaptured, 660000, t0)
+	evs := EventsFor(cur, captured, ch, t0)
+	if len(evs) != 1 || evs[0].EventType != events.EventPaymentCaptured || evs[0].AggregateID != "O-1" ||
+		evs[0].Payload["amountVnd"] != int64(660000) || evs[0].Payload["expectedAmountVnd"] != int64(660000) || evs[0].Payload["late"] != false {
+		t.Fatalf("captured events = %+v", evs)
+	}
+
+	unknown, ch := apply(t, cur, OutcomeUnknown, 0, t0.Add(time.Minute))
+	evs = EventsFor(cur, unknown, ch, t0)
+	if got := eventTypes(evs); len(got) != 1 || got[0] != events.EventPaymentUnknown30m || evs[0].Payload["unknownDeadline"] != "2026-11-15T10:31:00Z" {
+		t.Fatalf("unknown events = %+v", evs)
+	}
+	again, ch := apply(t, unknown, OutcomeUnknown, 0, t0.Add(5*time.Minute))
+	if evs := EventsFor(unknown, again, ch, t0); len(evs) != 0 {
+		t.Fatalf("a repeated unknown must announce nothing: %+v", evs)
+	}
+
+	closed, _, _ := Close(unknown, t0.Add(time.Hour))
+	late, ch := apply(t, closed, OutcomeCaptured, 660000, t0.Add(2*time.Hour))
+	if got := eventTypes(EventsFor(closed, late, ch, t0)); len(got) != 2 || got[0] != events.EventPaymentCaptured || got[1] != events.EventPaymentLateRefundNeed {
+		t.Fatalf("late events = %v", got)
+	}
+	failed, ch := apply(t, cur, OutcomeFailed, 0, t0)
+	if evs := EventsFor(cur, failed, ch, t0); len(evs) != 0 {
+		t.Fatalf("a failure announces nothing here: %+v", evs)
 	}
 }
 

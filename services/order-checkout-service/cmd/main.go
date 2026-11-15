@@ -13,6 +13,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
@@ -100,6 +101,11 @@ func main() {
 		log.Fatalf("[order-checkout-service] ORDER_SWEEP_INTERVAL must be a duration of at least 1s: %v", err)
 	}
 	go checkoutSvc.RunSweeper(ctx, sweepEvery)
+	if pool != nil {
+		if err := outbox.Start(ctx, "order-checkout-service", pool, outbox.OrdersTable); err != nil {
+			log.Fatalf("[order-checkout-service] %v", err)
+		}
+	}
 
 	log.Printf("[order-checkout-service] listening on :%s (schema: orders, mongo: order_commercial_snapshots)", port)
 	log.Fatal(http.ListenAndServe(":"+port, NewServer(checkoutSvc, voucher.NewService(store), voucher.NewAdmin(store))))

@@ -132,7 +132,8 @@ func (s *Service) step(ctx context.Context, o orders.Order, ev saga.Event) (orde
 	if res.State == from && payStatus == o.PaymentStatus {
 		return o, nil
 	}
-	moved, err := s.Orders.Transition(ctx, o.OrderID, string(from), string(res.State), payStatus, failure)
+	moved, err := s.Orders.Transition(ctx, o.OrderID, string(from), string(res.State), payStatus, failure,
+		s.eventsFor(o, res, from, payStatus, failure, ev)...)
 	if err != nil {
 		return o, err
 	}
@@ -219,7 +220,8 @@ func (s *Service) closeLost(ctx context.Context, o orders.Order, from saga.State
 	if err := s.Payments.CloseAttempt(ctx, ids.PaymentAttemptID(o.OrderID)); err != nil {
 		return o, err
 	}
-	return s.Orders.Transition(ctx, o.OrderID, string(from), string(saga.StateFailedClosed), PayRefundPending, FailureStockLost)
+	return s.Orders.Transition(ctx, o.OrderID, string(from), string(saga.StateFailedClosed), PayRefundPending, FailureStockLost,
+		s.orderFailed(o, FailureStockLost, PayRefundPending))
 }
 
 // recordCapture stores the captured and refundable amounts the report carries.

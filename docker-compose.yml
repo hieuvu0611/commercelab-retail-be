@@ -168,12 +168,19 @@ services:
       - --reserve-memory 0M
       - --overprovisioned
       - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
-      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      # The external listener is advertised on the published host port so clients outside Compose can follow it.
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:${REDPANDA_KAFKA_HOST_PORT:-19092}
     ports:
       - "${REDPANDA_KAFKA_HOST_PORT:-19092}:19092"
       - "${REDPANDA_ADMIN_HOST_PORT:-9644}:9644"
     volumes:
       - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info --brokers localhost:9092 > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
   # ============================================================================
   # 2. TẦNG 10 MICROSERVICES (Mỗi service <= 250MB RAM & <= 0.25 CPU)
@@ -291,6 +298,7 @@ services:
       CATALOG_SERVICE_URL: http://catalog-pricing-service:8081
       INVENTORY_SERVICE_URL: http://inventory-warehouse-service:8082
       PAYMENT_SERVICE_URL: http://payment-service:8084
+      REDPANDA_BROKERS: redpanda:9092
       DATABASE_URL_ORDERS: postgres://order_svc_user:order_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=orders
       MIGRATE_ON_START: "true"
     depends_on: *infra-healthy
@@ -312,6 +320,7 @@ services:
       <<: [*go-env, *jwt-env, *internal-env]
       PAYMENT_PORT: 8084
       ORDER_SERVICE_URL: http://order-checkout-service:8083
+      REDPANDA_BROKERS: redpanda:9092
       DATABASE_URL_PAYMENTS: postgres://payment_svc_user:payment_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=payments
       MIGRATE_ON_START: "true"
       PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-}

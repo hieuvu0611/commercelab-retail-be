@@ -7,6 +7,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 )
 
 func sampleOrder(id, user, quote string) Order {
@@ -188,6 +191,52 @@ func runQueryContract(t *testing.T, newStore func(t *testing.T) Store, uniq func
 	if before, _, _ := s.Query(ctx, Filter{UserID: user, UpdatedBefore: time.Now().Add(-time.Hour)}); len(before) != 0 {
 		t.Fatalf("updated before an hour ago = %d", len(before))
 	}
+}
+
+func runOutboxContract(t *testing.T, newStore func(t *testing.T) Store, uniq func(string) string, eventTypes func(s Store, orderID string) []string) {
+	ctx := context.Background()
+	s := newStore(t)
+	user := uniq("u")
+	id := uniq("O")
+	ev := func(typ string) events.DomainEvent {
+		return outbox.NewEvent(typ, "Order", id, time.Now(), map[string]any{"orderId": id})
+	}
+	key := uniq("k")
+
+	o, _, err := s.Create(ctx, key, HashIntent(user, "Q-1"), sampleOrder(id, user, "Q-1"), ev("order.created.v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, replayed, _ := s.Create(ctx, key, HashIntent(user, "Q-1"), sampleOrder(uniq("O"), user, "Q-1"), ev("order.created.v1")); !replayed {
+		t.Fatal("expected a replay")
+	}
+	if got := eventTypes(s, o.OrderID); fmt.Sprint(got) != "[order.created.v1]" {
+		t.Fatalf("after create and replay: %v, want one created event", got)
+	}
+	if _, err := s.Transition(ctx, id, StatusPending, "FAILED_CLOSED", "UNPAID", "OUT_OF_STOCK", ev("order.failed.v1")); err != nil {
+		t.Fatal(err)
+	}
+	// A refused transition writes nothing.
+	if _, err := s.Transition(ctx, id, StatusPending, "RESERVED", "PROCESSING", "", ev("order.confirmed.v1")); !errors.Is(err, ErrStaleState) {
+		t.Fatalf("stale transition = %v", err)
+	}
+	if got := eventTypes(s, id); fmt.Sprint(got) != "[order.created.v1 order.failed.v1]" {
+		t.Fatalf("events = %v", got)
+	}
+}
+
+func TestMemoryStoreOutbox(t *testing.T) {
+	var n int
+	runOutboxContract(t, func(*testing.T) Store { return NewMemoryStore() }, func(p string) string { n++; return fmt.Sprintf("%s-%d", p, n) },
+		func(s Store, orderID string) []string {
+			var out []string
+			for _, e := range s.(*MemoryStore).Outbox() {
+				if e.AggregateID == orderID {
+					out = append(out, e.EventType)
+				}
+			}
+			return out
+		})
 }
 
 func TestMemoryStoreQuery(t *testing.T) {
