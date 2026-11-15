@@ -15,6 +15,7 @@ import (
 
 var (
 	ErrReservationNotFound = errors.New("không tìm thấy phiên giữ tồn kho của đơn hàng")
+	ErrWarehouseRequired   = errors.New("warehouseId is required to reserve stock")
 )
 
 type ReservationRecord struct {
@@ -37,6 +38,7 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 	engine := domain.NewLedgerEngine([]domain.StockItem{
 		{SkuID: "SKU-BALO-BLACK-20L", WarehouseID: "WH-HCM-01", OnHand: 10, Unsellable: 0, Reserved: 0, Committed: 0, Version: 1},
 		{SkuID: "SKU-BOTTLE-BLUE-500ML", WarehouseID: "WH-HCM-01", OnHand: 20, Unsellable: 0, Reserved: 0, Committed: 0, Version: 1},
+		{SkuID: "SKU-BALO-BLACK-20L", WarehouseID: "WH-HN-01", OnHand: 5, Unsellable: 0, Reserved: 0, Committed: 0, Version: 1},
 	})
 	return &InventoryRepository{
 		pool:         pool,
@@ -47,7 +49,7 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 
 func (r *InventoryRepository) GetStock(ctx context.Context, warehouseID, skuID string) (domain.StockItem, bool, error) {
 	if warehouseID == "" {
-		warehouseID = "WH-HCM-01"
+		warehouseID = domain.DefaultWarehouseID
 	}
 	if r.pool != nil {
 		var st domain.StockItem
@@ -64,13 +66,17 @@ func (r *InventoryRepository) GetStock(ctx context.Context, warehouseID, skuID s
 		}
 		return domain.StockItem{}, false, dependency.Wrap(err)
 	}
-	st, ok := r.engine.GetStock(skuID)
+	st, ok := r.engine.GetStock(warehouseID, skuID)
 	return st, ok, nil
 }
 
 func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, warehouseID string, lines []domain.ReserveLine) (*ReservationRecord, error) {
 	if warehouseID == "" {
-		warehouseID = "WH-HCM-01"
+		return nil, ErrWarehouseRequired
+	}
+	lines, err := domain.NormalizeLines(lines)
+	if err != nil {
+		return nil, err
 	}
 	expiresAt := time.Now().UTC().Add(10 * time.Minute)
 	linesJSON, _ := json.Marshal(lines)
@@ -97,10 +103,8 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 				return nil, dependency.Wrap(err)
 			}
 
+			// lines are sorted by SKU id: every transaction locks rows in the same order, so none can deadlock.
 			for _, line := range lines {
-				if line.Quantity <= 0 {
-					return nil, domain.ErrInsufficientStock
-				}
 				var onHand, unsellable, reserved, committed int64
 				err := tx.QueryRow(ctx, `
 					SELECT on_hand, unsellable, reserved, committed
@@ -158,7 +162,7 @@ func (r *InventoryRepository) ReserveForOrder(ctx context.Context, orderID, ware
 		cp := *existing
 		return &cp, nil
 	}
-	if err := r.engine.ReserveAllOrNothing(lines); err != nil {
+	if err := r.engine.ReserveAllOrNothing(warehouseID, lines); err != nil {
 		return nil, err
 	}
 	rec := &ReservationRecord{
@@ -234,7 +238,7 @@ func (r *InventoryRepository) CommitOrderReservation(ctx context.Context, orderI
 		cp := *rec
 		return &cp, nil
 	}
-	if err := r.engine.CommitReservation(rec.Lines); err != nil {
+	if err := r.engine.CommitReservation(rec.WarehouseID, rec.Lines); err != nil {
 		return nil, err
 	}
 	rec.Status = "COMMITTED"
@@ -306,7 +310,7 @@ func (r *InventoryRepository) ReleaseOrderReservation(ctx context.Context, order
 		return nil, domain.ErrInvalidReservationState
 	}
 	// Nhả Reserved bằng cách trừ lại từ r.engine
-	if err := r.engine.ReleaseReservation(rec.Lines); err != nil {
+	if err := r.engine.ReleaseReservation(rec.WarehouseID, rec.Lines); err != nil {
 		return nil, err
 	}
 	rec.Status = "RELEASED"
@@ -398,7 +402,7 @@ func (r *InventoryRepository) HandoverOrderShipment(ctx context.Context, orderID
 	if rec.Status != "COMMITTED" {
 		return nil, domain.ErrInvalidReservationState
 	}
-	if err := r.engine.HandoverShipment(rec.Lines); err != nil {
+	if err := r.engine.HandoverShipment(rec.WarehouseID, rec.Lines); err != nil {
 		return nil, err
 	}
 	rec.Status = "HANDED_OVER"

@@ -107,7 +107,7 @@ func TestStoreOutageAnswers503InsteadOfSeededStock(t *testing.T) {
 	}{
 		{name: "stock lookup", method: http.MethodGet, path: "/api/v1/inventory/SKU-BALO-BLACK-20L"},
 		{name: "reserve", method: http.MethodPost, path: "/api/v1/inventory/reservations",
-			body: `{"orderId":"O-1","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`},
+			body: `{"orderId":"O-1","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`},
 		{name: "commit", method: http.MethodPost, path: "/api/v1/inventory/reservations/O-1/commit"},
 		{name: "release", method: http.MethodPost, path: "/api/v1/inventory/reservations/O-1/release"},
 		{name: "handover", method: http.MethodPost, path: "/api/v1/inventory/shipments/handover", body: `{"orderId":"O-1"}`},
@@ -236,5 +236,33 @@ func TestInventoryLoadConfigRequiresJWTSecrets(t *testing.T) {
 	t.Cleanup(auth.Reset)
 	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "JWT_ACCESS_SECRET is required") {
 		t.Fatalf("err = %v, want a missing JWT secret error", err)
+	}
+}
+
+func TestReserveRejectsMissingWarehouseAndBadLines(t *testing.T) {
+	authtest.Configure(t)
+	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	for name, body := range map[string]string{
+		"no warehouse":  `{"orderId":"O-W","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`,
+		"no lines":      `{"orderId":"O-W","warehouseId":"WH-HCM-01","lines":[]}`,
+		"zero quantity": `{"orderId":"O-W","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":0}]}`,
+	} {
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/inventory/reservations", strings.NewReader(body)))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "INVALID_PAYLOAD") {
+			t.Errorf("%s: %d %s; want 400 INVALID_PAYLOAD", name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestDuplicateSkuLinesAreSummedBeforeTheStockCheck(t *testing.T) {
+	authtest.Configure(t)
+	srv := NewServer(repository.NewInventoryRepository(nil), false)
+	// HN holds 5 units of the backpack: 3 + 3 must be refused as 6, not accepted line by line.
+	body := `{"orderId":"O-DUP","warehouseId":"WH-HN-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":3},{"skuId":"SKU-BALO-BLACK-20L","quantity":3}]}`
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/inventory/reservations", strings.NewReader(body)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d %s; want 409", rec.Code, rec.Body.String())
 	}
 }

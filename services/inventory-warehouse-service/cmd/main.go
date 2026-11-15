@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 
@@ -34,7 +35,7 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 		skuID := r.PathValue("skuId")
 		warehouseID := r.URL.Query().Get("warehouseId")
 		if warehouseID == "" {
-			warehouseID = "WH-HCM-01"
+			warehouseID = domain.DefaultWarehouseID
 		}
 		st, ok, err := repo.GetStock(r.Context(), warehouseID, skuID)
 		if dependency.IsUnavailable(err) {
@@ -72,6 +73,10 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool) http.Hand
 		rec, err := repo.ReserveForOrder(r.Context(), req.OrderID, req.WarehouseID, req.Lines)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if errors.Is(err, repository.ErrWarehouseRequired) || errors.Is(err, domain.ErrInvalidLines) {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", err.Error(), nil)
 			return
 		}
 		if err != nil {

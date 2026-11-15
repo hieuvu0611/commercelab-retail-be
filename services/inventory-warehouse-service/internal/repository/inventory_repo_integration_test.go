@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -119,5 +120,38 @@ func TestReserveHoldsEveryLineAndIsIdempotentAgainstPostgres(t *testing.T) {
 	}
 	if got := stockOf(t, repo, first); got.Reserved != 0 || got.Available() != 10 {
 		t.Fatalf("release did not return stock: %+v", got)
+	}
+}
+
+// Two orders that list the same SKUs in opposite order must both finish: rows are locked in sorted SKU order.
+func TestOppositeLineOrdersDoNotDeadlockAgainstPostgres(t *testing.T) {
+	pool := integrationPool(t)
+	repo := NewInventoryRepository(pool)
+
+	a, b := seedStock(t, pool, 1000), seedStock(t, pool, 1000)
+	const workers = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			lines := []domain.ReserveLine{{SkuID: a, Quantity: 1}, {SkuID: b, Quantity: 1}}
+			if i%2 == 1 {
+				lines = []domain.ReserveLine{{SkuID: b, Quantity: 1}, {SkuID: a, Quantity: 1}}
+			}
+			_, err := repo.ReserveForOrder(context.Background(), fmt.Sprintf("IT-DL-%d-%d", time.Now().UnixNano(), i), testWarehouse, lines)
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent reservation failed: %v", err)
+		}
+	}
+	if got := stockOf(t, repo, a); got.Reserved != workers {
+		t.Fatalf("reserved = %d, want %d", got.Reserved, workers)
 	}
 }
