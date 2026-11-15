@@ -159,7 +159,7 @@ func (s *Service) reconcileVouchers(ctx context.Context, now time.Time) int {
 				continue
 			}
 			released++
-		case err == nil && o.Status == string(saga.StateConfirmed):
+		case err == nil && saga.State(o.Status).IsPaid():
 			if err := s.Vouchers.Consume(ctx, u.Code, u.OrderID); err != nil {
 				log.Printf("[order] sweep: voucher consume for order %s failed: %s", u.OrderID, redact(err))
 			}

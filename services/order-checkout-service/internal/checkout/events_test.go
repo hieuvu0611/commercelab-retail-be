@@ -50,7 +50,7 @@ func TestConfirmationEmitsOrderConfirmedOnce(t *testing.T) {
 		t.Fatalf("events = %s", types(evs))
 	}
 	items, ok := evs[1].Payload["items"].([]map[string]any)
-	if !ok || len(items) != 2 || items[0]["skuId"] != "SKU-BALO-BLACK-20L" || items[0]["quantity"] != int64(2) || evs[1].Payload["capturedAmountVnd"] != int64(660000) {
+	if !ok || len(items) != 2 || items[0]["skuId"] != "SKU-BALO-BLACK-20L" || items[0]["quantity"] != int64(2) || evs[1].Payload["capturedAmountVnd"] != int64(660000) || evs[1].Payload["warehouseId"] != o.WarehouseID || o.WarehouseID == "" {
 		t.Fatalf("payload = %+v", evs[1].Payload)
 	}
 }
@@ -93,7 +93,7 @@ func TestEventsCarryNoPersonalData(t *testing.T) {
 	f := newFixture()
 	o := placed(t, f)
 	f.apply(t, o, "CAPTURED", 660000)
-	allowed := map[string]bool{"orderId": true, "userId": true, "totalPayableVnd": true, "capturedAmountVnd": true, "items": true,
+	allowed := map[string]bool{"orderId": true, "userId": true, "totalPayableVnd": true, "capturedAmountVnd": true, "items": true, "warehouseId": true,
 		"failureCode": true, "paymentStatus": true, "reason": true}
 	for _, e := range emitted(f) {
 		for k := range e.Payload {

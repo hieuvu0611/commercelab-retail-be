@@ -87,7 +87,7 @@ func paymentEvents(o orders.Order, r PaymentReport) ([]saga.Event, error) {
 	case payFailed:
 		return []saga.Event{saga.PaymentFailed{}}, nil
 	case payUnknown:
-		if o.Status == string(saga.StateConfirmed) || o.Status == string(saga.StateFailedClosed) {
+		if saga.State(o.Status).IsPaid() || o.Status == string(saga.StateFailedClosed) {
 			return nil, nil // a late "unknown" says nothing new about an order that is already decided
 		}
 		return []saga.Event{saga.PaymentUnknown{}}, nil

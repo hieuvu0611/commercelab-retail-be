@@ -50,7 +50,8 @@ func TestPlaceOrderOnPostgresSC04AndSC10(t *testing.T) {
 	quotes.quote.VoucherCode = code
 	stock, payments := &fakeStock{}, &fakePayments{}
 	svc := New(Deps{Orders: orders.NewPostgresStore(pool), Quotes: quotes, Stock: stock, Payments: payments, Vouchers: vouchers,
-		Addresses: &fakeAddresses{}, Snapshots: snapshot.NewMemoryStore(), WarehouseID: "WH-HCM-01"})
+		Addresses: &fakeAddresses{}, Snapshots: snapshot.NewMemoryStore(), WarehouseID: "WH-HCM-01"}).
+		WithClock(func() time.Time { return now }) // the fake quote expires relative to the fixed test clock
 
 	// SC04: twenty concurrent clicks with one key make one order and one reservation of everything.
 	a := Principal{UserID: userA, Bearer: "tok"}

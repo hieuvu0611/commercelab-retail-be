@@ -26,7 +26,7 @@ func (s *Service) orderConfirmed(o orders.Order, capturedVND int64) events.Domai
 		items[i] = map[string]any{"skuId": it.SkuID, "quantity": it.Quantity}
 	}
 	return s.orderEvent(events.EventOrderConfirmed, o, map[string]any{
-		"totalPayableVnd": o.TotalPayableVND, "capturedAmountVnd": capturedVND, "items": items,
+		"totalPayableVnd": o.TotalPayableVND, "capturedAmountVnd": capturedVND, "items": items, "warehouseId": o.WarehouseID,
 	})
 }
 
