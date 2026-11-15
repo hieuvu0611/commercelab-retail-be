@@ -294,3 +294,88 @@ func TestListAttributeFilterAcceptsSeveralValuesForOneAxis(t *testing.T) {
 		t.Fatalf("black or navy: %v", slugs(got))
 	}
 }
+
+type fakeStock struct {
+	states map[string]string
+	err    error
+	delay  time.Duration
+	calls  int
+}
+
+func (f *fakeStock) States(ctx context.Context, skuIDs []string) (map[string]string, error) {
+	f.calls++
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return f.states, f.err
+}
+
+func TestProductAvailabilitySummarisesItsSKUs(t *testing.T) {
+	for name, tc := range map[string]struct {
+		states []string
+		want   string
+	}{
+		"any in stock wins":      {[]string{"OUT", "LOW", "IN_STOCK"}, "IN_STOCK"},
+		"low beats out":          {[]string{"OUT", "LOW"}, "LOW"},
+		"all out":                {[]string{"OUT", "OUT"}, "OUT"},
+		"unknown is not out":     {[]string{"OUT", "unknown"}, "unknown"},
+		"low beats unknown":      {[]string{"unknown", "LOW"}, "LOW"},
+		"no skus":                {nil, "unknown"},
+		"in stock beats unknown": {[]string{"unknown", "IN_STOCK"}, "IN_STOCK"},
+	} {
+		if got := ProductAvailability(tc.states); got != tc.want {
+			t.Errorf("%s: %s, want %s", name, got, tc.want)
+		}
+	}
+}
+
+func TestListAndDetailCarryAvailabilityFromInventoryWithOneBatchCall(t *testing.T) {
+	s := newStorefrontEnv(t)
+	s.publish(t, "city-pack", "City Pack", "city", skuSpec{"A", "Black", "20 L", 300000}, skuSpec{"B", "Red", "20 L", 310000})
+	s.publish(t, "flask", "Flask", "bottles", skuSpec{"C", "Blue", "500 ml", 100000})
+	s.publish(t, "tumbler", "Tumbler", "bottles", skuSpec{"D", "Blue", "350 ml", 90000})
+	stock := &fakeStock{states: map[string]string{"A": "OUT", "B": "LOW", "C": "OUT"}} // D has no answer
+	s.front.WithAvailability(stock)
+
+	page := s.list(t, StorefrontQuery{})
+	got := map[string]string{}
+	for _, it := range page.Items {
+		got[it.Slug] = it.Availability
+	}
+	if got["city-pack"] != "LOW" || got["flask"] != "OUT" || got["tumbler"] != "unknown" || stock.calls != 1 {
+		t.Fatalf("list availability = %v after %d call(s); want city-pack LOW, flask OUT, tumbler unknown in one call", got, stock.calls)
+	}
+
+	d, err := s.front.Detail(context.Background(), "city-pack")
+	if err != nil || d.Availability != "LOW" || d.SKUs[0].Availability != "OUT" || d.SKUs[1].Availability != "LOW" {
+		t.Fatalf("detail = %+v, err %v", d, err)
+	}
+}
+
+func TestInventoryFailureOrTimeoutNeverFailsThePage(t *testing.T) {
+	s := newStorefrontEnv(t)
+	s.publish(t, "city-pack", "City Pack", "city", skuSpec{"A", "Black", "20 L", 300000})
+	for name, stock := range map[string]*fakeStock{
+		"error":   {err: errors.New("inventory is down")},
+		"timeout": {delay: 5 * time.Second},
+		"empty":   {states: map[string]string{}},
+	} {
+		s.front.WithAvailability(stock)
+		start := time.Now()
+		page, err := s.front.List(context.Background(), StorefrontQuery{})
+		if err != nil || len(page.Items) != 1 || page.Items[0].Availability != "unknown" {
+			t.Errorf("%s: list = %+v, err %v; want the item with availability unknown", name, page.Items, err)
+		}
+		d, err := s.front.Detail(context.Background(), "city-pack")
+		if err != nil || d.Availability != "unknown" || d.SKUs[0].Availability != "unknown" {
+			t.Errorf("%s: detail = %+v, err %v", name, d, err)
+		}
+		if time.Since(start) > 3*AvailabilityTimeout {
+			t.Errorf("%s: took %v, the inventory call must be bounded by %v", name, time.Since(start), AvailabilityTimeout)
+		}
+	}
+}
