@@ -141,6 +141,23 @@ func capture(a Attempt, status string, amountVND int64, now time.Time) Attempt {
 	return a
 }
 
+// Close ends an attempt because its order is closed (released, timed out or never confirmed). An attempt that
+// holds no money becomes EXPIRED_30M, so a capture that still arrives is CAPTURED_LATE and refunded. An attempt
+// that already captured money is CAPTURED_LATE with the whole amount owed back. Finished attempts are a replay.
+func Close(a Attempt, now time.Time) (Attempt, Change, error) {
+	switch a.Status {
+	case StatusProcessing, StatusUnknown:
+		a.Status, a.OutcomeAt = StatusExpired30m, &now
+		return a, Change{}, nil
+	case StatusCaptured:
+		a.Status = StatusCapturedLate
+		return a, Change{LateRefundVND: a.CapturedAmountVND}, nil
+	case StatusCapturedLate, StatusFailed, StatusExpired30m:
+		return a, Change{Replay: true}, nil
+	}
+	return a, Change{}, ErrInvalidOutcome
+}
+
 // Expire marks an UNKNOWN attempt whose window has ended. It reports false for any other attempt.
 func Expire(a Attempt, now time.Time) (Attempt, bool) {
 	if a.Status != StatusUnknown || a.UnknownDeadline == nil || !now.After(*a.UnknownDeadline) {
