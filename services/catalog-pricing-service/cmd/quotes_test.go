@@ -259,3 +259,60 @@ func TestQuotesAreOwnedByTheirCustomerAndReportExpiry(t *testing.T) {
 		t.Fatalf("expired quote: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// shiftPricer wraps the real pricer and lets a test change what the catalog says today.
+type shiftPricer struct {
+	cart.Pricer
+	price  map[string]int64
+	closed map[string]bool
+}
+
+func (p *shiftPricer) GetSkuPrice(ctx context.Context, skuID string) (repository.SkuPrice, error) {
+	if p.closed[skuID] {
+		return repository.SkuPrice{}, repository.ErrSkuNotOrderable
+	}
+	sp, err := p.Pricer.GetSkuPrice(ctx, skuID)
+	if v, ok := p.price[skuID]; ok && err == nil {
+		sp.UnitPriceVND = v
+	}
+	return sp, err
+}
+
+func TestQuoteReportsStaleWhenPriceOrOrderabilityChanged(t *testing.T) {
+	authtest.Configure(t)
+	repo := repository.NewCatalogPricingRepository(nil, nil)
+	pricer := &shiftPricer{Pricer: repo, price: map[string]int64{}, closed: map[string]bool{}}
+	carts := cart.NewMemoryStore()
+	srv := NewServerWithDeps(repo, false, false, Deps{Carts: carts, Pricer: pricer,
+		Addresses: &fakeAddresses{owned: map[string][]string{"lan": {"addr-lan"}}}})
+	if err := carts.SetMany(context.Background(), "lan", map[string]int64{skuBackpack: 2, skuBottle: 1}); err != nil {
+		t.Fatal(err)
+	}
+	rec := cartDo(srv, http.MethodPost, "/api/v1/quotes", cartToken(t, "lan"), `{"addressId":"addr-lan"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body)
+	}
+	id := decode[quoteResp](t, rec).Data.QuoteID
+	read := func() (bool, []string) {
+		got := decode[struct {
+			Data struct {
+				IsStale     bool     `json:"isStale"`
+				StaleSkuIDs []string `json:"staleSkuIds"`
+			} `json:"data"`
+		}](t, cartDo(srv, http.MethodGet, "/api/v1/quotes/"+id, cartToken(t, "lan"), ""))
+		return got.Data.IsStale, got.Data.StaleSkuIDs
+	}
+
+	if stale, _ := read(); stale {
+		t.Fatal("a quote with unchanged prices must not be stale")
+	}
+	pricer.price[skuBackpack] = 310000
+	if stale, ids := read(); !stale || len(ids) != 1 || ids[0] != skuBackpack {
+		t.Fatalf("price change: stale=%v ids=%v", stale, ids)
+	}
+	delete(pricer.price, skuBackpack)
+	pricer.closed[skuBottle] = true
+	if stale, ids := read(); !stale || len(ids) != 1 || ids[0] != skuBottle {
+		t.Fatalf("unpublished SKU: stale=%v ids=%v", stale, ids)
+	}
+}

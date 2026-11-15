@@ -262,14 +262,15 @@ func TestQuoteProblemsCreateNoOrder(t *testing.T) {
 		mutate func(*fixture)
 		want   error
 	}{
-		"not found":   {func(f *fixture) { f.quotes.err = ErrQuoteNotFound }, ErrQuoteNotFound},
-		"expired":     {func(f *fixture) { f.quotes.quote.ExpiresAt = now }, ErrQuoteExpired},
-		"other owner": {func(f *fixture) { f.quotes.quote.UserID = "user-minh" }, ErrQuoteNotFound},
-		"bad total":   {func(f *fixture) { f.quotes.quote.TotalPayableVND = 650000 }, ErrQuoteInvalid},
-		"no lines":    {func(f *fixture) { f.quotes.quote.Lines = nil }, ErrQuoteInvalid},
-		"zero qty":    {func(f *fixture) { f.quotes.quote.Lines[0].Quantity = 0 }, ErrQuoteInvalid},
-		"no address":  {func(f *fixture) { f.quotes.quote.AddressID = "" }, ErrQuoteInvalid},
-		"free order":  {func(f *fixture) { f.quotes.quote.TotalPayableVND, f.quotes.quote.ShippingFeeVND = 0, -630000 }, ErrQuoteInvalid},
+		"price changed": {func(f *fixture) { f.quotes.quote.Stale = true }, ErrQuoteChanged},
+		"not found":     {func(f *fixture) { f.quotes.err = ErrQuoteNotFound }, ErrQuoteNotFound},
+		"expired":       {func(f *fixture) { f.quotes.quote.ExpiresAt = now }, ErrQuoteExpired},
+		"other owner":   {func(f *fixture) { f.quotes.quote.UserID = "user-minh" }, ErrQuoteNotFound},
+		"bad total":     {func(f *fixture) { f.quotes.quote.TotalPayableVND = 650000 }, ErrQuoteInvalid},
+		"no lines":      {func(f *fixture) { f.quotes.quote.Lines = nil }, ErrQuoteInvalid},
+		"zero qty":      {func(f *fixture) { f.quotes.quote.Lines[0].Quantity = 0 }, ErrQuoteInvalid},
+		"no address":    {func(f *fixture) { f.quotes.quote.AddressID = "" }, ErrQuoteInvalid},
+		"free order":    {func(f *fixture) { f.quotes.quote.TotalPayableVND, f.quotes.quote.ShippingFeeVND = 0, -630000 }, ErrQuoteInvalid},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

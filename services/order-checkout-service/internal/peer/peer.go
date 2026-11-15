@@ -29,7 +29,8 @@ type Quotes struct {
 func NewQuotes(catalogURL string, c *svcclient.Client) *Quotes { return &Quotes{trim(catalogURL), c} }
 
 type quoteView struct {
-	Quote struct {
+	IsStale bool `json:"isStale"`
+	Quote   struct {
 		QuoteID         string    `json:"quoteId"`
 		UserID          string    `json:"userId"`
 		AddressID       string    `json:"addressId"`
@@ -64,7 +65,7 @@ func (q *Quotes) Get(ctx context.Context, bearer, quoteID string) (checkout.Quot
 	out := checkout.Quote{
 		ID: src.QuoteID, UserID: src.UserID, AddressID: src.AddressID, VoucherCode: src.VoucherCode,
 		SubtotalVND: src.SubtotalVND, DiscountVND: src.DiscountVND, ShippingFeeVND: src.ShippingFeeVND, TotalPayableVND: src.TotalPayableVND,
-		ExpiresAt: src.ExpiresAt,
+		ExpiresAt: src.ExpiresAt, Stale: view.IsStale,
 	}
 	for _, l := range src.Lines {
 		out.Lines = append(out.Lines, checkout.QuoteLine{SkuID: l.SkuID, SkuName: l.SkuName, Quantity: l.Quantity, UnitPriceVND: l.UnitPriceVND,
