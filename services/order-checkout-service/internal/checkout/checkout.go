@@ -36,7 +36,7 @@ const (
 
 // PayRefundPending is the payment status of an order that is closed while the customer's money is held: it is
 // owed back (SC05).
-const PayRefundPending = "REFUND_PENDING"
+const PayRefundPending = saga.PayRefundPending
 
 var (
 	// ErrQuoteNotFound: the quote does not exist or belongs to someone else.
@@ -94,6 +94,9 @@ type Stock interface {
 	Commit(ctx context.Context, orderID string) error
 	// ExceptionHold extends the reservation to the 30-minute exception hold; ErrReservationLost when it is gone.
 	ExceptionHold(ctx context.Context, orderID string) error
+	// ReleaseCommitted gives committed (paid, not handed over) stock back to available. Idempotent;
+	// ErrStockHandedOver when the stock already left the warehouse.
+	ReleaseCommitted(ctx context.Context, orderID string) error
 }
 
 // PaymentState is the payment service's view of an order's attempt.
@@ -134,6 +137,7 @@ type Deps struct {
 	Carts       Carts // optional
 	Addresses   Addresses
 	Snapshots   snapshot.Store
+	Fulfillment Fulfillment // asked to stop the parcel of a paid order that is cancelled (B05)
 	WarehouseID string
 }
 

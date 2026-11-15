@@ -112,6 +112,7 @@ func main() {
 		Vouchers:    store,
 		Addresses:   peer.NewAddresses(config.EnvOrDefault("IAM_SERVICE_URL", "http://localhost:8087"), peers),
 		Snapshots:   snapshots,
+		Fulfillment: peer.NewFulfillment(config.EnvOrDefault("FULFILLMENT_SERVICE_URL", "http://localhost:8085"), peers),
 		Carts:       peer.NewCarts(config.EnvOrDefault("CATALOG_SERVICE_URL", "http://localhost:8081"), peers),
 		WarehouseID: config.EnvOrDefault("ORDER_WAREHOUSE_ID", defaultWarehouseID),
 	})

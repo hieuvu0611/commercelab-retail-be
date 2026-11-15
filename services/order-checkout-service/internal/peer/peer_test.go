@@ -240,3 +240,58 @@ func TestAddressesReadsTheAddressWithTheCallersTokenAndMapsMissing(t *testing.T)
 		t.Fatalf("missing = %v", err)
 	}
 }
+
+func TestStockReleaseCommittedIsInternalAndDoesNotSwallowARefusal(t *testing.T) {
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("0123456789abcdef0123456789abcdef")
+	var path, token string
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, token = r.URL.Path, r.Header.Get(internalauth.Header)
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"message":"refused","code":"RELEASE_COMMITTED_FAILED","status":409,"data":{}}`))
+	}))
+	defer srv.Close()
+	stock := NewStock(srv.URL, client())
+	if err := stock.ReleaseCommitted(context.Background(), "O-1"); err != nil || path != "/api/v1/inventory/reservations/O-1/release-committed" || token == "" {
+		t.Fatalf("err=%v path=%s token=%q", err, path, token)
+	}
+	status = http.StatusConflict
+	if err := stock.ReleaseCommitted(context.Background(), "O-1"); !errors.Is(err, checkout.ErrStockHandedOver) {
+		t.Fatalf("409 = %v, want ErrStockHandedOver", err)
+	}
+	status = http.StatusInternalServerError
+	if err := stock.ReleaseCommitted(context.Background(), "O-1"); !dependency.IsUnavailable(err) {
+		t.Fatalf("500 = %v", err)
+	}
+}
+
+func TestFulfillmentStopShipmentSendsTheOrderAndMapsTheResult(t *testing.T) {
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("0123456789abcdef0123456789abcdef")
+	var body map[string]any
+	var path string
+	result := "STOPPED"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"data":{"result":"` + result + `"}}`))
+	}))
+	defer srv.Close()
+	f := NewFulfillment(srv.URL, client())
+	req := checkout.StopRequest{OrderID: "O-1", UserID: "user-lan", WarehouseID: "WH-HCM-01", Lines: []checkout.StockLine{{SkuID: "SKU-A", Quantity: 2}}}
+	got, err := f.StopShipment(context.Background(), req)
+	if err != nil || got != checkout.StopStopped || path != "/api/v1/shipments/internal/orders/O-1/stop" || body["warehouseId"] != "WH-HCM-01" || body["userId"] != "user-lan" {
+		t.Fatalf("got=%q err=%v path=%s body=%v", got, err, path, body)
+	}
+	for _, r := range []string{"TOO_LATE", "IN_PROGRESS", "STOP_REQUESTED"} {
+		result = r
+		if got, err := f.StopShipment(context.Background(), req); err != nil || string(got) != r {
+			t.Fatalf("%s = %q %v", r, got, err)
+		}
+	}
+	result = "WHAT"
+	if _, err := f.StopShipment(context.Background(), req); !dependency.IsUnavailable(err) {
+		t.Fatalf("unknown result = %v", err)
+	}
+}

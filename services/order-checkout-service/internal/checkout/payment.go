@@ -64,6 +64,11 @@ func (s *Service) ApplyPayment(ctx context.Context, orderID string, r PaymentRep
 	if err != nil {
 		return orders.Order{}, err
 	}
+	return s.applyPaymentTo(ctx, o, r)
+}
+
+// applyPaymentTo is ApplyPayment for a caller that already holds the order's lock and has read the order.
+func (s *Service) applyPaymentTo(ctx context.Context, o orders.Order, r PaymentReport) (orders.Order, error) {
 	events, err := paymentEvents(o, r)
 	if err != nil {
 		return o, err
@@ -79,6 +84,22 @@ func (s *Service) ApplyPayment(ctx context.Context, orderID string, r PaymentRep
 // paymentEvents translates a payment status into saga events for the order's current state.
 func paymentEvents(o orders.Order, r PaymentReport) ([]saga.Event, error) {
 	held := o.Status == string(saga.StateReserved) || o.Status == string(saga.StateUnknownHold)
+	cancelled := o.Status == string(saga.StateCancelled) || o.Status == string(saga.StateCancelRequested)
+	// A cancelled order only owes money that arrived after an unpaid cancellation; every other report (replays
+	// included) says nothing new, and the refund is never created twice.
+	lateMoney := o.Status == string(saga.StateCancelled) && o.CapturedVND == 0
+	switch r.Status {
+	case payProcessing:
+		return nil, nil
+	case payCaptured, payCapturedLate:
+		if cancelled && !lateMoney {
+			return nil, nil
+		}
+	case payFailed, payUnknown, payExpired30m:
+		if cancelled {
+			return nil, nil
+		}
+	}
 	switch r.Status {
 	case payProcessing:
 		return nil, nil

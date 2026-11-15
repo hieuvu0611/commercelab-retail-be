@@ -57,3 +57,10 @@ func (s *Service) eventsFor(o orders.Order, res saga.Result, from saga.State, pa
 	}
 	return out
 }
+
+// orderCancelled announces an accepted cancellation. refundVND is what is owed back (0 for an unpaid order).
+func (s *Service) orderCancelled(o orders.Order, paymentStatus string, refundVND int64) events.DomainEvent {
+	return s.orderEvent(events.EventOrderCancelled, o, map[string]any{
+		"paymentStatus": paymentStatus, "refundAmountVnd": refundVND, "warehouseId": o.WarehouseID,
+	})
+}
