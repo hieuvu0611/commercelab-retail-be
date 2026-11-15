@@ -280,8 +280,10 @@ services:
       args:
         SERVICE_NAME: order-checkout-service
     environment:
-      <<: *go-env
+      <<: [*go-env, *jwt-env]
       ORDER_CHECKOUT_PORT: 8083
+      DATABASE_URL_ORDERS: postgres://order_svc_user:order_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=orders
+      MIGRATE_ON_START: "true"
     depends_on: *infra-healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8083/health"]
