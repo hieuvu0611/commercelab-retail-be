@@ -344,6 +344,9 @@ services:
     environment:
       <<: *go-env
       FULFILLMENT_SHIPPING_PORT: 8085
+      REDPANDA_BROKERS: redpanda:9092
+      DATABASE_URL_FULFILLMENT: postgres://fulfillment_svc_user:fulfillment_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=fulfillment
+      MIGRATE_ON_START: "true"
     depends_on: *infra-healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8085/health"]
