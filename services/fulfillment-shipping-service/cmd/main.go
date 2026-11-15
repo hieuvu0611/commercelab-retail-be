@@ -30,9 +30,11 @@ const minWebhookSecretBytes = 32
 // consumerGroup is the consumer group of this service on the order topic.
 const consumerGroup = "fulfillment-shipping-service"
 
-// StockHandover takes an order's stock out of its warehouse (implemented by inventory.Client).
+// StockHandover takes an order's stock out of its warehouse (implemented by inventory.Client). ReleaseCommitted
+// gives it back instead, when the parcel is stopped for a cancellation; the two exclude each other (SC06).
 type StockHandover interface {
 	Handover(ctx context.Context, bearer, orderID, warehouseID string) error
+	ReleaseCommitted(ctx context.Context, bearer, orderID, warehouseID string) error
 }
 
 // Deps are the collaborators of the HTTP handler.

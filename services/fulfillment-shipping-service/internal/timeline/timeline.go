@@ -19,6 +19,7 @@ const (
 	TypeDelivered          = "DELIVERED"
 	TypeDeliveryFailed     = "DELIVERY_FAILED"
 	TypePartiallyDelivered = "PARTIALLY_DELIVERED"
+	TypeStopRequested      = "STOP_REQUESTED"
 	TypeStopped            = "STOPPED_FOR_CANCEL"
 )
 

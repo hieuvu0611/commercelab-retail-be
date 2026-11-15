@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
@@ -39,8 +40,15 @@ func stoppedEvent(d Deps, s shipment.Shipment) events.DomainEvent {
 		map[string]any{"shipmentId": s.ShipmentID, "orderId": s.OrderID, "warehouseId": s.WarehouseID})
 }
 
+func stopRequestedEvent(d Deps, s shipment.Shipment) events.DomainEvent {
+	return outbox.NewEvent(events.EventShipmentStopRequested, aggregateShipment, s.ShipmentID, d.now(), map[string]any{
+		"shipmentId": s.ShipmentID, "orderId": s.OrderID, "warehouseId": s.WarehouseID, "requestedAt": s.StopRequestedAt.UTC().Format(time.RFC3339),
+	})
+}
+
 // stopForCancel stops the parcel of an order that was cancelled: STOPPED when nothing was picked (the parcel can
-// never be handed over any more), IN_PROGRESS while it is being picked or packed, TOO_LATE once it left. When the
+// never be handed over any more), STOP_REQUESTED while it is being picked or packed (the request is stored and
+// announced once; the warehouse confirms it or hands the parcel over), TOO_LATE once it left. When the
 // parcel does not exist yet (the confirmed event is still on its way) a stopped parcel is created from the
 // order's details, so the late event cannot start a pick for a cancelled order. Repeating it changes nothing.
 func stopForCancel(d Deps) http.HandlerFunc {
@@ -67,13 +75,17 @@ func stopForCancel(d Deps) http.HandlerFunc {
 		}
 		for attempt := 0; attempt < maxStopRetries; attempt++ {
 			next, outcome := s.StopForCancel(d.now())
-			if outcome != shipment.StopStopped || next.Version == s.Version {
+			if next.Version == s.Version {
 				writeStop(w, r, outcome, s)
 				return
 			}
-			err := d.Shipments.Save(r.Context(), next, s.Version, stoppedEvent(d, next))
+			ev, entry := stoppedEvent(d, next), timeline.TypeStopped
+			if outcome == shipment.StopRequested {
+				ev, entry = stopRequestedEvent(d, next), timeline.TypeStopRequested
+			}
+			err := d.Shipments.Save(r.Context(), next, s.Version, ev)
 			if err == nil {
-				d.record(r, next, timeline.TypeStopped, "")
+				d.record(r, next, entry, "")
 				writeStop(w, r, outcome, next)
 				return
 			}

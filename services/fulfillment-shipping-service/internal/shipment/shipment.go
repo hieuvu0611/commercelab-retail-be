@@ -57,6 +57,8 @@ type Shipment struct {
 	Version      int64      `json:"version"`
 	HandedOverAt *time.Time `json:"handedOverAt,omitempty"`
 	DeliveredAt  *time.Time `json:"deliveredAt,omitempty"`
+	// StopRequestedAt is when the customer's cancellation asked the warehouse to stop (SC06); nil when nobody did.
+	StopRequestedAt *time.Time `json:"stopRequestedAt,omitempty"`
 	// ReturnWindowEndsAt is DeliveredAt plus ReturnWindow (P07); nil until delivered.
 	ReturnWindowEndsAt *time.Time `json:"returnWindowEndsAt,omitempty"`
 	FailureReason      string     `json:"failureReason,omitempty"`

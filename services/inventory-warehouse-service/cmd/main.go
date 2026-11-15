@@ -211,6 +211,51 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	mux.Handle("POST /api/v1/inventory/shipments/handover",
 		auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(http.HandlerFunc(handover))))
 
+	// SC06: the warehouse confirms it stopped a parcel for a cancellation. Staff only, in the warehouse the stock
+	// is reserved in. It and the handover are mutually exclusive on the reservation, so only one of them wins.
+	stop := func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			OrderID     string `json:"orderId"`
+			WarehouseID string `json:"warehouseId"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrderID == "" {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "orderId is required to stop a shipment", nil)
+			return
+		}
+		reservation, err := repo.GetReservation(r.Context(), req.OrderID)
+		switch {
+		case dependency.IsUnavailable(err):
+			dependency.WriteUnavailable(w, r, err)
+			return
+		case errors.Is(err, repository.ErrReservationNotFound):
+			response.Error(w, r, http.StatusNotFound, "RESERVATION_NOT_FOUND", "No stock reservation exists for this order", nil)
+			return
+		case err != nil:
+			response.Error(w, r, http.StatusConflict, "RELEASE_COMMITTED_FAILED", "The committed stock cannot be released", nil)
+			return
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, reservation.WarehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		if req.WarehouseID != "" && req.WarehouseID != reservation.WarehouseID {
+			response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
+			return
+		}
+		rec, err := repo.ReleaseCommittedReservation(r.Context(), req.OrderID, claims.UserID)
+		switch {
+		case dependency.IsUnavailable(err):
+			dependency.WriteUnavailable(w, r, err)
+		case err != nil:
+			response.Error(w, r, http.StatusConflict, "RELEASE_COMMITTED_FAILED", "The committed stock cannot be released: it was handed over or is not committed", nil)
+		default:
+			response.JSON(w, http.StatusOK, "Committed stock released", rec, nil)
+		}
+	}
+	mux.Handle("POST /api/v1/inventory/shipments/stop",
+		auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(http.HandlerFunc(stop))))
+
 	registerAdminRoutes(mux, repo)
 
 	return middleware.Chain(mux)

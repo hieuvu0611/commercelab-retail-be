@@ -15,6 +15,9 @@ import (
 type fakeStock struct {
 	calls []string // "orderId@warehouseId"
 	err   error
+	// released and releaseErr describe the release-committed calls of a stop confirmation.
+	released   []string
+	releaseErr error
 }
 
 func (f *fakeStock) Handover(_ context.Context, bearer, orderID, warehouseID string) error {
@@ -23,6 +26,14 @@ func (f *fakeStock) Handover(_ context.Context, bearer, orderID, warehouseID str
 		return errors.New("no bearer forwarded")
 	}
 	return f.err
+}
+
+func (f *fakeStock) ReleaseCommitted(_ context.Context, bearer, orderID, warehouseID string) error {
+	f.released = append(f.released, orderID+"@"+warehouseID)
+	if bearer == "" {
+		return errors.New("no bearer forwarded")
+	}
+	return f.releaseErr
 }
 
 func handoverEnv(t *testing.T, stock *fakeStock) *env {
