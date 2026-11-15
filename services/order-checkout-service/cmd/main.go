@@ -1,20 +1,26 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/migrations"
 )
 
-func main() {
-	port := config.EnvOrDefault("ORDER_CHECKOUT_PORT", "8083")
-	engine := domain.NewCheckoutEngine()
+// NewServer builds the order service handler. vouchers is the voucher campaign service.
+func NewServer(engine *domain.CheckoutEngine, vouchers *voucher.Service) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +70,37 @@ func main() {
 		response.JSON(w, status, msg, order, nil)
 	})
 
+	registerVoucherRoutes(mux, vouchers)
+	return middleware.Chain(mux)
+}
+
+func main() {
+	port := config.EnvOrDefault("ORDER_CHECKOUT_PORT", "8083")
+	pgURL := config.EnvOrDefault("DATABASE_URL_ORDERS", "postgres://order_svc_user:order_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=orders")
+
+	secrets := config.NewLoader()
+	auth.LoadSecrets(secrets)
+	if err := secrets.Err(); err != nil {
+		log.Fatalf("[order-checkout-service] %v", err)
+	}
+
+	ctx := context.Background()
+	if migrate.EnabledOnStart() {
+		if _, err := migrate.Up(ctx, pgURL, migrations.FS); err != nil {
+			log.Fatalf("[order-checkout-service] migrations failed: %v", err)
+		}
+	}
+	pool, pgErr := db.ConnectPostgres(ctx, pgURL)
+	if err := dependency.CheckStartup("order-checkout-service", "postgres", pgErr); err != nil {
+		log.Fatal(err)
+	}
+	// Without Postgres (ALLOW_MEMORY_FALLBACK=true, dev/test only) the seeded development vouchers are used.
+	var store voucher.Store = voucher.NewMemoryStore(voucher.DevCampaigns()...)
+	if pool != nil {
+		defer pool.Close()
+		store = voucher.NewPostgresStore(pool)
+	}
+
 	log.Printf("[order-checkout-service] listening on :%s (schema: orders, mongo: order_commercial_snapshots)", port)
-	log.Fatal(http.ListenAndServe(":"+port, middleware.Chain(mux)))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(domain.NewCheckoutEngine(), voucher.NewService(store))))
 }
