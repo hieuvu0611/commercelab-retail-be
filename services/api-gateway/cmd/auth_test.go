@@ -163,6 +163,19 @@ func TestValidTokenIsForwardedAndForgedIdentityHeadersAreRemoved(t *testing.T) {
 	}
 }
 
+func TestClientSentInternalTokenIsNeverForwarded(t *testing.T) {
+	gw := newGateway(t)
+	token := tokenFor(t, auth.Identity{UserID: "user-lan", Roles: []string{"CUSTOMER"}})
+
+	rec := gw.do(http.MethodPost, "/api/v1/inventory/reservations", token, map[string]string{"X-Internal-Token": "guess"}, `{}`)
+	if rec.Code != http.StatusOK || gw.calls != 1 {
+		t.Fatalf("status = %d, calls = %d; want a proxied 200", rec.Code, gw.calls)
+	}
+	if v := gw.last.Header.Get("X-Internal-Token"); v != "" {
+		t.Fatalf("X-Internal-Token = %q must not reach a service from the outside", v)
+	}
+}
+
 func TestClientForwardedForIsReplacedByTheRealPeerAddress(t *testing.T) {
 	gw := newGateway(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{}`))

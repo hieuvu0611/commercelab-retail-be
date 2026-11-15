@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"log"
@@ -19,6 +20,19 @@ func Chain(h http.Handler) http.Handler {
 	return CorrelationID(Recovery(CORS(h)))
 }
 
+type correlationKey struct{}
+
+// WithCorrelationID returns a context that carries id (used by outgoing service calls).
+func WithCorrelationID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, correlationKey{}, id)
+}
+
+// CorrelationIDFrom returns the correlation id stored by the CorrelationID middleware or WithCorrelationID.
+func CorrelationIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(correlationKey{}).(string)
+	return id
+}
+
 func CorrelationID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		corrID := r.Header.Get("X-Correlation-ID")
@@ -33,7 +47,7 @@ func CorrelationID(next http.Handler) http.Handler {
 			r.Header.Set("X-Correlation-ID", corrID)
 		}
 		w.Header().Set("X-Correlation-ID", corrID)
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(WithCorrelationID(r.Context(), corrID)))
 	})
 }
 
