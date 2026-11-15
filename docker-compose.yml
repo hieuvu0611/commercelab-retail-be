@@ -309,8 +309,12 @@ services:
       args:
         SERVICE_NAME: payment-service
     environment:
-      <<: *go-env
+      <<: [*go-env, *jwt-env, *internal-env]
       PAYMENT_PORT: 8084
+      DATABASE_URL_PAYMENTS: postgres://payment_svc_user:payment_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=payments
+      MIGRATE_ON_START: "true"
+      PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-}
+      PAYMENT_SIMULATOR_ENABLED: ${PAYMENT_SIMULATOR_ENABLED:-false}
     depends_on: *infra-healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8084/health"]
