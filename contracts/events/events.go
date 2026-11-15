@@ -21,6 +21,7 @@ const (
 	EventPaymentUnknown30m     = "payment.unknown_30m.v1"
 	EventPaymentCaptured       = "payment.captured.v1"
 	EventPaymentLateRefundNeed = "payment.late_refund_required.v1"
+	EventShipmentCreated       = "fulfillment.shipment_created.v1"
 	EventShipmentHandedOver    = "fulfillment.shipment_handed_over.v1"
 	EventShipmentDelivered     = "fulfillment.shipment_delivered.v1"
 	EventReturnApproved        = "support.return_approved.v1"

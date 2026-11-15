@@ -21,6 +21,10 @@ const (
 	StateUnknownHold State = "UNKNOWN_HOLD"
 	// StateConfirmed: the expected amount was captured.
 	StateConfirmed State = "CONFIRMED"
+	// StateInFulfillment: the warehouse has a shipment for the confirmed order (set from a fulfillment event).
+	StateInFulfillment State = "IN_FULFILLMENT"
+	// StateDelivered: the carrier delivered the parcel (set from a fulfillment event).
+	StateDelivered State = "DELIVERED"
 	// StateFailedClosed: the order is closed and everything it held was released.
 	StateFailedClosed State = "FAILED_CLOSED"
 )
@@ -102,9 +106,9 @@ func Next(s State, e Event) (Result, error) {
 		}
 	case StateReserved, StateUnknownHold:
 		return fromHeld(s, e)
-	case StateConfirmed:
+	case StateConfirmed, StateInFulfillment, StateDelivered:
 		if _, ok := e.(PaymentCaptured); ok {
-			return result(StateConfirmed, PayCaptured) // a repeated capture notice changes nothing
+			return result(s, PayCaptured) // a repeated capture notice changes nothing, however far the order got
 		}
 	case StateFailedClosed:
 		switch e.(type) {
@@ -141,4 +145,10 @@ func fromHeld(s State, e Event) (Result, error) {
 		return result(StateFailedClosed, PayUnpaid, ReleaseStock, ReleaseVoucher)
 	}
 	return invalid(s, e)
+}
+
+// IsPaid reports whether the order was confirmed (stock committed, voucher consumed), including the states
+// after confirmation that fulfillment events set.
+func (s State) IsPaid() bool {
+	return s == StateConfirmed || s == StateInFulfillment || s == StateDelivered
 }

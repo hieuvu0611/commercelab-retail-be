@@ -179,3 +179,12 @@ func TestLateFailureAfterClosureIsANoOp(t *testing.T) {
 		t.Fatalf("late failure = %+v", r)
 	}
 }
+
+func TestDuplicateCaptureAfterFulfillmentStartedIsANoOp(t *testing.T) {
+	for _, from := range []State{StateInFulfillment, StateDelivered} {
+		r := mustNext(t, from, PaymentCaptured{CapturedVND: 660000, ExpectedVND: 660000})
+		if r.State != from || len(r.Effects) != 0 {
+			t.Fatalf("from %s: duplicate capture = %+v", from, r)
+		}
+	}
+}

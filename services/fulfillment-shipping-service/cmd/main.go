@@ -1,50 +1,72 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/eventconsumer"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
-	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/intake"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
+	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/migrations"
 )
 
-func main() {
-	port := config.EnvOrDefault("FULFILLMENT_SHIPPING_PORT", "8085")
-	arb := domain.NewFulfillmentArbitrator()
-	mux := http.NewServeMux()
+// consumerGroup is the consumer group of this service on the order topic.
+const consumerGroup = "fulfillment-shipping-service"
 
+// NewServer builds the HTTP handler of the fulfillment service.
+func NewServer() http.Handler {
+	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "fulfillment-shipping-service healthy", map[string]any{
 			"service":        "fulfillment-shipping-service",
 			"postgresSchema": "fulfillment",
-			"mongoColl":      "fulfillment_timelines ($push)",
+			"mongoColl":      "fulfillment_timelines",
 		}, nil)
 	})
+	return middleware.Chain(mux)
+}
 
-	// SC06: Kho nhận lệnh dừng khẩn cấp khi khách hủy
-	mux.HandleFunc("POST /api/v1/shipments/{shipmentId}/stop-for-cancel", func(w http.ResponseWriter, r *http.Request) {
-		shipmentID := r.PathValue("shipmentId")
-		sh, err := arb.RequestStopForCancel(shipmentID)
-		if err != nil {
-			response.Error(w, r, http.StatusConflict, "STOP_SHIPMENT_REJECTED", err.Error(), nil)
-			return
+func main() {
+	port := config.EnvOrDefault("FULFILLMENT_SHIPPING_PORT", "8085")
+	pgURL := config.EnvOrDefault("DATABASE_URL_FULFILLMENT", "postgres://fulfillment_svc_user:fulfillment_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=fulfillment")
+
+	ctx := context.Background()
+	if migrate.EnabledOnStart() {
+		if _, err := migrate.Up(ctx, pgURL, migrations.FS); err != nil {
+			log.Fatalf("[fulfillment-shipping-service] migrations failed: %v", err)
 		}
-		response.JSON(w, http.StatusOK, "Đã dừng đóng gói kiện hàng thành công (SC06 Nhánh A)", sh, nil)
-	})
-
-	// SC06: Bưu tá quét nhận bàn giao kiện hàng
-	mux.HandleFunc("POST /api/v1/shipments/{shipmentId}/handover", func(w http.ResponseWriter, r *http.Request) {
-		shipmentID := r.PathValue("shipmentId")
-		sh, err := arb.ConfirmHandover(shipmentID)
-		if err != nil {
-			response.Error(w, r, http.StatusConflict, "HANDOVER_REJECTED", err.Error(), nil)
-			return
+	}
+	pool, pgErr := db.ConnectPostgres(ctx, pgURL)
+	if err := dependency.CheckStartup("fulfillment-shipping-service", "postgres", pgErr); err != nil {
+		log.Fatal(err)
+	}
+	var store shipment.Store = shipment.NewMemoryStore()
+	if pool != nil {
+		defer pool.Close()
+		store = shipment.NewPostgresStore(pool)
+		if err := outbox.Start(ctx, "fulfillment-shipping-service", pool, shipment.OutboxTable); err != nil {
+			log.Fatalf("[fulfillment-shipping-service] %v", err)
 		}
-		response.JSON(w, http.StatusOK, "Bàn giao kiện hàng cho vận chuyển thành công", sh, nil)
-	})
+	}
 
-	log.Printf("[fulfillment-shipping-service] listening on :%s (schema: fulfillment, mongo: fulfillment_timelines)", port)
-	log.Fatal(http.ListenAndServe(":"+port, middleware.Chain(mux)))
+	in := &intake.Intake{Store: store, Now: func() time.Time { return time.Now().UTC() }}
+	brokers := config.EnvOrDefault("REDPANDA_BROKERS", "localhost:19092")
+	go func() {
+		err := eventconsumer.Run(ctx, eventconsumer.Config{Brokers: brokers, Group: consumerGroup, Topic: outbox.TopicFor("Order")}, in.Handle)
+		if err != nil {
+			log.Printf("[fulfillment-shipping-service] order event consumer stopped: %v", err)
+		}
+	}()
+
+	log.Printf("[fulfillment-shipping-service] listening on :%s (schema: fulfillment, brokers: %s)", port, brokers)
+	log.Fatal(http.ListenAndServe(":"+port, NewServer()))
 }
