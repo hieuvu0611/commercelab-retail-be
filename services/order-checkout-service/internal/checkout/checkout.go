@@ -32,6 +32,8 @@ var (
 	ErrQuoteNotFound = errors.New("quote not found")
 	// ErrQuoteExpired: the quote's five minutes are over (P02); the customer must accept a new one.
 	ErrQuoteExpired = errors.New("quote has expired")
+	// ErrQuoteChanged: a price changed or a SKU stopped being orderable since the quote; the customer must accept a new one.
+	ErrQuoteChanged = errors.New("quote no longer matches the catalog")
 	// ErrQuoteInvalid: the stored quote is internally inconsistent, so no money amount can be trusted.
 	ErrQuoteInvalid = errors.New("quote is not usable")
 	// ErrOutOfStock: the warehouse cannot cover the whole order (SC03).
@@ -50,6 +52,8 @@ type Quote struct {
 	SubtotalVND, DiscountVND, ShippingFeeVND, TotalPayableVND int64
 	Lines                                                     []QuoteLine
 	ExpiresAt                                                 time.Time
+	// Stale: the catalog says a price changed or a SKU is no longer orderable since the quote was made.
+	Stale bool
 }
 
 // StockLine is one line of a reservation.
@@ -146,6 +150,9 @@ func (s *Service) checkQuote(q Quote, userID string) error {
 	}
 	if !s.now().Before(q.ExpiresAt) {
 		return ErrQuoteExpired
+	}
+	if q.Stale {
+		return ErrQuoteChanged
 	}
 	if len(q.Lines) == 0 || q.AddressID == "" || q.TotalPayableVND <= 0 ||
 		q.SubtotalVND-q.DiscountVND+q.ShippingFeeVND != q.TotalPayableVND {

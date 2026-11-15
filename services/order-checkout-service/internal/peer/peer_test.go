@@ -26,7 +26,7 @@ func TestQuotesReadsTheQuoteWithTheCallersToken(t *testing.T) {
 		if r.URL.Path != "/api/v1/quotes/Q-1" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"data":{"isExpired":false,"quote":{"quoteId":"Q-1","userId":"user-lan","addressId":"addr-1","voucherCode":"WELCOME10",
+		_, _ = w.Write([]byte(`{"data":{"isExpired":false,"isStale":true,"quote":{"quoteId":"Q-1","userId":"user-lan","addressId":"addr-1","voucherCode":"WELCOME10",
 			"subtotalVnd":700000,"discountVnd":70000,"shippingFeeVnd":30000,"totalPayableVnd":660000,"expiresAt":"2026-11-15T10:05:00Z",
 			"lines":[{"skuId":"SKU-A","skuName":"Backpack","quantity":2,"unitPriceVnd":300000,"lineDiscountVnd":60000,"allocatedUnitPaidVnd":270000}]}}}`))
 	}))
@@ -36,7 +36,7 @@ func TestQuotesReadsTheQuoteWithTheCallersToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	if auth != "Bearer tok" || q.ID != "Q-1" || q.UserID != "user-lan" || q.TotalPayableVND != 660000 || q.VoucherCode != "WELCOME10" ||
-		len(q.Lines) != 1 || q.Lines[0].AllocatedUnitPaidVND != 270000 || q.ExpiresAt.IsZero() {
+		len(q.Lines) != 1 || q.Lines[0].AllocatedUnitPaidVND != 270000 || q.ExpiresAt.IsZero() || !q.Stale {
 		t.Fatalf("auth=%q quote=%+v", auth, q)
 	}
 }

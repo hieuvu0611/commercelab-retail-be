@@ -38,6 +38,8 @@ type Deps struct {
 	// needs one answers 503.
 	Vouchers  VoucherChecker
 	Addresses AddressChecker
+	// Pricer reads the price in effect for carts and for the stale-quote check; defaults to the repository.
+	Pricer cart.Pricer
 	// Availability supplies stock states for the storefront; nil reports every availability as unknown.
 	Availability domain.AvailabilityLookup
 }
@@ -75,7 +77,10 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	if deps.Carts == nil {
 		deps.Carts = cart.NewMemoryStore()
 	}
-	cartSvc := cart.NewService(deps.Carts, repo)
+	if deps.Pricer == nil {
+		deps.Pricer = repo
+	}
+	cartSvc := cart.NewService(deps.Carts, deps.Pricer)
 	registerCartRoutes(mux, cartSvc)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -88,7 +93,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 		}, nil)
 	})
 
-	registerQuoteRoutes(mux, repo, cartSvc, deps.Vouchers, deps.Addresses)
+	registerQuoteRoutes(mux, repo, cartSvc, deps.Pricer, deps.Vouchers, deps.Addresses)
 
 	return middleware.Chain(mux)
 }

@@ -40,13 +40,14 @@ type quoteStore interface {
 type quoteAPI struct {
 	store     quoteStore
 	cart      *cart.Service
+	pricer    cart.Pricer
 	vouchers  VoucherChecker
 	addresses AddressChecker
 	now       func() time.Time
 }
 
-func registerQuoteRoutes(mux *http.ServeMux, store quoteStore, carts *cart.Service, vouchers VoucherChecker, addresses AddressChecker) {
-	api := &quoteAPI{store: store, cart: carts, vouchers: vouchers, addresses: addresses, now: func() time.Time { return time.Now().UTC() }}
+func registerQuoteRoutes(mux *http.ServeMux, store quoteStore, carts *cart.Service, pricer cart.Pricer, vouchers VoucherChecker, addresses AddressChecker) {
+	api := &quoteAPI{store: store, cart: carts, pricer: pricer, vouchers: vouchers, addresses: addresses, now: func() time.Time { return time.Now().UTC() }}
 	mux.Handle("POST /api/v1/quotes", auth.RequireAuth(http.HandlerFunc(api.create)))
 	mux.Handle("GET /api/v1/quotes/{quoteId}", auth.RequireAuth(http.HandlerFunc(api.get)))
 }
@@ -185,10 +186,35 @@ func (a *quoteAPI) get(w http.ResponseWriter, r *http.Request) {
 		writeQuoteError(w, r, err)
 		return
 	}
+	stale, err := a.staleSkus(r.Context(), quote)
+	if err != nil {
+		writeQuoteError(w, r, err)
+		return
+	}
 	response.JSON(w, http.StatusOK, "Quote", map[string]any{
-		"quote":     quote,
-		"isExpired": !a.now().Before(quote.ExpiresAt),
+		"quote":       quote,
+		"isExpired":   !a.now().Before(quote.ExpiresAt),
+		"isStale":     len(stale) > 0,
+		"staleSkuIds": stale,
 	}, nil)
+}
+
+// staleSkus lists the quote's SKUs whose price changed or that cannot be ordered any more since the quote was
+// made. A stale quote must be accepted again before an order is placed from it (P02).
+func (a *quoteAPI) staleSkus(ctx context.Context, q *domain.Quote) ([]string, error) {
+	stale := []string{}
+	for _, l := range q.Lines {
+		sp, err := a.pricer.GetSkuPrice(ctx, l.SkuID)
+		switch {
+		case errors.Is(err, repository.ErrSkuNotFound), errors.Is(err, repository.ErrSkuNotOrderable):
+			stale = append(stale, l.SkuID)
+		case err != nil:
+			return nil, err
+		case sp.UnitPriceVND != l.UnitPriceVND:
+			stale = append(stale, l.SkuID)
+		}
+	}
+	return stale, nil
 }
 
 func newQuoteID() string {

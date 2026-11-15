@@ -92,6 +92,8 @@ func writePlaceError(w http.ResponseWriter, r *http.Request, err error) {
 		response.Error(w, r, http.StatusNotFound, "QUOTE_NOT_FOUND", "Quote not found", nil)
 	case errors.Is(err, checkout.ErrQuoteExpired):
 		response.Error(w, r, http.StatusConflict, "QUOTE_EXPIRED", "The quote has expired; review the order again to get a new one", nil)
+	case errors.Is(err, checkout.ErrQuoteChanged):
+		response.Error(w, r, http.StatusConflict, "QUOTE_CHANGED", "A price or item changed since the quote; review the order again to get a new one", nil)
 	case errors.Is(err, checkout.ErrQuoteInvalid):
 		response.Error(w, r, http.StatusConflict, "QUOTE_INVALID", "The quote cannot be ordered; review the order again to get a new one", nil)
 	case dependency.IsUnavailable(err):

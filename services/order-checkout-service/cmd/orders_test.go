@@ -210,6 +210,7 @@ func TestPlaceOrderQuoteErrors(t *testing.T) {
 	}{
 		{"unknown quote", func(f *orderFixture) { f.quotes.err = checkout.ErrQuoteNotFound }, 404, "QUOTE_NOT_FOUND"},
 		{"other customer's quote", func(f *orderFixture) { f.quotes.quote.UserID = "user-minh" }, 404, "QUOTE_NOT_FOUND"},
+		{"changed quote", func(f *orderFixture) { f.quotes.quote.Stale = true }, 409, "QUOTE_CHANGED"},
 		{"expired quote", func(f *orderFixture) { f.quotes.quote.ExpiresAt = time.Now().Add(-time.Second) }, 409, "QUOTE_EXPIRED"},
 		{"inconsistent quote", func(f *orderFixture) { f.quotes.quote.TotalPayableVND = 1 }, 409, "QUOTE_INVALID"},
 		{"catalog down", func(f *orderFixture) { f.quotes.err = dependency.Wrap(errors.New("refused")) }, 503, "DEPENDENCY_UNAVAILABLE"},
