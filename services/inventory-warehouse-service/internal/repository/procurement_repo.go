@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -358,4 +359,250 @@ func (r *InventoryRepository) RejectPurchaseOrder(ctx context.Context, poID stri
 	}
 
 	return po, nil
+}
+
+// RecordReceivingInspection processes inbound receipt and QC according to SC09:
+// Order 100, receive 90, 5 damaged -> on-hand +90, available +85, unsellable +5, short 10.
+func (r *InventoryRepository) RecordReceivingInspection(ctx context.Context, poID string, inspectorID string, notes string, lines []domain.ReceivingInspectionLine) (domain.ReceivingInspection, error) {
+	po, ok, err := r.GetPurchaseOrder(ctx, poID)
+	if err != nil {
+		return domain.ReceivingInspection{}, err
+	}
+	if !ok {
+		return domain.ReceivingInspection{}, domain.ErrPurchaseOrderNotFound
+	}
+	if po.Status != domain.POStatusApproved && po.Status != domain.POStatusOrdered && po.Status != domain.POStatusPartiallyReceived {
+		return domain.ReceivingInspection{}, errors.New("PO is not in an approved/receivable state")
+	}
+
+	if len(lines) == 0 {
+		return domain.ReceivingInspection{}, errors.New("at least one inspection line is required")
+	}
+
+	poLinesMap := make(map[string]*domain.PurchaseOrderLine)
+	for i := range po.Lines {
+		poLinesMap[po.Lines[i].SkuID] = &po.Lines[i]
+	}
+
+	// Validate lines against PO
+	validatedLines := make([]domain.ReceivingInspectionLine, 0, len(lines))
+	for _, l := range lines {
+		poLine, exists := poLinesMap[l.SkuID]
+		if !exists {
+			return domain.ReceivingInspection{}, fmt.Errorf("SKU %s does not belong to PO %s", l.SkuID, poID)
+		}
+		short, err := domain.ValidateInspectionLine(poLine.OrderedQty, l.DeliveredQty, l.PassedQty, l.DamagedQty)
+		if err != nil {
+			return domain.ReceivingInspection{}, err
+		}
+		l.ShortQty = short
+		validatedLines = append(validatedLines, l)
+	}
+
+	inspectionID := fmt.Sprintf("INSP-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+	now := r.now().UTC()
+	insp := domain.ReceivingInspection{
+		InspectionID: inspectionID,
+		POID:         poID,
+		WarehouseID:  po.WarehouseID,
+		InspectorID:  inspectorID,
+		Status:       "COMPLETED",
+		Notes:        notes,
+		Lines:        validatedLines,
+		CreatedAt:    now,
+	}
+
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		for _, l := range validatedLines {
+			if err := r.engine.ReceiveInboundQC(po.WarehouseID, l.SkuID, l.PassedQty, l.DamagedQty); err != nil {
+				return domain.ReceivingInspection{}, err
+			}
+			if l.PassedQty > 0 {
+				r.appendMovement(domain.Movement{
+					SkuID: l.SkuID, WarehouseID: po.WarehouseID, Type: domain.MovementPOReceiveGood, Qty: l.PassedQty,
+					RefType: "PO", RefID: poID, ActorID: inspectorID, Reason: "Inbound QC passed stock receipt",
+				})
+			}
+			if l.DamagedQty > 0 {
+				r.appendMovement(domain.Movement{
+					SkuID: l.SkuID, WarehouseID: po.WarehouseID, Type: domain.MovementPOReceiveDamage, Qty: l.DamagedQty,
+					RefType: "PO", RefID: poID, ActorID: inspectorID, Reason: "Inbound QC damaged stock quarantined into unsellable",
+				})
+			}
+			// Update in-memory PO lines
+			if pol, exists := poLinesMap[l.SkuID]; exists {
+				pol.ReceivedQty += l.PassedQty
+				pol.DamagedQty += l.DamagedQty
+				pol.ShortQty = l.ShortQty
+			}
+		}
+
+		po.Status = domain.POStatusPartiallyReceived
+		allCompleted := true
+		for _, pol := range po.Lines {
+			if pol.ReceivedQty+pol.DamagedQty+pol.ShortQty < pol.OrderedQty {
+				allCompleted = false
+			}
+		}
+		if allCompleted {
+			po.Status = domain.POStatusCompleted
+		}
+		po.UpdatedAt = now
+		r.purchaseOrders[poID] = &po
+		r.inspections[inspectionID] = &insp
+		return insp, nil
+	}
+
+	// Real Postgres transaction
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.ReceivingInspection{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO receiving_inspections (inspection_id, po_id, warehouse_id, inspector_id, status, notes, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, insp.InspectionID, insp.POID, insp.WarehouseID, insp.InspectorID, insp.Status, insp.Notes, insp.CreatedAt)
+	if err != nil {
+		return domain.ReceivingInspection{}, dependency.Wrap(err)
+	}
+
+	for _, l := range validatedLines {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO receiving_inspection_lines (inspection_id, sku_id, delivered_qty, passed_qty, damaged_qty, short_qty)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, insp.InspectionID, l.SkuID, l.DeliveredQty, l.PassedQty, l.DamagedQty, l.ShortQty)
+		if err != nil {
+			return domain.ReceivingInspection{}, dependency.Wrap(err)
+		}
+
+		// Update stock items: OnHand += (passed + damaged), Unsellable += damaged
+		deliveredTotal := l.PassedQty + l.DamagedQty
+		if deliveredTotal > 0 {
+			_, err = tx.Exec(ctx, `
+				INSERT INTO stock_items (sku_id, warehouse_id, on_hand, unsellable, reserved, committed, in_transit)
+				VALUES ($1, $2, $3, $4, 0, 0, 0)
+				ON CONFLICT (sku_id, warehouse_id) DO UPDATE
+				SET on_hand = stock_items.on_hand + $3,
+				    unsellable = stock_items.unsellable + $4,
+				    version = stock_items.version + 1,
+				    updated_at = NOW()
+			`, l.SkuID, po.WarehouseID, deliveredTotal, l.DamagedQty)
+			if err != nil {
+				return domain.ReceivingInspection{}, dependency.Wrap(err)
+			}
+		}
+
+		// Insert stock movements
+		if l.PassedQty > 0 {
+			err = insertMovement(ctx, tx, domain.Movement{
+				SkuID: l.SkuID, WarehouseID: po.WarehouseID, Type: domain.MovementPOReceiveGood, Qty: l.PassedQty,
+				RefType: "PO", RefID: poID, ActorID: inspectorID, Reason: "Inbound QC passed stock receipt",
+			})
+			if err != nil {
+				return domain.ReceivingInspection{}, err
+			}
+		}
+		if l.DamagedQty > 0 {
+			err = insertMovement(ctx, tx, domain.Movement{
+				SkuID: l.SkuID, WarehouseID: po.WarehouseID, Type: domain.MovementPOReceiveDamage, Qty: l.DamagedQty,
+				RefType: "PO", RefID: poID, ActorID: inspectorID, Reason: "Inbound QC damaged stock quarantined into unsellable",
+			})
+			if err != nil {
+				return domain.ReceivingInspection{}, err
+			}
+		}
+
+		// Update purchase order line
+		_, err = tx.Exec(ctx, `
+			UPDATE purchase_order_lines
+			SET received_qty = received_qty + $1, damaged_qty = damaged_qty + $2, short_qty = $3
+			WHERE po_id = $4 AND sku_id = $5
+		`, l.PassedQty, l.DamagedQty, l.ShortQty, poID, l.SkuID)
+		if err != nil {
+			return domain.ReceivingInspection{}, dependency.Wrap(err)
+		}
+	}
+
+	// Update PO status
+	newStatus := domain.POStatusPartiallyReceived
+	var remainingUnresolved int64
+	err = tx.QueryRow(ctx, `
+		SELECT COALESCE(SUM(ordered_qty - (received_qty + damaged_qty + short_qty)), 0)
+		FROM purchase_order_lines WHERE po_id = $1
+	`, poID).Scan(&remainingUnresolved)
+	if err == nil && remainingUnresolved <= 0 {
+		newStatus = domain.POStatusCompleted
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE purchase_orders SET status = $1, updated_at = NOW() WHERE po_id = $2
+	`, newStatus, poID)
+	if err != nil {
+		return domain.ReceivingInspection{}, dependency.Wrap(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ReceivingInspection{}, dependency.Wrap(err)
+	}
+
+	return insp, nil
+}
+
+// ListReceivingInspections lists inspections for a warehouse or PO.
+func (r *InventoryRepository) ListReceivingInspections(ctx context.Context, warehouseID, poID string) ([]domain.ReceivingInspection, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		list := make([]domain.ReceivingInspection, 0)
+		for _, insp := range r.inspections {
+			if (warehouseID == "" || insp.WarehouseID == warehouseID) && (poID == "" || insp.POID == poID) {
+				list = append(list, *insp)
+			}
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.After(list[j].CreatedAt) })
+		return list, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`
+		SELECT inspection_id, po_id, warehouse_id, inspector_id, status, notes, created_at
+		FROM receiving_inspections WHERE 1=1
+	`)
+	args := []any{}
+	idx := 1
+	if warehouseID != "" {
+		sb.WriteString(fmt.Sprintf(" AND warehouse_id = $%d", idx))
+		args = append(args, warehouseID)
+		idx++
+	}
+	if poID != "" {
+		sb.WriteString(fmt.Sprintf(" AND po_id = $%d", idx))
+		args = append(args, poID)
+		idx++
+	}
+	sb.WriteString(" ORDER BY created_at DESC")
+
+	rows, err := r.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+
+	list := make([]domain.ReceivingInspection, 0)
+	for rows.Next() {
+		var insp domain.ReceivingInspection
+		if err := rows.Scan(&insp.InspectionID, &insp.POID, &insp.WarehouseID, &insp.InspectorID, &insp.Status, &insp.Notes, &insp.CreatedAt); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		list = append(list, insp)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	return list, nil
 }

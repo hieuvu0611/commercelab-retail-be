@@ -144,4 +144,136 @@ func TestProcurementAPI(t *testing.T) {
 			t.Errorf("expected 403 Forbidden for staff creating PO, got %d", rec.Code)
 		}
 	})
+
+	t.Run("SC09 receiving with short and damaged quantities", func(t *testing.T) {
+		// 1. Create PO for 100 backpacks
+		createPOBody := `{
+			"supplierId": "SUP-EVEREST-01",
+			"warehouseId": "WH-HCM-01",
+			"notes": "SC09 test batch",
+			"lines": [{"skuId": "SKU-BALO-BLACK-20L", "orderedQty": 100, "unitCostVnd": 150000}]
+		}`
+		rec := call(t, srv, http.MethodPost, "/api/v1/admin/procurement/orders", createPOBody, &procMgr)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create PO failed: %s", rec.Body.String())
+		}
+		var poResp struct {
+			Data struct {
+				POID string `json:"poId"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &poResp)
+		poID := poResp.Data.POID
+
+		// 2. Approve PO
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/procurement/orders/%s/approve", poID), "", &opsDirector)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("approve PO failed: %s", rec.Body.String())
+		}
+
+		// Initial stock check
+		initialStock, ok, _ := repo.GetStock(nil, "WH-HCM-01", "SKU-BALO-BLACK-20L")
+		if !ok {
+			t.Fatalf("stock not found")
+		}
+		initialOnHand := initialStock.OnHand
+		initialUnsellable := initialStock.Unsellable
+		initialAvailable := initialStock.Available()
+
+		// 3. Receive goods with SC09 numbers:
+		// Order 100, deliver 90 (short 10), 85 passed, 5 damaged
+		inspBody := fmt.Sprintf(`{
+			"poId": "%s",
+			"notes": "SC09 inbound inspection",
+			"lines": [
+				{
+					"skuId": "SKU-BALO-BLACK-20L",
+					"deliveredQty": 90,
+					"passedQty": 85,
+					"damagedQty": 5
+				}
+			]
+		}`, poID)
+		rec = call(t, srv, http.MethodPost, "/api/v1/admin/inventory/receiving/inspections", inspBody, &whStaff)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("receiving inspection failed: %s", rec.Body.String())
+		}
+
+		var inspResp struct {
+			Data struct {
+				InspectionID string `json:"inspectionId"`
+				Lines        []struct {
+					SkuID        string `json:"skuId"`
+					DeliveredQty int64  `json:"deliveredQty"`
+					PassedQty    int64  `json:"passedQty"`
+					DamagedQty   int64  `json:"damagedQty"`
+					ShortQty     int64  `json:"shortQty"`
+				} `json:"lines"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &inspResp); err != nil {
+			t.Fatalf("unmarshal inspection response: %v", err)
+		}
+
+		if len(inspResp.Data.Lines) == 0 {
+			t.Fatalf("expected inspection lines")
+		}
+		line := inspResp.Data.Lines[0]
+		if line.ShortQty != 10 {
+			t.Errorf("expected shortQty 10, got %d", line.ShortQty)
+		}
+		if line.PassedQty != 85 {
+			t.Errorf("expected passedQty 85, got %d", line.PassedQty)
+		}
+		if line.DamagedQty != 5 {
+			t.Errorf("expected damagedQty 5, got %d", line.DamagedQty)
+		}
+
+		// 4. Verify post-inspection stock:
+		// OnHand must increase by +90
+		// Unsellable must increase by +5
+		// Available must increase by +85
+		postStock, _, _ := repo.GetStock(nil, "WH-HCM-01", "SKU-BALO-BLACK-20L")
+		if postStock.OnHand != initialOnHand+90 {
+			t.Errorf("OnHand: got %d, want %d (+90)", postStock.OnHand, initialOnHand+90)
+		}
+		if postStock.Unsellable != initialUnsellable+5 {
+			t.Errorf("Unsellable: got %d, want %d (+5)", postStock.Unsellable, initialUnsellable+5)
+		}
+		if postStock.Available() != initialAvailable+85 {
+			t.Errorf("Available: got %d, want %d (+85)", postStock.Available(), initialAvailable+85)
+		}
+
+		// Invariant I01 check
+		if postStock.Available() != (postStock.OnHand - postStock.Unsellable - postStock.Reserved - postStock.Committed) {
+			t.Errorf("I01 violated: available (%d) != onHand(%d) - unsellable(%d) - reserved(%d) - committed(%d)",
+				postStock.Available(), postStock.OnHand, postStock.Unsellable, postStock.Reserved, postStock.Committed)
+		}
+	})
+
+	t.Run("invalid inspection line math rejected", func(t *testing.T) {
+		// Create a PO for testing invalid line math
+		rec := call(t, srv, http.MethodPost, "/api/v1/admin/procurement/orders", `{
+			"supplierId": "SUP-EVEREST-01",
+			"warehouseId": "WH-HCM-01",
+			"lines": [{"skuId": "SKU-BALO-BLACK-20L", "orderedQty": 100, "unitCostVnd": 100000}]
+		}`, &procMgr)
+		var poResp struct {
+			Data struct {
+				POID string `json:"poId"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &poResp)
+		_ = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/procurement/orders/%s/approve", poResp.Data.POID), "", &opsDirector)
+
+		// delivered 90 != passed 80 + damaged 5 (=85)
+		invalidBody := fmt.Sprintf(`{
+			"poId": "%s",
+			"lines": [{"skuId": "SKU-BALO-BLACK-20L", "deliveredQty": 90, "passedQty": 80, "damagedQty": 5}]
+		}`, poResp.Data.POID)
+		rec = call(t, srv, http.MethodPost, "/api/v1/admin/inventory/receiving/inspections", invalidBody, &whStaff)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("expected 400 for math mismatch, got %d (%s)", rec.Code, rec.Body.String())
+		}
+	})
 }

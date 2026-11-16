@@ -123,3 +123,39 @@ func CanApprovePO(po PurchaseOrder, approverID string, approverRoles []string) e
 	}
 	return ErrThresholdExceeded
 }
+
+type ReceivingInspectionLine struct {
+	ID           int64  `json:"id,omitempty"`
+	InspectionID string `json:"inspectionId,omitempty"`
+	SkuID        string `json:"skuId"`
+	DeliveredQty int64  `json:"deliveredQty"`
+	PassedQty    int64  `json:"passedQty"`
+	DamagedQty   int64  `json:"damagedQty"`
+	ShortQty     int64  `json:"shortQty"`
+}
+
+type ReceivingInspection struct {
+	InspectionID string                    `json:"inspectionId"`
+	POID         string                    `json:"poId"`
+	WarehouseID  string                    `json:"warehouseId"`
+	InspectorID  string                    `json:"inspectorId"`
+	Status       string                    `json:"status"`
+	Notes        string                    `json:"notes"`
+	Lines        []ReceivingInspectionLine `json:"lines,omitempty"`
+	CreatedAt    time.Time                 `json:"createdAt"`
+}
+
+// ValidateInspectionLine ensures SC09 consistency: delivered = passed + damaged, and quantities non-negative.
+func ValidateInspectionLine(orderedQty, deliveredQty, passedQty, damagedQty int64) (shortQty int64, err error) {
+	if deliveredQty < 0 || passedQty < 0 || damagedQty < 0 {
+		return 0, errors.New("quantities must be non-negative")
+	}
+	if deliveredQty != (passedQty + damagedQty) {
+		return 0, errors.New("deliveredQty must equal passedQty + damagedQty")
+	}
+	short := orderedQty - deliveredQty
+	if short < 0 {
+		short = 0
+	}
+	return short, nil
+}

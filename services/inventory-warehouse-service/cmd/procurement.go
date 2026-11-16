@@ -227,4 +227,56 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			response.JSON(w, http.StatusOK, "Purchase order rejected", po, nil)
 		}
 	}))
+
+	// POST /api/v1/admin/inventory/receiving/inspections (SC09 inbound receiving & QC)
+	whReceivingStaff := func(h http.HandlerFunc) http.Handler {
+		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "ADMIN")(h))
+	}
+	mux.Handle("POST /api/v1/admin/inventory/receiving/inspections", whReceivingStaff(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			POID  string                           `json:"poId"`
+			Notes string                           `json:"notes"`
+			Lines []domain.ReceivingInspectionLine `json:"lines"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.POID) == "" || len(req.Lines) == 0 {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "poId and non-empty inspection lines are required", nil)
+			return
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		insp, err := repo.RecordReceivingInspection(r.Context(), strings.TrimSpace(req.POID), claims.UserID, strings.TrimSpace(req.Notes), req.Lines)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if errors.Is(err, domain.ErrPurchaseOrderNotFound) {
+			response.Error(w, r, http.StatusNotFound, "PO_NOT_FOUND", err.Error(), nil)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusBadRequest, "RECEIVING_QC_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusCreated, "Inbound goods inspected and received into warehouse (SC09)", insp, nil)
+	}))
+
+	// GET /api/v1/admin/inventory/receiving/inspections
+	mux.Handle("GET /api/v1/admin/inventory/receiving/inspections", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
+		poID := strings.TrimSpace(r.URL.Query().Get("poId"))
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		list, err := repo.ListReceivingInspections(r.Context(), warehouseID, poID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve receiving inspections", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Receiving inspections retrieved", list, nil)
+	}))
 }
