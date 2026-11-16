@@ -606,3 +606,261 @@ func (r *InventoryRepository) ListReceivingInspections(ctx context.Context, ware
 	}
 	return list, nil
 }
+
+// CreateSupplierReturn creates a draft supplier return record for unsellable/damaged goods.
+func (r *InventoryRepository) CreateSupplierReturn(ctx context.Context, ret domain.SupplierReturn) (domain.SupplierReturn, error) {
+	if len(ret.Lines) == 0 {
+		return domain.SupplierReturn{}, errors.New("at least one return line is required")
+	}
+	for _, l := range ret.Lines {
+		if l.SkuID == "" || l.Quantity <= 0 {
+			return domain.SupplierReturn{}, errors.New("each line needs a valid skuId and positive quantity")
+		}
+	}
+	if ret.ReturnID == "" {
+		ret.ReturnID = fmt.Sprintf("RTV-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+	}
+	if ret.WarehouseID == "" {
+		ret.WarehouseID = domain.DefaultWarehouseID
+	}
+	ret.Status = "DRAFT"
+	now := r.now().UTC()
+	ret.CreatedAt = now
+	ret.UpdatedAt = now
+
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if sup, ok := r.suppliers[ret.SupplierID]; ok {
+			ret.SupplierName = sup.Name
+		}
+		cp := ret
+		r.supplierReturns[ret.ReturnID] = &cp
+		return ret, nil
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.SupplierReturn{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO supplier_returns (return_id, supplier_id, warehouse_id, po_id, status, created_by, notes, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, ret.ReturnID, ret.SupplierID, ret.WarehouseID, ret.POID, ret.Status, ret.CreatedBy, ret.Notes, ret.CreatedAt, ret.UpdatedAt)
+	if err != nil {
+		return domain.SupplierReturn{}, dependency.Wrap(err)
+	}
+
+	for _, l := range ret.Lines {
+		_, err = tx.Exec(ctx, `
+			INSERT INTO supplier_return_lines (return_id, sku_id, quantity, reason)
+			VALUES ($1, $2, $3, $4)
+		`, ret.ReturnID, l.SkuID, l.Quantity, l.Reason)
+		if err != nil {
+			return domain.SupplierReturn{}, dependency.Wrap(err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.SupplierReturn{}, dependency.Wrap(err)
+	}
+
+	return ret, nil
+}
+
+// DispatchSupplierReturn executes the supplier return, decreasing onHand and unsellable stock.
+// Invariant I01 ensures available stock is unchanged.
+func (r *InventoryRepository) DispatchSupplierReturn(ctx context.Context, returnID, actorID, trackingNumber string) (domain.SupplierReturn, error) {
+	ret, ok, err := r.GetSupplierReturn(ctx, returnID)
+	if err != nil {
+		return domain.SupplierReturn{}, err
+	}
+	if !ok {
+		return domain.SupplierReturn{}, errors.New("supplier return not found")
+	}
+	if ret.Status != "DRAFT" {
+		return domain.SupplierReturn{}, errors.New("supplier return is not in DRAFT status")
+	}
+
+	now := r.now().UTC()
+	ret.Status = "DISPATCHED"
+	ret.DispatchedBy = actorID
+	ret.DispatchedAt = &now
+	ret.TrackingNumber = trackingNumber
+	ret.UpdatedAt = now
+
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, l := range ret.Lines {
+			if err := r.engine.DispatchSupplierReturn(ret.WarehouseID, l.SkuID, l.Quantity); err != nil {
+				return domain.SupplierReturn{}, err
+			}
+			r.appendMovement(domain.Movement{
+				SkuID: l.SkuID, WarehouseID: ret.WarehouseID, Type: domain.MovementSupplierReturn, Qty: l.Quantity,
+				RefType: "RTV", RefID: returnID, ActorID: actorID, Reason: "Supplier return dispatched: " + l.Reason,
+			})
+		}
+		r.supplierReturns[returnID] = &ret
+		return ret, nil
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.SupplierReturn{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, l := range ret.Lines {
+		tag, err := tx.Exec(ctx, `
+			UPDATE stock_items
+			SET on_hand = on_hand - $1, unsellable = unsellable - $1, version = version + 1, updated_at = NOW()
+			WHERE sku_id = $2 AND warehouse_id = $3 AND on_hand >= $1 AND unsellable >= $1
+		`, l.Quantity, l.SkuID, ret.WarehouseID)
+		if err != nil {
+			return domain.SupplierReturn{}, dependency.Wrap(err)
+		}
+		if tag.RowsAffected() == 0 {
+			return domain.SupplierReturn{}, domain.ErrInsufficientStock
+		}
+
+		err = insertMovement(ctx, tx, domain.Movement{
+			SkuID: l.SkuID, WarehouseID: ret.WarehouseID, Type: domain.MovementSupplierReturn, Qty: l.Quantity,
+			RefType: "RTV", RefID: returnID, ActorID: actorID, Reason: "Supplier return dispatched: " + l.Reason,
+		})
+		if err != nil {
+			return domain.SupplierReturn{}, err
+		}
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE supplier_returns
+		SET status = $1, dispatched_by = $2, dispatched_at = $3, tracking_number = $4, updated_at = $5
+		WHERE return_id = $6
+	`, ret.Status, ret.DispatchedBy, ret.DispatchedAt, ret.TrackingNumber, ret.UpdatedAt, returnID)
+	if err != nil {
+		return domain.SupplierReturn{}, dependency.Wrap(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.SupplierReturn{}, dependency.Wrap(err)
+	}
+
+	return ret, nil
+}
+
+// GetSupplierReturn retrieves a supplier return and its lines.
+func (r *InventoryRepository) GetSupplierReturn(ctx context.Context, returnID string) (domain.SupplierReturn, bool, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		ret, ok := r.supplierReturns[returnID]
+		if !ok {
+			return domain.SupplierReturn{}, false, nil
+		}
+		return *ret, true, nil
+	}
+
+	var ret domain.SupplierReturn
+	err := r.pool.QueryRow(ctx, `
+		SELECT r.return_id, r.supplier_id, COALESCE(s.name, ''), r.warehouse_id, r.po_id, r.status,
+		       r.created_by, r.dispatched_by, r.dispatched_at, r.tracking_number, r.notes, r.created_at, r.updated_at
+		FROM supplier_returns r
+		LEFT JOIN suppliers s ON r.supplier_id = s.supplier_id
+		WHERE r.return_id = $1
+	`, returnID).Scan(
+		&ret.ReturnID, &ret.SupplierID, &ret.SupplierName, &ret.WarehouseID, &ret.POID, &ret.Status,
+		&ret.CreatedBy, &ret.DispatchedBy, &ret.DispatchedAt, &ret.TrackingNumber, &ret.Notes, &ret.CreatedAt, &ret.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return domain.SupplierReturn{}, false, nil
+	}
+	if err != nil {
+		return domain.SupplierReturn{}, false, dependency.Wrap(err)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, return_id, sku_id, quantity, reason
+		FROM supplier_return_lines WHERE return_id = $1 ORDER BY id
+	`, returnID)
+	if err != nil {
+		return domain.SupplierReturn{}, false, dependency.Wrap(err)
+	}
+	defer rows.Close()
+
+	ret.Lines = make([]domain.SupplierReturnLine, 0)
+	for rows.Next() {
+		var l domain.SupplierReturnLine
+		if err := rows.Scan(&l.ID, &l.ReturnID, &l.SkuID, &l.Quantity, &l.Reason); err != nil {
+			return domain.SupplierReturn{}, false, dependency.Wrap(err)
+		}
+		ret.Lines = append(ret.Lines, l)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.SupplierReturn{}, false, dependency.Wrap(err)
+	}
+
+	return ret, true, nil
+}
+
+// ListSupplierReturns lists supplier returns by warehouse or supplier.
+func (r *InventoryRepository) ListSupplierReturns(ctx context.Context, warehouseID, supplierID string) ([]domain.SupplierReturn, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		list := make([]domain.SupplierReturn, 0)
+		for _, ret := range r.supplierReturns {
+			if (warehouseID == "" || ret.WarehouseID == warehouseID) && (supplierID == "" || ret.SupplierID == supplierID) {
+				list = append(list, *ret)
+			}
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.After(list[j].CreatedAt) })
+		return list, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`
+		SELECT r.return_id, r.supplier_id, COALESCE(s.name, ''), r.warehouse_id, r.po_id, r.status,
+		       r.created_by, r.dispatched_by, r.dispatched_at, r.tracking_number, r.notes, r.created_at, r.updated_at
+		FROM supplier_returns r
+		LEFT JOIN suppliers s ON r.supplier_id = s.supplier_id
+		WHERE 1=1
+	`)
+	args := []any{}
+	idx := 1
+	if warehouseID != "" {
+		sb.WriteString(fmt.Sprintf(" AND r.warehouse_id = $%d", idx))
+		args = append(args, warehouseID)
+		idx++
+	}
+	if supplierID != "" {
+		sb.WriteString(fmt.Sprintf(" AND r.supplier_id = $%d", idx))
+		args = append(args, supplierID)
+		idx++
+	}
+	sb.WriteString(" ORDER BY r.created_at DESC")
+
+	rows, err := r.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+
+	list := make([]domain.SupplierReturn, 0)
+	for rows.Next() {
+		var ret domain.SupplierReturn
+		if err := rows.Scan(
+			&ret.ReturnID, &ret.SupplierID, &ret.SupplierName, &ret.WarehouseID, &ret.POID, &ret.Status,
+			&ret.CreatedBy, &ret.DispatchedBy, &ret.DispatchedAt, &ret.TrackingNumber, &ret.Notes, &ret.CreatedAt, &ret.UpdatedAt,
+		); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		list = append(list, ret)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	return list, nil
+}

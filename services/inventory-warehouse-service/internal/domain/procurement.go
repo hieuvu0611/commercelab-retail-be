@@ -159,3 +159,28 @@ func ValidateInspectionLine(orderedQty, deliveredQty, passedQty, damagedQty int6
 	}
 	return short, nil
 }
+
+type SupplierReturnLine struct {
+	ID       int64  `json:"id,omitempty"`
+	ReturnID string `json:"returnId,omitempty"`
+	SkuID    string `json:"skuId"`
+	Quantity int64  `json:"quantity"`
+	Reason   string `json:"reason"`
+}
+
+type SupplierReturn struct {
+	ReturnID       string               `json:"returnId"`
+	SupplierID     string               `json:"supplierId"`
+	SupplierName   string               `json:"supplierName,omitempty"`
+	WarehouseID    string               `json:"warehouseId"`
+	POID           string               `json:"poId,omitempty"`
+	Status         string               `json:"status"` // DRAFT, DISPATCHED, COMPLETED, CANCELLED
+	CreatedBy      string               `json:"createdBy"`
+	DispatchedBy   string               `json:"dispatchedBy,omitempty"`
+	DispatchedAt   *time.Time           `json:"dispatchedAt,omitempty"`
+	TrackingNumber string               `json:"trackingNumber,omitempty"`
+	Notes          string               `json:"notes"`
+	Lines          []SupplierReturnLine `json:"lines,omitempty"`
+	CreatedAt      time.Time            `json:"createdAt"`
+	UpdatedAt      time.Time            `json:"updatedAt"`
+}

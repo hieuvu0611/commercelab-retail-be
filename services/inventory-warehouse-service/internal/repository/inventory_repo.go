@@ -44,9 +44,10 @@ type InventoryRepository struct {
 	reservations   map[string]*ReservationRecord
 	movements      []domain.Movement // memory mode only; guarded by mu
 	suppliers      map[string]*domain.Supplier
-	purchaseOrders map[string]*domain.PurchaseOrder
-	inspections    map[string]*domain.ReceivingInspection
-	now            func() time.Time
+	purchaseOrders  map[string]*domain.PurchaseOrder
+	inspections     map[string]*domain.ReceivingInspection
+	supplierReturns map[string]*domain.SupplierReturn
+	now             func() time.Time
 }
 
 // SetClock replaces the time source (tests use a fake clock for expiry rules).
@@ -59,13 +60,14 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 		{SkuID: "SKU-BALO-BLACK-20L", WarehouseID: "WH-HN-01", OnHand: 5, Unsellable: 0, Reserved: 0, Committed: 0, Version: 1},
 	}
 	repo := &InventoryRepository{
-		pool:           pool,
-		engine:         domain.NewLedgerEngine(seed),
-		reservations:   make(map[string]*ReservationRecord),
-		suppliers:      make(map[string]*domain.Supplier),
-		purchaseOrders: make(map[string]*domain.PurchaseOrder),
-		inspections:    make(map[string]*domain.ReceivingInspection),
-		now:            time.Now,
+		pool:            pool,
+		engine:          domain.NewLedgerEngine(seed),
+		reservations:    make(map[string]*ReservationRecord),
+		suppliers:       make(map[string]*domain.Supplier),
+		purchaseOrders:  make(map[string]*domain.PurchaseOrder),
+		inspections:     make(map[string]*domain.ReceivingInspection),
+		supplierReturns: make(map[string]*domain.SupplierReturn),
+		now:             time.Now,
 	}
 	// Seed memory suppliers
 	repo.suppliers["SUP-EVEREST-01"] = &domain.Supplier{
