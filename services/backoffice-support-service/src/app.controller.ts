@@ -135,6 +135,28 @@ export class AppController {
     return new ApiResult(item, 'Return request approved successfully');
   }
 
+  @Post('/api/v1/backoffice/returns/:rmaId/receive')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'ADMIN')
+  receiveReturnParcel(@Req() req: any, @Param('rmaId') rmaId: string) {
+    const actor = req.user?.userId || 'warehouse-staff';
+    const item = this.returnsService.receiveRma(rmaId, actor);
+    return new ApiResult(item, 'Return parcel received by warehouse (SC07)');
+  }
+
+  @Post('/api/v1/backoffice/returns/:rmaId/qc')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'ADMIN')
+  submitQcInspection(
+    @Req() req: any,
+    @Param('rmaId') rmaId: string,
+    @Body('results') results: Array<{ skuId: string; passedQuantity: number; failedQuantity: number }>,
+  ) {
+    const actor = req.user?.userId || 'qc-inspector';
+    const item = this.returnsService.submitQcResult(rmaId, results || [], actor);
+    return new ApiResult(item, 'QC inspection recorded successfully (SC07)');
+  }
+
   @Post('/api/v1/backoffice/returns/:rmaId/reject')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')

@@ -338,6 +338,80 @@ export class ReturnsRmaService {
   }
 
   /**
+   * Kho tiếp nhận kiện hàng trả (SC07: OnHand +qty, Unsellable +qty, Available giữ nguyên)
+   */
+  receiveRma(returnId: string, actor: string): ReturnCaseRecord {
+    const record = this.getReturn(returnId);
+    if (!['REQUESTED', 'APPROVED'].includes(record.status)) {
+      throw new ConflictException(`Không thể nhận hàng trả ở trạng thái ${record.status}`);
+    }
+
+    const nowIso = new Date().toISOString();
+    record.status = 'RECEIVED';
+    record.updatedAt = nowIso;
+
+    for (const item of record.items) {
+      item.receivedQuantity = item.quantity;
+    }
+
+    record.timeline.push({
+      at: nowIso,
+      actor,
+      note: `Kho đã tiếp nhận kiện hàng trả. Tồn kho chuyển vào xô Chờ kiểm định (Unsellable +${record.items.map((i) => i.quantity).reduce((a, b) => a + b, 0)}).`,
+    });
+
+    return record;
+  }
+
+  /**
+   * Kho thẩm định chất lượng QC (SC07: Đạt -> Unsellable -qty, Available +qty)
+   */
+  submitQcResult(
+    returnId: string,
+    results: Array<{ skuId: string; passedQuantity: number; failedQuantity: number }>,
+    actor: string,
+  ): ReturnCaseRecord {
+    const record = this.getReturn(returnId);
+    if (record.status !== 'RECEIVED') {
+      throw new ConflictException(`Chỉ có thể nhập kết quả QC cho hồ sơ đã nhận hàng (hiện tại: ${record.status})`);
+    }
+
+    let totalPassed = 0;
+    let totalFailed = 0;
+
+    for (const res of results) {
+      const item = record.items.find((i) => i.skuId === res.skuId);
+      if (item) {
+        item.qcPassedQuantity = res.passedQuantity;
+        item.qcFailedQuantity = res.failedQuantity;
+        totalPassed += res.passedQuantity;
+        totalFailed += res.failedQuantity;
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    record.updatedAt = nowIso;
+
+    if (totalPassed > 0) {
+      record.status = 'QC_PASSED';
+      record.timeline.push({
+        at: nowIso,
+        actor,
+        note: `Hoàn tất thẩm định QC: ${totalPassed} sản phẩm ĐẠT chuẩn (trả về bán tiếp), ${totalFailed} sản phẩm LỖI/HỎNG (cách ly tiêu hủy).`,
+      });
+    } else {
+      record.status = 'QC_FAILED';
+      record.timeline.push({
+        at: nowIso,
+        actor,
+        note: `Hoàn tất thẩm định QC: Toàn bộ ${totalFailed} sản phẩm không đạt chuẩn chất lượng.`,
+      });
+    }
+
+    return record;
+  }
+
+  /**
    * Từ chối yêu cầu trả hàng -> nhả lại hạn mức returnOpenQty (I07 an toàn)
    */
   rejectReturn(returnId: string, note: string, actor: string): ReturnCaseRecord {

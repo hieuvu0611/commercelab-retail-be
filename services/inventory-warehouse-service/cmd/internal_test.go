@@ -178,3 +178,41 @@ func TestStaffStopReleasesCommittedStockInTheirWarehouseOnly_SC06(t *testing.T) 
 		t.Fatalf("unknown order = %d", rec.Code)
 	}
 }
+
+func TestReturnReceiveAndQC_SC07(t *testing.T) {
+	authtest.Configure(t)
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure(testInternalToken)
+	repo := repository.NewInventoryRepository(nil)
+	srv := newTestServer(repo, false)
+
+	rec := httptest.NewRecorder()
+	body := `{"warehouseId":"WH-HCM-01","skuId":"SKU-BALO-BLACK-20L","quantity":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inventory/returns/receive", strings.NewReader(body))
+	srv.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("receive return = %d %s", rec.Code, rec.Body.String())
+	}
+	var res struct {
+		Data struct {
+			OnHand     int64 `json:"onHand"`
+			Unsellable int64 `json:"unsellable"`
+			Available  int64 `json:"available"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &res)
+	if res.Data.OnHand != 11 || res.Data.Unsellable != 1 || res.Data.Available != 10 {
+		t.Fatalf("unexpected stock after receive return: %+v, want onHand=11, unsellable=1, available=10", res.Data)
+	}
+
+	recQc := httptest.NewRecorder()
+	reqQc := httptest.NewRequest(http.MethodPost, "/api/v1/inventory/returns/qc-pass", strings.NewReader(body))
+	srv.ServeHTTP(recQc, reqQc)
+	if recQc.Code != http.StatusOK {
+		t.Fatalf("qc pass = %d %s", recQc.Code, recQc.Body.String())
+	}
+	_ = json.Unmarshal(recQc.Body.Bytes(), &res)
+	if res.Data.OnHand != 11 || res.Data.Unsellable != 0 || res.Data.Available != 11 {
+		t.Fatalf("unexpected stock after qc pass: %+v, want onHand=11, unsellable=0, available=11", res.Data)
+	}
+}

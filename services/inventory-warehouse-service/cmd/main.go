@@ -256,6 +256,63 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	mux.Handle("POST /api/v1/inventory/shipments/stop",
 		auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(http.HandlerFunc(stop))))
 
+	// SC07: Kho nhận hàng trả -> OnHand +qty, Unsellable +qty, Available giữ nguyên
+	mux.Handle("POST /api/v1/inventory/returns/receive", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			WarehouseID string `json:"warehouseId"`
+			SkuID       string `json:"skuId"`
+			Quantity    int64  `json:"quantity"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SkuID == "" || req.Quantity <= 0 {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and positive quantity are required", nil)
+			return
+		}
+		st, err := repo.ReceiveReturnedItem(r.Context(), req.WarehouseID, req.SkuID, req.Quantity)
+		if err != nil {
+			response.Error(w, r, http.StatusConflict, "RECEIVE_RETURN_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Kho nhận hàng trả: OnHand +qty, Unsellable +qty (SC07)", stockView(st), nil)
+	})))
+
+	// SC07: Thẩm định QC đạt -> Unsellable -qty, Available +qty
+	mux.Handle("POST /api/v1/inventory/returns/qc-pass", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			WarehouseID string `json:"warehouseId"`
+			SkuID       string `json:"skuId"`
+			Quantity    int64  `json:"quantity"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SkuID == "" || req.Quantity <= 0 {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and positive quantity are required", nil)
+			return
+		}
+		st, err := repo.ApproveReturnQC(r.Context(), req.WarehouseID, req.SkuID, req.Quantity)
+		if err != nil {
+			response.Error(w, r, http.StatusConflict, "QC_PASS_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "QC đạt: Chuyển Unsellable sang Available (SC07)", stockView(st), nil)
+	})))
+
+	// SC07: Thẩm định QC hỏng -> giữ nguyên trong Unsellable để cách ly/tiêu hủy
+	mux.Handle("POST /api/v1/inventory/returns/qc-fail", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			WarehouseID string `json:"warehouseId"`
+			SkuID       string `json:"skuId"`
+			Quantity    int64  `json:"quantity"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SkuID == "" || req.Quantity <= 0 {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and positive quantity are required", nil)
+			return
+		}
+		st, ok, err := repo.GetStock(r.Context(), req.WarehouseID, req.SkuID)
+		if err != nil || !ok {
+			response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", "Không tìm thấy tồn kho cho SKU "+req.SkuID, nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "QC không đạt: Hàng giữ trong Unsellable cách ly (SC07)", stockView(st), nil)
+	})))
+
 	registerAdminRoutes(mux, repo)
 
 	return middleware.Chain(mux)
