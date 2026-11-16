@@ -1,11 +1,13 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { CreateReturnRequestDto } from './create-return.dto';
 import { DatabaseService } from '../../database/database.service';
 import { PaymentClient } from './payment.client';
+import { MakerCheckerPolicyService } from '../../common/guards/maker-checker.guard';
 
 export interface OrderLineCeiling {
   orderId: string;
@@ -74,6 +76,7 @@ export class ReturnsRmaService {
   constructor(
     private readonly db: DatabaseService,
     private readonly paymentClient: PaymentClient,
+    private readonly makerChecker: MakerCheckerPolicyService,
   ) {
     // Seed standard SC01 / SC07 order ceilings for O-001 (delivered now)
     const nowIso = new Date().toISOString();
@@ -465,6 +468,19 @@ export class ReturnsRmaService {
 
     const amountVnd = record.refundableAmountVnd;
 
+    // Ngưỡng phê duyệt hoàn tiền (P05/P10):
+    // Nếu hoàn > 500.000đ: Bắt buộc phải có phiếu duyệt Maker-Checker đã APPROVED từ Quản lý
+    if (amountVnd > 500_000) {
+      const approval = this.makerChecker.getApprovalByReference(record.returnId);
+      if (!approval || approval.status !== 'APPROVED') {
+        throw new ForbiddenException(
+          `Hoàn tiền ${amountVnd.toLocaleString(
+            'vi-VN',
+          )} đ (> 500.000đ) cần được phê duyệt Maker-Checker bởi Quản lý trước khi chi trả`,
+        );
+      }
+    }
+
     // 1. Khóa trần hoàn tiền (I03, SC08)
     await this.paymentClient.reserveRefundCeiling(record.orderId, amountVnd);
 
@@ -490,6 +506,24 @@ export class ReturnsRmaService {
     });
 
     return record;
+  }
+
+  /**
+   * Tạo yêu cầu phê duyệt Maker-Checker cho hoàn tiền giá trị lớn > 500.000đ (P05/P10)
+   */
+  async requestRefundApproval(returnId: string, makerUserId: string, reason?: string) {
+    const record = this.getReturn(returnId);
+    return this.makerChecker.createApprovalRequest({
+      requestType: 'EXCEPTION_REFUND',
+      referenceId: returnId,
+      amountVnd: record.refundableAmountVnd,
+      makerUserId,
+      reason:
+        reason ||
+        `Yêu cầu duyệt chi hoàn tiền ${record.refundableAmountVnd.toLocaleString(
+          'vi-VN',
+        )} đ cho hồ sơ trả hàng ${returnId}`,
+    });
   }
 
   /**

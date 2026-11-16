@@ -166,6 +166,51 @@ export class AppController {
     return new ApiResult(item, 'Refund disbursed successfully through payment simulator (I03/SC08)');
   }
 
+  @Post('/api/v1/backoffice/returns/:rmaId/request-approval')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
+  async requestRefundApproval(
+    @Req() req: any,
+    @Param('rmaId') rmaId: string,
+    @Body('reason') reason?: string,
+  ) {
+    const makerUserId = req.user?.userId || 'support-agent';
+    const record = await this.returnsService.requestRefundApproval(rmaId, makerUserId, reason);
+    return new ApiResult(record, 'Refund approval request created successfully');
+  }
+
+  @Get('/api/v1/backoffice/approvals')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'ADMIN')
+  listApprovals(
+    @Query('status') status?: string,
+    @Query('requestType') requestType?: any,
+  ) {
+    const list = this.makerChecker.listApprovals({ status, requestType });
+    return new ApiResult(list, 'Approvals retrieved successfully');
+  }
+
+  @Post('/api/v1/backoffice/approvals/:id/decide')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'ADMIN')
+  async decideApproval(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body('action') action: 'APPROVE' | 'REJECT',
+    @Body('note') note?: string,
+  ) {
+    const checkerUserId = req.user?.userId || 'approver';
+    const checkerRole = req.user?.roles?.[0] || 'ADMIN';
+    const result = await this.makerChecker.decideApproval(
+      id,
+      checkerUserId,
+      checkerRole,
+      action,
+      note,
+    );
+    return new ApiResult(result, `Approval ${action.toLowerCase()}d successfully`);
+  }
+
   @Post('/api/v1/backoffice/returns/:rmaId/reject')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
