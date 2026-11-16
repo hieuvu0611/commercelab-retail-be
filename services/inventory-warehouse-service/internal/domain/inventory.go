@@ -37,14 +37,17 @@ func (s StockItem) Available() int64 {
 
 // Movement types of the stock ledger (I06): every change of a stock bucket has one record.
 const (
-	MovementOpening       = "OPENING"
-	MovementReserve       = "RESERVE"
-	MovementCommit        = "COMMIT"
-	MovementRelease       = "RELEASE"
-	MovementHandover      = "HANDOVER"
-	MovementReturnReceive = "RETURN_RECEIVE"
-	MovementQCPass        = "QC_PASS"
-	MovementAdjust        = "ADJUST"
+	MovementOpening         = "OPENING"
+	MovementReserve         = "RESERVE"
+	MovementCommit          = "COMMIT"
+	MovementRelease         = "RELEASE"
+	MovementHandover        = "HANDOVER"
+	MovementReturnReceive   = "RETURN_RECEIVE"
+	MovementQCPass          = "QC_PASS"
+	MovementAdjust          = "ADJUST"
+	MovementPOReceiveGood   = "PO_RECEIVE_GOOD"
+	MovementPOReceiveDamage = "PO_RECEIVE_DAMAGED"
+	MovementSupplierReturn  = "SUPPLIER_RETURN"
 )
 
 // SystemActor is the actor of movements that no signed-in user caused (order flow, workers).
@@ -241,6 +244,29 @@ func (e *LedgerEngine) ApproveReturnQC(warehouseID, skuID string, qty int64) err
 		return ErrInvalidReservationState
 	}
 	st.Unsellable -= qty
+	st.Version++
+	return nil
+}
+
+// ReceiveInboundQC thực thi SC09: Tiếp nhận hàng và kiểm định chất lượng từ PO
+// Nhận passedQty hàng đạt -> OnHand += passedQty, Available += passedQty
+// Nhận damagedQty hàng hỏng -> OnHand += damagedQty, Unsellable += damagedQty, Available giữ nguyên
+// Tổng cộng: OnHand += (passedQty + damagedQty), Unsellable += damagedQty, Available += passedQty
+func (e *LedgerEngine) ReceiveInboundQC(warehouseID, skuID string, passedQty, damagedQty int64) error {
+	if passedQty < 0 || damagedQty < 0 || (passedQty == 0 && damagedQty == 0) {
+		return ErrInvalidLines
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	k := stockKey{skuID, warehouseID}
+	st, ok := e.stocks[k]
+	if !ok {
+		st = &StockItem{SkuID: skuID, WarehouseID: warehouseID, Version: 1}
+		e.stocks[k] = st
+	}
+	st.OnHand += (passedQty + damagedQty)
+	st.Unsellable += damagedQty
 	st.Version++
 	return nil
 }

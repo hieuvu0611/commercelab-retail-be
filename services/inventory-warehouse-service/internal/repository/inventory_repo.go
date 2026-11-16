@@ -45,6 +45,7 @@ type InventoryRepository struct {
 	movements      []domain.Movement // memory mode only; guarded by mu
 	suppliers      map[string]*domain.Supplier
 	purchaseOrders map[string]*domain.PurchaseOrder
+	inspections    map[string]*domain.ReceivingInspection
 	now            func() time.Time
 }
 
@@ -63,6 +64,7 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 		reservations:   make(map[string]*ReservationRecord),
 		suppliers:      make(map[string]*domain.Supplier),
 		purchaseOrders: make(map[string]*domain.PurchaseOrder),
+		inspections:    make(map[string]*domain.ReceivingInspection),
 		now:            time.Now,
 	}
 	// Seed memory suppliers
