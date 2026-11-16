@@ -1,9 +1,13 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { ApprovalCandidate, MakerCheckerPolicyService } from './common/guards/maker-checker.guard';
 import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
 import { CreateReturnDto } from './modules/returns-rma/create-return.dto';
 import { ApiResult } from './common/http/api-response.interceptor';
+import { DatabaseService } from './database/database.service';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { RolesGuard } from './common/guards/roles.guard';
+import { Roles } from './common/guards/roles.decorator';
 
 @Controller()
 export class AppController {
@@ -11,19 +15,26 @@ export class AppController {
     private readonly makerChecker: MakerCheckerPolicyService,
     private readonly returnsService: ReturnsRmaService,
     private readonly exceptionCases: ExceptionCasesService,
+    private readonly databaseService: DatabaseService,
   ) {}
 
   @Get('/health')
-  health() {
-    return new ApiResult({
-      service: 'backoffice-support-service',
-      runtime: 'NestJS',
-      postgresSchema: 'support',
-      mongoCollections: ['support_exception_cases', 'support_rma_dossiers'],
-    }, 'backoffice-support-service healthy');
+  async health() {
+    const dbOk = await this.databaseService.ping();
+    return new ApiResult(
+      {
+        service: 'backoffice-support-service',
+        runtime: 'NestJS',
+        postgresSchema: 'support',
+        postgresConnected: dbOk,
+      },
+      'backoffice-support-service healthy',
+    );
   }
 
   @Get('/api/v1/backoffice/exception-cases')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
   listExceptionCases() {
     const items = this.exceptionCases.listOpenCases();
     return new ApiResult(items, 'Exception cases retrieved successfully', {
@@ -35,6 +46,8 @@ export class AppController {
   }
 
   @Post('/api/v1/backoffice/returns')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
   createReturnRequest(
     @Body()
     body: CreateReturnDto,
@@ -50,11 +63,16 @@ export class AppController {
   }
 
   @Post('/api/v1/backoffice/approvals/validate')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'ADMIN')
   validateApproval(@Body() body: ApprovalCandidate) {
     this.makerChecker.validateApproval(body);
-    return new ApiResult({
-      approved: true,
-      ...body,
-    }, 'Approval is valid');
+    return new ApiResult(
+      {
+        approved: true,
+        ...body,
+      },
+      'Approval is valid',
+    );
   }
 }

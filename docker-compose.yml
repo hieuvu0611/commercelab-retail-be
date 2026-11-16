@@ -406,6 +406,9 @@ services:
       NODE_OPTIONS: "--max-old-space-size=180"
       UV_THREADPOOL_SIZE: "2"
       BACKOFFICE_SUPPORT_PORT: "8088"
+      DATABASE_URL_SUPPORT: "postgres://support_svc_user:support_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=support"
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
     ports:
       - "${BACKOFFICE_SUPPORT_HOST_PORT:-8088}:8088"
     depends_on: *infra-healthy
