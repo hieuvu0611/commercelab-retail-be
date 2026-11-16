@@ -112,4 +112,27 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
     expect(rejected.status).toBe('REJECTED');
     expect(service.getCeiling('O-001', 'SKU-BALO-BLACK-20L')?.returnOpenQty).toBe(0);
   });
+
+  it('handles warehouse receive and QC inspection workflow (SC07)', async () => {
+    const rma = await service.openRmaRequest({
+      orderId: 'O-001',
+      reason: 'CHANGED_MIND',
+      lines: [{ skuId: 'SKU-BALO-BLACK-20L', quantity: 1 }],
+    });
+
+    // 1. Warehouse receives package
+    const received = service.receiveRma(rma.returnId, 'wh-staff-1');
+    expect(received.status).toBe('RECEIVED');
+    expect(received.items[0].receivedQuantity).toBe(1);
+
+    // 2. Warehouse QC inspects and passes
+    const qcPassed = service.submitQcResult(
+      rma.returnId,
+      [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 1, failedQuantity: 0 }],
+      'qc-staff-1',
+    );
+    expect(qcPassed.status).toBe('QC_PASSED');
+    expect(qcPassed.items[0].qcPassedQuantity).toBe(1);
+    expect(qcPassed.items[0].qcFailedQuantity).toBe(0);
+  });
 });
