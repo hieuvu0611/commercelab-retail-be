@@ -314,6 +314,7 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	})))
 
 	registerAdminRoutes(mux, repo)
+	registerProcurementRoutes(mux, repo)
 
 	return middleware.Chain(mux)
 }
