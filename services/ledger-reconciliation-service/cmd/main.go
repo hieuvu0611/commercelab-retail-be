@@ -1,31 +1,40 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/migrations"
 )
 
-func main() {
-	port := config.EnvOrDefault("LEDGER_RECONCILIATION_PORT", "8086")
-	s3Client := s3.NewFromEnv()
+func NewServer(repo *repository.LedgerRepository, s3Client *s3.Client, pgConnected bool) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		bucket := ""
+		if s3Client != nil {
+			bucket = s3Client.Bucket
+		}
 		response.JSON(w, http.StatusOK, "ledger-reconciliation-service healthy", map[string]any{
 			"service":        "ledger-reconciliation-service",
 			"postgresSchema": "ledger",
-			"s3Bucket":       s3Client.Bucket,
+			"s3Bucket":       bucket,
+			"pgConnected":    pgConnected,
 		}, nil)
 	})
 
-	// B07, SC11: Đối soát sao kê cổng thanh toán (lưu trên AWS S3)
+	// B07, SC11: Đối soát sao kê cổng thanh toán (legacy test endpoint)
 	mux.HandleFunc("POST /api/v1/reconciliations/evaluate", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			OrderID             string `json:"orderId"`
@@ -40,10 +49,44 @@ func main() {
 		if req.StatementFileKey == "" {
 			req.StatementFileKey = "settlements/2026-10-26-gateway.csv"
 		}
-		result := domain.EvaluateSettlement(req.OrderID, req.VerifiedCapturedVND, 1, req.ActualPayoutVND, s3Client.ObjectURL(req.StatementFileKey))
+		s3URL := req.StatementFileKey
+		if s3Client != nil {
+			s3URL = s3Client.ObjectURL(req.StatementFileKey)
+		}
+		result := domain.EvaluateSettlement(req.OrderID, req.VerifiedCapturedVND, 1, req.ActualPayoutVND, s3URL)
 		response.JSON(w, http.StatusOK, "Đối soát giao dịch hoàn tất (SC11)", result, nil)
 	})
 
+	// Register P10 Ledger APIs
+	registerLedgerRoutes(mux, repo)
+
+	return middleware.Chain(mux)
+}
+
+func main() {
+	port := config.EnvOrDefault("LEDGER_RECONCILIATION_PORT", "8086")
+	pgURL := config.EnvOrDefault("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/commerce_lab?sslmode=disable&search_path=ledger")
+	s3Client := s3.NewFromEnv()
+
+	ctx := context.Background()
+
+	if migrate.EnabledOnStart() {
+		if _, err := migrate.Up(ctx, pgURL, migrations.FS); err != nil {
+			log.Fatalf("[ledger-reconciliation-service] migrations failed: %v", err)
+		}
+	}
+
+	pgPool, err := db.ConnectPostgres(ctx, pgURL)
+	if err := dependency.CheckStartup("ledger-reconciliation-service", "postgres", err); err != nil {
+		log.Printf("[ledger-reconciliation-service] postgres not available (%v); operating in-memory", err)
+	}
+	if pgPool != nil {
+		defer pgPool.Close()
+	}
+
+	repo := repository.NewLedgerRepository(pgPool)
+	server := NewServer(repo, s3Client, pgPool != nil)
+
 	log.Printf("[ledger-reconciliation-service] listening on :%s (schema: ledger, S3 bucket: %s)", port, s3Client.Bucket)
-	log.Fatal(http.ListenAndServe(":"+port, middleware.Chain(mux)))
+	log.Fatal(http.ListenAndServe(":"+port, server))
 }
