@@ -224,6 +224,23 @@ export class AppController {
     return new ApiResult(item, 'Return request rejected and ceiling released');
   }
 
+  @Post('/api/v1/backoffice/returns/:rmaId/exchange')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
+  async createExchangeOrder(
+    @Req() req: any,
+    @Param('rmaId') rmaId: string,
+    @Body('replacementSkuId') replacementSkuId?: string,
+  ) {
+    const actor = req.user?.userId || 'support-agent';
+    const item = await this.returnsService.createLinkedExchangeOrder(
+      rmaId,
+      replacementSkuId,
+      actor,
+    );
+    return new ApiResult(item, 'Exchange order linked successfully (B06)');
+  }
+
   // ==========================================
   // EXCEPTION CASES & APPROVALS
   // ==========================================

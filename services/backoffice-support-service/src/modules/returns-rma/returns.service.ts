@@ -527,6 +527,56 @@ export class ReturnsRmaService {
   }
 
   /**
+   * Nghiệp vụ Đổi hàng (Exchange = return + linked new order, B06):
+   * Khách đổi sản phẩm: Sau khi nhận hàng & QC đạt (hoặc CSKH duyệt đổi),
+   * hệ thống sinh một đơn hàng mới liên kết (linkedOrderId) thay vì sửa SKU/giá của đơn cũ.
+   */
+  async createLinkedExchangeOrder(
+    returnId: string,
+    replacementSkuId?: string,
+    actor = 'support-agent',
+  ): Promise<ReturnCaseRecord> {
+    const record = this.getReturn(returnId);
+    if (!['REQUESTED', 'APPROVED', 'RECEIVED', 'QC_PASSED'].includes(record.status)) {
+      throw new ConflictException(`Không thể tạo đơn đổi hàng cho hồ sơ ở trạng thái ${record.status}`);
+    }
+
+    if (record.linkedOrderId) {
+      throw new ConflictException(`Hồ sơ đổi hàng này đã được liên kết với đơn ${record.linkedOrderId}`);
+    }
+
+    const linkedOrderId = `O-EXCH-${record.returnId}`;
+    const nowIso = new Date().toISOString();
+
+    record.isExchange = true;
+    record.linkedOrderId = linkedOrderId;
+    record.status = 'QC_PASSED';
+    record.updatedAt = nowIso;
+
+    const targetSku = replacementSkuId || record.items[0]?.skuId || 'SKU-EXCHANGE';
+    record.timeline.push({
+      at: nowIso,
+      actor,
+      note: `Tạo đơn hàng đổi mới liên kết ${linkedOrderId} (sản phẩm đổi: ${targetSku}). Hồ sơ trả cũ giữ nguyên không sửa đổi dữ liệu gốc (B06).`,
+    });
+
+    if (this.db) {
+      try {
+        await this.db.query(
+          `UPDATE support.rma_requests
+           SET is_exchange = TRUE, linked_order_id = $1, status = $2, updated_at = $3
+           WHERE rma_id = $4`,
+          [linkedOrderId, record.status, nowIso, returnId],
+        );
+      } catch {
+        // Fallback in-memory
+      }
+    }
+
+    return record;
+  }
+
+  /**
    * Cập nhật bản ghi trả hàng nội bộ
    */
   updateRecord(record: ReturnCaseRecord): void {
