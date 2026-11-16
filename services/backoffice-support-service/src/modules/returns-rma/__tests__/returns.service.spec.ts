@@ -1,11 +1,13 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ReturnsRmaService } from '../returns.service';
 import { PaymentClient } from '../payment.client';
+import { MakerCheckerPolicyService } from '../../../common/guards/maker-checker.guard';
 import { DatabaseService } from '../../../database/database.service';
 
 describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
   let service: ReturnsRmaService;
   let paymentClient: PaymentClient;
+  let makerChecker: MakerCheckerPolicyService;
   let mockDb: any;
 
   beforeEach(() => {
@@ -14,7 +16,8 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
       ping: jest.fn().mockResolvedValue(true),
     };
     paymentClient = new PaymentClient();
-    service = new ReturnsRmaService(mockDb as DatabaseService, paymentClient);
+    makerChecker = new MakerCheckerPolicyService(mockDb as DatabaseService);
+    service = new ReturnsRmaService(mockDb as DatabaseService, paymentClient, makerChecker);
   });
 
   it('creates an RMA request within 7 days and calculates SC07 refund amount for change of mind (P09)', async () => {

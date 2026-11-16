@@ -1,11 +1,13 @@
 import { ConflictException } from '@nestjs/common';
 import { ReturnsRmaService } from '../returns.service';
 import { PaymentClient } from '../payment.client';
+import { MakerCheckerPolicyService } from '../../../common/guards/maker-checker.guard';
 import { DatabaseService } from '../../../database/database.service';
 
 describe('Refund Ceiling & Execution (P8-T04, I03, SC08)', () => {
   let service: ReturnsRmaService;
   let paymentClient: PaymentClient;
+  let makerChecker: MakerCheckerPolicyService;
   let mockDb: any;
 
   beforeEach(() => {
@@ -14,7 +16,8 @@ describe('Refund Ceiling & Execution (P8-T04, I03, SC08)', () => {
       ping: jest.fn().mockResolvedValue(true),
     };
     paymentClient = new PaymentClient();
-    service = new ReturnsRmaService(mockDb as DatabaseService, paymentClient);
+    makerChecker = new MakerCheckerPolicyService(mockDb as DatabaseService);
+    service = new ReturnsRmaService(mockDb as DatabaseService, paymentClient, makerChecker);
   });
 
   it('enforces exact SC08 math: 660k captured, 270k refunded, 300k pending -> rejects 100k, allows 90k', async () => {
