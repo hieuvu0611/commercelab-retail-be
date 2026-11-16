@@ -336,4 +336,125 @@ func TestProcurementAPI(t *testing.T) {
 			t.Errorf("expected 409 Conflict when unsellable stock is insufficient, got %d", rec.Code)
 		}
 	})
+
+	t.Run("stocktake discrepancy blocks sales immediately and requires maker != checker approval (I01, P10)", func(t *testing.T) {
+		// Initial stock for SKU-BOTTLE-BLUE-500ML: OnHand 20, Available 20, Unsellable 0
+		stBefore, _, _ := repo.GetStock(nil, "WH-HCM-01", "SKU-BOTTLE-BLUE-500ML")
+		if stBefore.OnHand != 20 || stBefore.Available() != 20 {
+			t.Fatalf("expected 20 on hand & available, got %d / %d", stBefore.OnHand, stBefore.Available())
+		}
+
+		// 1. Start stocktake session by whStaff
+		rec := call(t, srv, http.MethodPost, "/api/v1/admin/inventory/stocktakes", `{"warehouseId":"WH-HCM-01","notes":"Weekly audit"}`, &whStaff)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("start stocktake failed: %s", rec.Body.String())
+		}
+		var stkResp struct {
+			Data struct {
+				StocktakeID string `json:"stocktakeId"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &stkResp)
+		stkID := stkResp.Data.StocktakeID
+
+		// 2. Submit physical count: shelf count is 17 (3 units missing, diff = -3, unitCost = 100,000)
+		countBody := fmt.Sprintf(`{
+			"lines": [
+				{"skuId": "SKU-BOTTLE-BLUE-500ML", "countedOnHand": 17, "unitCostVnd": 100000}
+			]
+		}`)
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/stocktakes/%s/count", stkID), countBody, &whStaff)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("submit count failed: %s", rec.Body.String())
+		}
+
+		// Verify sales blocked immediately (I01):
+		// Available must drop from 20 to 17
+		// Unsellable must increase from 0 to 3
+		stDuring, _, _ := repo.GetStock(nil, "WH-HCM-01", "SKU-BOTTLE-BLUE-500ML")
+		if stDuring.Available() != 17 {
+			t.Errorf("Sales not blocked! Available: got %d, want 17", stDuring.Available())
+		}
+		if stDuring.Unsellable != 3 {
+			t.Errorf("Unsellable: got %d, want 3", stDuring.Unsellable)
+		}
+
+		// Get adjustment ID
+		var submitResp struct {
+			Data struct {
+				Adjustments []struct {
+					AdjustmentID string `json:"adjustmentId"`
+				} `json:"adjustments"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &submitResp)
+		if len(submitResp.Data.Adjustments) == 0 {
+			t.Fatalf("expected adjustment created")
+		}
+		adjID := submitResp.Data.Adjustments[0].AdjustmentID
+
+		// 3. Maker (whStaff) attempts to self-approve -> 403 Forbidden (P10)
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/adjustments/%s/decide", adjID), `{"action":"APPROVE"}`, &whStaff)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for self-approval, got %d", rec.Code)
+		}
+
+		// 4. Warehouse Manager (hcmManager) approves small discrepancy (3 units <= 5 units, 300k <= 2M)
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/adjustments/%s/decide", adjID), `{"action":"APPROVE","note":"Verified shelf count loss"}`, &hcmManager)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("manager approval failed: %s", rec.Body.String())
+		}
+
+		// Verify final stock:
+		// OnHand is now 17
+		// Unsellable is 0
+		// Available is 17
+		stFinal, _, _ := repo.GetStock(nil, "WH-HCM-01", "SKU-BOTTLE-BLUE-500ML")
+		if stFinal.OnHand != 17 {
+			t.Errorf("final OnHand: got %d, want 17", stFinal.OnHand)
+		}
+		if stFinal.Unsellable != 0 {
+			t.Errorf("final Unsellable: got %d, want 0", stFinal.Unsellable)
+		}
+		if stFinal.Available() != 17 {
+			t.Errorf("final Available: got %d, want 17", stFinal.Available())
+		}
+	})
+
+	t.Run("large stock adjustment threshold requires supply chain or admin", func(t *testing.T) {
+		// Large count discrepancy: diff = -10 (> 5 units)
+		rec := call(t, srv, http.MethodPost, "/api/v1/admin/inventory/stocktakes", `{"warehouseId":"WH-HCM-01"}`, &whStaff)
+		var stkResp struct {
+			Data struct {
+				StocktakeID string `json:"stocktakeId"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &stkResp)
+
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/stocktakes/%s/count", stkResp.Data.StocktakeID), `{
+			"lines": [{"skuId": "SKU-BALO-BLACK-20L", "countedOnHand": 85, "unitCostVnd": 200000}]
+		}`, &whStaff)
+		var submitResp struct {
+			Data struct {
+				Adjustments []struct {
+					AdjustmentID string `json:"adjustmentId"`
+				} `json:"adjustments"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &submitResp)
+		largeAdjID := submitResp.Data.Adjustments[0].AdjustmentID
+
+		// Warehouse manager attempts to approve >5 units -> rejected 403
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/adjustments/%s/decide", largeAdjID), `{"action":"APPROVE"}`, &hcmManager)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for warehouse manager on large discrepancy, got %d", rec.Code)
+		}
+
+		// Supply chain manager approves -> 200 OK
+		scMgr := auth.Identity{UserID: "sc-mgr-01", Roles: []string{"SUPPLY_CHAIN_MGR"}, WarehouseScopes: []string{"ALL"}}
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/adjustments/%s/decide", largeAdjID), `{"action":"APPROVE","note":"Approved by supply chain lead"}`, &scMgr)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("supply chain approval failed: %s", rec.Body.String())
+		}
+	})
 }

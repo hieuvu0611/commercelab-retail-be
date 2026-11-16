@@ -290,6 +290,53 @@ func (e *LedgerEngine) DispatchSupplierReturn(warehouseID, skuID string, qty int
 	return nil
 }
 
+// QuarantineDiscrepancy khóa bán phần thiếu hụt khi kiểm kê kho (I01: giảm Khả dụng bằng cách tăng Unsellable).
+func (e *LedgerEngine) QuarantineDiscrepancy(warehouseID, skuID string, shortageQty int64) error {
+	if shortageQty <= 0 {
+		return ErrInvalidLines
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	k := stockKey{skuID, warehouseID}
+	st, ok := e.stocks[k]
+	if !ok {
+		return ErrInvalidReservationState
+	}
+	st.Unsellable += shortageQty
+	st.Version++
+	return nil
+}
+
+// ApplyAdjustment cập nhật tồn thực tế khi phiếu điều chỉnh được duyệt (P10).
+func (e *LedgerEngine) ApplyAdjustment(warehouseID, skuID string, diffQty int64, shortageQuarantined bool) error {
+	if diffQty == 0 {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	k := stockKey{skuID, warehouseID}
+	st, ok := e.stocks[k]
+	if !ok {
+		return ErrInvalidReservationState
+	}
+	if diffQty < 0 {
+		absShort := -diffQty
+		if st.OnHand < absShort {
+			return ErrInvalidReservationState
+		}
+		st.OnHand -= absShort
+		if shortageQuarantined && st.Unsellable >= absShort {
+			st.Unsellable -= absShort
+		}
+	} else {
+		st.OnHand += diffQty
+	}
+	st.Version++
+	return nil
+}
+
 // List returns the stock records of one warehouse sorted by SKU id.
 func (e *LedgerEngine) List(warehouseID string) []StockItem {
 	e.mu.Lock()
