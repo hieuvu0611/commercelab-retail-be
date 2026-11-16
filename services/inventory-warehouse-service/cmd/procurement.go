@@ -391,4 +391,152 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		}
 		response.JSON(w, http.StatusOK, "Supplier return retrieved", ret, nil)
 	}))
+
+	// POST /api/v1/admin/inventory/stocktakes
+	mux.Handle("POST /api/v1/admin/inventory/stocktakes", whReceivingStaff(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			WarehouseID string `json:"warehouseId"`
+			Notes       string `json:"notes"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.WarehouseID == "" {
+			req.WarehouseID = domain.DefaultWarehouseID
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, req.WarehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		stk, err := repo.CreateStocktake(r.Context(), req.WarehouseID, claims.UserID, strings.TrimSpace(req.Notes))
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusBadRequest, "CREATE_STOCKTAKE_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusCreated, "Stocktake session started", stk, nil)
+	}))
+
+	// GET /api/v1/admin/inventory/stocktakes
+	mux.Handle("GET /api/v1/admin/inventory/stocktakes", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		list, err := repo.ListStocktakes(r.Context(), warehouseID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve stocktakes", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Stocktakes retrieved", list, nil)
+	}))
+
+	// GET /api/v1/admin/inventory/stocktakes/{stocktakeId}
+	mux.Handle("GET /api/v1/admin/inventory/stocktakes/{stocktakeId}", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		stocktakeID := r.PathValue("stocktakeId")
+		stk, ok, err := repo.GetStocktake(r.Context(), stocktakeID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+			return
+		}
+		if !ok {
+			response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Stocktake not found", nil)
+			return
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, stk.WarehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Stocktake retrieved", stk, nil)
+	}))
+
+	// POST /api/v1/admin/inventory/stocktakes/{stocktakeId}/count
+	// Submits counted stock; if shortage, immediately blocks sales for discrepancy (I01)
+	mux.Handle("POST /api/v1/admin/inventory/stocktakes/{stocktakeId}/count", whReceivingStaff(func(w http.ResponseWriter, r *http.Request) {
+		stocktakeID := r.PathValue("stocktakeId")
+		var req struct {
+			Lines []domain.StocktakeLine `json:"lines"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Lines) == 0 {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "Non-empty count lines are required", nil)
+			return
+		}
+		stk, adjustments, err := repo.SubmitStocktakeCount(r.Context(), stocktakeID, req.Lines)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusBadRequest, "SUBMIT_COUNT_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Physical counts recorded (discrepancy sales blocked under I01)", map[string]any{
+			"stocktake":   stk,
+			"adjustments": adjustments,
+		}, nil)
+	}))
+
+	// GET /api/v1/admin/inventory/adjustments
+	mux.Handle("GET /api/v1/admin/inventory/adjustments", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
+		status := strings.TrimSpace(r.URL.Query().Get("status"))
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		list, err := repo.ListStockAdjustments(r.Context(), warehouseID, status)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve adjustments", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Adjustments retrieved", list, nil)
+	}))
+
+	// POST /api/v1/admin/inventory/adjustments/{adjustmentId}/decide
+	adjustmentApprover := func(h http.HandlerFunc) http.Handler {
+		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_MGR", "SUPPLY_CHAIN_MGR", "FINANCE_MGR", "ADMIN")(h))
+	}
+	mux.Handle("POST /api/v1/admin/inventory/adjustments/{adjustmentId}/decide", adjustmentApprover(func(w http.ResponseWriter, r *http.Request) {
+		adjustmentID := r.PathValue("adjustmentId")
+		claims, _ := auth.ClaimsFrom(r.Context())
+		roles := extractRoles(claims)
+
+		var req struct {
+			Action string `json:"action"` // APPROVE or REJECT
+			Note   string `json:"note"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Action != "APPROVE" && req.Action != "REJECT") {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "Action must be APPROVE or REJECT", nil)
+			return
+		}
+
+		adj, err := repo.DecideStockAdjustment(r.Context(), adjustmentID, claims.UserID, roles, req.Action, strings.TrimSpace(req.Note))
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusForbidden, "ADJUSTMENT_DECISION_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Adjustment decision processed (P10 Maker != Checker verified)", adj, nil)
+	}))
 }

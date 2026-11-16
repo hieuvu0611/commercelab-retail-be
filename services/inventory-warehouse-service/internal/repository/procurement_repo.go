@@ -864,3 +864,452 @@ func (r *InventoryRepository) ListSupplierReturns(ctx context.Context, warehouse
 	}
 	return list, nil
 }
+
+// CreateStocktake begins a new physical stocktake session.
+func (r *InventoryRepository) CreateStocktake(ctx context.Context, warehouseID, startedBy, notes string) (domain.Stocktake, error) {
+	if warehouseID == "" {
+		warehouseID = domain.DefaultWarehouseID
+	}
+	id := fmt.Sprintf("STK-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+	now := r.now().UTC()
+	stk := domain.Stocktake{
+		StocktakeID: id,
+		WarehouseID: warehouseID,
+		Status:      "IN_PROGRESS",
+		StartedBy:   startedBy,
+		Notes:       notes,
+		CreatedAt:   now,
+	}
+
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		cp := stk
+		r.stocktakes[id] = &cp
+		return stk, nil
+	}
+
+	_, err := r.pool.Exec(ctx, `
+		INSERT INTO stocktakes (stocktake_id, warehouse_id, status, started_by, notes, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, stk.StocktakeID, stk.WarehouseID, stk.Status, stk.StartedBy, stk.Notes, stk.CreatedAt)
+	if err != nil {
+		return domain.Stocktake{}, dependency.Wrap(err)
+	}
+	return stk, nil
+}
+
+// SubmitStocktakeCount records counted stock on shelf.
+// If counted < system (shortage), it immediately blocks sales for the discrepancy (I01)
+// by quarantining the shortage into unsellable stock while generating a maker != checker adjustment request.
+func (r *InventoryRepository) SubmitStocktakeCount(ctx context.Context, stocktakeID string, counts []domain.StocktakeLine) (domain.Stocktake, []domain.StockAdjustment, error) {
+	stk, ok, err := r.GetStocktake(ctx, stocktakeID)
+	if err != nil {
+		return domain.Stocktake{}, nil, err
+	}
+	if !ok {
+		return domain.Stocktake{}, nil, errors.New("stocktake session not found")
+	}
+	if stk.Status != "IN_PROGRESS" {
+		return domain.Stocktake{}, nil, errors.New("stocktake is not IN_PROGRESS")
+	}
+
+	now := r.now().UTC()
+	stk.Status = "SUBMITTED"
+	stk.CompletedAt = &now
+
+	adjustments := make([]domain.StockAdjustment, 0)
+	processedLines := make([]domain.StocktakeLine, 0, len(counts))
+
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		for _, c := range counts {
+			st, ok := r.engine.GetStock(stk.WarehouseID, c.SkuID)
+			sysOnHand := int64(0)
+			if ok {
+				sysOnHand = st.OnHand
+			}
+			diff := c.CountedOnHand - sysOnHand
+			diffAmount := diff * c.UnitCostVND
+			c.SystemOnHand = sysOnHand
+			c.DiffQty = diff
+			c.DiffAmountVND = diffAmount
+			processedLines = append(processedLines, c)
+
+			if diff != 0 {
+				adjID := fmt.Sprintf("ADJ-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+				adj := domain.StockAdjustment{
+					AdjustmentID:  adjID,
+					StocktakeID:   stocktakeID,
+					WarehouseID:   stk.WarehouseID,
+					SkuID:         c.SkuID,
+					DiffQty:       diff,
+					UnitCostVND:   c.UnitCostVND,
+					DiffAmountVND: diffAmount,
+					Status:        "PENDING_APPROVAL",
+					MakerID:       stk.StartedBy,
+					Reason:        fmt.Sprintf("Discrepancy identified during stocktake %s", stocktakeID),
+					CreatedAt:     now,
+				}
+				// If shortage, immediately block sales for discrepancy (I01)
+				if diff < 0 {
+					_ = r.engine.QuarantineDiscrepancy(stk.WarehouseID, c.SkuID, -diff)
+				}
+				r.adjustments[adjID] = &adj
+				adjustments = append(adjustments, adj)
+			}
+		}
+
+		stk.Lines = processedLines
+		r.stocktakes[stocktakeID] = &stk
+		return stk, adjustments, nil
+	}
+
+	// Real Postgres transaction
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.Stocktake{}, nil, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	for _, c := range counts {
+		var sysOnHand int64
+		_ = tx.QueryRow(ctx, `
+			SELECT COALESCE(on_hand, 0) FROM stock_items WHERE sku_id = $1 AND warehouse_id = $2
+		`, c.SkuID, stk.WarehouseID).Scan(&sysOnHand)
+
+		diff := c.CountedOnHand - sysOnHand
+		diffAmount := diff * c.UnitCostVND
+		c.SystemOnHand = sysOnHand
+		c.DiffQty = diff
+		c.DiffAmountVND = diffAmount
+		processedLines = append(processedLines, c)
+
+		_, err = tx.Exec(ctx, `
+			INSERT INTO stocktake_lines (stocktake_id, sku_id, system_on_hand, counted_on_hand, diff_qty, unit_cost_vnd, diff_amount_vnd)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, stocktakeID, c.SkuID, c.SystemOnHand, c.CountedOnHand, c.DiffQty, c.UnitCostVND, c.DiffAmountVND)
+		if err != nil {
+			return domain.Stocktake{}, nil, dependency.Wrap(err)
+		}
+
+		if diff != 0 {
+			adjID := fmt.Sprintf("ADJ-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+			adj := domain.StockAdjustment{
+				AdjustmentID:  adjID,
+				StocktakeID:   stocktakeID,
+				WarehouseID:   stk.WarehouseID,
+				SkuID:         c.SkuID,
+				DiffQty:       diff,
+				UnitCostVND:   c.UnitCostVND,
+				DiffAmountVND: diffAmount,
+				Status:        "PENDING_APPROVAL",
+				MakerID:       stk.StartedBy,
+				Reason:        fmt.Sprintf("Discrepancy identified during stocktake %s", stocktakeID),
+				CreatedAt:     now,
+			}
+
+			// If shortage: block sales immediately by quarantining into unsellable (I01)
+			if diff < 0 {
+				shortageQty := -diff
+				_, err = tx.Exec(ctx, `
+					UPDATE stock_items
+					SET unsellable = unsellable + $1, version = version + 1, updated_at = NOW()
+					WHERE sku_id = $2 AND warehouse_id = $3
+				`, shortageQty, c.SkuID, stk.WarehouseID)
+				if err != nil {
+					return domain.Stocktake{}, nil, dependency.Wrap(err)
+				}
+			}
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO stock_adjustments (adjustment_id, stocktake_id, warehouse_id, sku_id, diff_qty, unit_cost_vnd, diff_amount_vnd, status, maker_id, reason, created_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			`, adj.AdjustmentID, adj.StocktakeID, adj.WarehouseID, adj.SkuID, adj.DiffQty, adj.UnitCostVND, adj.DiffAmountVND, adj.Status, adj.MakerID, adj.Reason, adj.CreatedAt)
+			if err != nil {
+				return domain.Stocktake{}, nil, dependency.Wrap(err)
+			}
+			adjustments = append(adjustments, adj)
+		}
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE stocktakes SET status = $1, completed_at = $2 WHERE stocktake_id = $3
+	`, stk.Status, stk.CompletedAt, stocktakeID)
+	if err != nil {
+		return domain.Stocktake{}, nil, dependency.Wrap(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Stocktake{}, nil, dependency.Wrap(err)
+	}
+
+	stk.Lines = processedLines
+	return stk, adjustments, nil
+}
+
+// DecideStockAdjustment approves or rejects an inventory adjustment enforcing maker != checker P10 and thresholds.
+func (r *InventoryRepository) DecideStockAdjustment(ctx context.Context, adjustmentID, approverID string, approverRoles []string, action, note string) (domain.StockAdjustment, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		adj, ok := r.adjustments[adjustmentID]
+		if !ok {
+			return domain.StockAdjustment{}, errors.New("adjustment not found")
+		}
+		if err := domain.CanApproveAdjustment(*adj, approverID, approverRoles); err != nil {
+			return domain.StockAdjustment{}, err
+		}
+		now := r.now().UTC()
+		adj.CheckerID = approverID
+		adj.DecidedAt = &now
+		if note != "" {
+			adj.Reason = adj.Reason + " | " + note
+		}
+		if action == "APPROVE" {
+			adj.Status = "APPROVED"
+			_ = r.engine.ApplyAdjustment(adj.WarehouseID, adj.SkuID, adj.DiffQty, adj.DiffQty < 0)
+			r.appendMovement(domain.Movement{
+				SkuID: adj.SkuID, WarehouseID: adj.WarehouseID, Type: domain.MovementAdjust, Qty: adj.DiffQty,
+				RefType: "ADJUSTMENT", RefID: adjustmentID, ActorID: approverID, Reason: adj.Reason,
+			})
+		} else {
+			adj.Status = "REJECTED"
+		}
+		r.adjustments[adjustmentID] = adj
+		return *adj, nil
+	}
+
+	var adj domain.StockAdjustment
+	err := r.pool.QueryRow(ctx, `
+		SELECT adjustment_id, stocktake_id, warehouse_id, sku_id, diff_qty, unit_cost_vnd, diff_amount_vnd,
+		       status, maker_id, checker_id, decided_at, reason, created_at
+		FROM stock_adjustments WHERE adjustment_id = $1
+	`, adjustmentID).Scan(
+		&adj.AdjustmentID, &adj.StocktakeID, &adj.WarehouseID, &adj.SkuID, &adj.DiffQty, &adj.UnitCostVND, &adj.DiffAmountVND,
+		&adj.Status, &adj.MakerID, &adj.CheckerID, &adj.DecidedAt, &adj.Reason, &adj.CreatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return domain.StockAdjustment{}, errors.New("adjustment not found")
+	}
+	if err != nil {
+		return domain.StockAdjustment{}, dependency.Wrap(err)
+	}
+
+	if err := domain.CanApproveAdjustment(adj, approverID, approverRoles); err != nil {
+		return domain.StockAdjustment{}, err
+	}
+
+	now := r.now().UTC()
+	adj.CheckerID = approverID
+	adj.DecidedAt = &now
+	if note != "" {
+		adj.Reason = adj.Reason + " | " + note
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.StockAdjustment{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if action == "APPROVE" {
+		adj.Status = "APPROVED"
+		if adj.DiffQty < 0 {
+			absShort := -adj.DiffQty
+			// OnHand decreases by shortage, and Unsellable decreases by shortage (releasing the quarantine)
+			_, err = tx.Exec(ctx, `
+				UPDATE stock_items
+				SET on_hand = on_hand - $1, unsellable = unsellable - $1, version = version + 1, updated_at = NOW()
+				WHERE sku_id = $2 AND warehouse_id = $3
+			`, absShort, adj.SkuID, adj.WarehouseID)
+			if err != nil {
+				return domain.StockAdjustment{}, dependency.Wrap(err)
+			}
+		} else {
+			_, err = tx.Exec(ctx, `
+				UPDATE stock_items
+				SET on_hand = on_hand + $1, version = version + 1, updated_at = NOW()
+				WHERE sku_id = $2 AND warehouse_id = $3
+			`, adj.DiffQty, adj.SkuID, adj.WarehouseID)
+			if err != nil {
+				return domain.StockAdjustment{}, dependency.Wrap(err)
+			}
+		}
+
+		err = insertMovement(ctx, tx, domain.Movement{
+			SkuID: adj.SkuID, WarehouseID: adj.WarehouseID, Type: domain.MovementAdjust, Qty: adj.DiffQty,
+			RefType: "ADJUSTMENT", RefID: adjustmentID, ActorID: approverID, Reason: adj.Reason,
+		})
+		if err != nil {
+			return domain.StockAdjustment{}, err
+		}
+	} else {
+		adj.Status = "REJECTED"
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE stock_adjustments
+		SET status = $1, checker_id = $2, decided_at = $3, reason = $4
+		WHERE adjustment_id = $5
+	`, adj.Status, adj.CheckerID, adj.DecidedAt, adj.Reason, adjustmentID)
+	if err != nil {
+		return domain.StockAdjustment{}, dependency.Wrap(err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.StockAdjustment{}, dependency.Wrap(err)
+	}
+
+	return adj, nil
+}
+
+// GetStocktake retrieves a stocktake and its lines.
+func (r *InventoryRepository) GetStocktake(ctx context.Context, stocktakeID string) (domain.Stocktake, bool, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		stk, ok := r.stocktakes[stocktakeID]
+		if !ok {
+			return domain.Stocktake{}, false, nil
+		}
+		return *stk, true, nil
+	}
+
+	var stk domain.Stocktake
+	err := r.pool.QueryRow(ctx, `
+		SELECT stocktake_id, warehouse_id, status, started_by, notes, created_at, completed_at
+		FROM stocktakes WHERE stocktake_id = $1
+	`, stocktakeID).Scan(&stk.StocktakeID, &stk.WarehouseID, &stk.Status, &stk.StartedBy, &stk.Notes, &stk.CreatedAt, &stk.CompletedAt)
+	if err == pgx.ErrNoRows {
+		return domain.Stocktake{}, false, nil
+	}
+	if err != nil {
+		return domain.Stocktake{}, false, dependency.Wrap(err)
+	}
+
+	rows, err := r.pool.Query(ctx, `
+		SELECT id, stocktake_id, sku_id, system_on_hand, counted_on_hand, diff_qty, unit_cost_vnd, diff_amount_vnd
+		FROM stocktake_lines WHERE stocktake_id = $1 ORDER BY id
+	`, stocktakeID)
+	if err != nil {
+		return domain.Stocktake{}, false, dependency.Wrap(err)
+	}
+	defer rows.Close()
+
+	stk.Lines = make([]domain.StocktakeLine, 0)
+	for rows.Next() {
+		var l domain.StocktakeLine
+		if err := rows.Scan(&l.ID, &l.StocktakeID, &l.SkuID, &l.SystemOnHand, &l.CountedOnHand, &l.DiffQty, &l.UnitCostVND, &l.DiffAmountVND); err != nil {
+			return domain.Stocktake{}, false, dependency.Wrap(err)
+		}
+		stk.Lines = append(stk.Lines, l)
+	}
+	if err := rows.Err(); err != nil {
+		return domain.Stocktake{}, false, dependency.Wrap(err)
+	}
+
+	return stk, true, nil
+}
+
+// ListStocktakes lists stocktakes by warehouse.
+func (r *InventoryRepository) ListStocktakes(ctx context.Context, warehouseID string) ([]domain.Stocktake, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		list := make([]domain.Stocktake, 0)
+		for _, s := range r.stocktakes {
+			if warehouseID == "" || s.WarehouseID == warehouseID {
+				list = append(list, *s)
+			}
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.After(list[j].CreatedAt) })
+		return list, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`SELECT stocktake_id, warehouse_id, status, started_by, notes, created_at, completed_at FROM stocktakes WHERE 1=1`)
+	args := []any{}
+	if warehouseID != "" {
+		sb.WriteString(" AND warehouse_id = $1")
+		args = append(args, warehouseID)
+	}
+	sb.WriteString(" ORDER BY created_at DESC")
+
+	rows, err := r.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+
+	list := make([]domain.Stocktake, 0)
+	for rows.Next() {
+		var s domain.Stocktake
+		if err := rows.Scan(&s.StocktakeID, &s.WarehouseID, &s.Status, &s.StartedBy, &s.Notes, &s.CreatedAt, &s.CompletedAt); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		list = append(list, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	return list, nil
+}
+
+// ListStockAdjustments lists adjustments by warehouse and status.
+func (r *InventoryRepository) ListStockAdjustments(ctx context.Context, warehouseID, status string) ([]domain.StockAdjustment, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		list := make([]domain.StockAdjustment, 0)
+		for _, a := range r.adjustments {
+			if (warehouseID == "" || a.WarehouseID == warehouseID) && (status == "" || a.Status == status) {
+				list = append(list, *a)
+			}
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.After(list[j].CreatedAt) })
+		return list, nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`
+		SELECT adjustment_id, stocktake_id, warehouse_id, sku_id, diff_qty, unit_cost_vnd, diff_amount_vnd,
+		       status, maker_id, checker_id, decided_at, reason, created_at
+		FROM stock_adjustments WHERE 1=1
+	`)
+	args := []any{}
+	idx := 1
+	if warehouseID != "" {
+		sb.WriteString(fmt.Sprintf(" AND warehouse_id = $%d", idx))
+		args = append(args, warehouseID)
+		idx++
+	}
+	if status != "" {
+		sb.WriteString(fmt.Sprintf(" AND status = $%d", idx))
+		args = append(args, status)
+		idx++
+	}
+	sb.WriteString(" ORDER BY created_at DESC")
+
+	rows, err := r.pool.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+
+	list := make([]domain.StockAdjustment, 0)
+	for rows.Next() {
+		var a domain.StockAdjustment
+		if err := rows.Scan(&a.AdjustmentID, &a.StocktakeID, &a.WarehouseID, &a.SkuID, &a.DiffQty, &a.UnitCostVND, &a.DiffAmountVND,
+			&a.Status, &a.MakerID, &a.CheckerID, &a.DecidedAt, &a.Reason, &a.CreatedAt); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		list = append(list, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	return list, nil
+}

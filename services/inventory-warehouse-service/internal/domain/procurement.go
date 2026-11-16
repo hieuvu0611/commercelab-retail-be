@@ -184,3 +184,95 @@ type SupplierReturn struct {
 	CreatedAt      time.Time            `json:"createdAt"`
 	UpdatedAt      time.Time            `json:"updatedAt"`
 }
+
+const (
+	AdjustmentMaxQtyWarehouseMgr    int64 = 5
+	AdjustmentMaxAmountWarehouseMgr int64 = 2_000_000
+)
+
+type StocktakeLine struct {
+	ID            int64  `json:"id,omitempty"`
+	StocktakeID   string `json:"stocktakeId,omitempty"`
+	SkuID         string `json:"skuId"`
+	SystemOnHand  int64  `json:"systemOnHand"`
+	CountedOnHand int64  `json:"countedOnHand"`
+	DiffQty       int64  `json:"diffQty"`
+	UnitCostVND   int64  `json:"unitCostVnd"`
+	DiffAmountVND int64  `json:"diffAmountVnd"`
+}
+
+type Stocktake struct {
+	StocktakeID string          `json:"stocktakeId"`
+	WarehouseID string          `json:"warehouseId"`
+	Status      string          `json:"status"` // IN_PROGRESS, SUBMITTED, COMPLETED, CANCELLED
+	StartedBy   string          `json:"startedBy"`
+	Notes       string          `json:"notes"`
+	Lines       []StocktakeLine `json:"lines,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	CompletedAt *time.Time      `json:"completedAt,omitempty"`
+}
+
+type StockAdjustment struct {
+	AdjustmentID  string     `json:"adjustmentId"`
+	StocktakeID   string     `json:"stocktakeId"`
+	WarehouseID   string     `json:"warehouseId"`
+	SkuID         string     `json:"skuId"`
+	DiffQty       int64      `json:"diffQty"`
+	UnitCostVND   int64      `json:"unitCostVnd"`
+	DiffAmountVND int64      `json:"diffAmountVnd"`
+	Status        string     `json:"status"` // PENDING_APPROVAL, APPROVED, REJECTED
+	MakerID       string     `json:"makerId"`
+	CheckerID     string     `json:"checkerId,omitempty"`
+	DecidedAt     *time.Time `json:"decidedAt,omitempty"`
+	Reason        string     `json:"reason"`
+	CreatedAt     time.Time  `json:"createdAt"`
+}
+
+// CanApproveAdjustment verifies P10 maker != checker and threshold authority:
+// Up to 5 units or 2,000,000 VND: WAREHOUSE_MGR, SUPPLY_CHAIN_MGR, ADMIN.
+// Beyond that: SUPPLY_CHAIN_MGR, FINANCE_MGR, ADMIN.
+func CanApproveAdjustment(adj StockAdjustment, approverID string, approverRoles []string) error {
+	if approverID == "" {
+		return errors.New("approver ID is required")
+	}
+	if adj.MakerID == approverID {
+		return errors.New("maker-checker violation: requester cannot approve their own inventory adjustment (P10)")
+	}
+	if adj.Status != "PENDING_APPROVAL" {
+		return errors.New("adjustment is not pending approval")
+	}
+
+	hasRole := func(target string) bool {
+		for _, r := range approverRoles {
+			if r == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	isAdmin := hasRole("ADMIN")
+	isSupplyChain := hasRole("SUPPLY_CHAIN_MGR") || hasRole("FINANCE_MGR")
+	isWarehouseMgr := hasRole("WAREHOUSE_MGR")
+
+	absQty := adj.DiffQty
+	if absQty < 0 {
+		absQty = -absQty
+	}
+	absAmount := adj.DiffAmountVND
+	if absAmount < 0 {
+		absAmount = -absAmount
+	}
+
+	if absQty <= AdjustmentMaxQtyWarehouseMgr && absAmount <= AdjustmentMaxAmountWarehouseMgr {
+		if isAdmin || isSupplyChain || isWarehouseMgr {
+			return nil
+		}
+		return errors.New("adjustment requires at least WAREHOUSE_MGR approval")
+	}
+
+	if isAdmin || isSupplyChain {
+		return nil
+	}
+	return errors.New("adjustment exceeding 5 units or 2,000,000 VND requires Supply Chain or Finance Manager approval")
+}

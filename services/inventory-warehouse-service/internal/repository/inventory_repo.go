@@ -47,6 +47,8 @@ type InventoryRepository struct {
 	purchaseOrders  map[string]*domain.PurchaseOrder
 	inspections     map[string]*domain.ReceivingInspection
 	supplierReturns map[string]*domain.SupplierReturn
+	stocktakes      map[string]*domain.Stocktake
+	adjustments     map[string]*domain.StockAdjustment
 	now             func() time.Time
 }
 
@@ -67,6 +69,8 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 		purchaseOrders:  make(map[string]*domain.PurchaseOrder),
 		inspections:     make(map[string]*domain.ReceivingInspection),
 		supplierReturns: make(map[string]*domain.SupplierReturn),
+		stocktakes:      make(map[string]*domain.Stocktake),
+		adjustments:     make(map[string]*domain.StockAdjustment),
 		now:             time.Now,
 	}
 	// Seed memory suppliers
