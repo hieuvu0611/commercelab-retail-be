@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { CreateReturnRequestDto } from './create-return.dto';
 import { DatabaseService } from '../../database/database.service';
+import { PaymentClient } from './payment.client';
 
 export interface OrderLineCeiling {
   orderId: string;
@@ -70,7 +71,10 @@ export class ReturnsRmaService {
   private readonly ceilings = new Map<string, OrderLineCeiling>();
   private readonly returnCases = new Map<string, ReturnCaseRecord>();
 
-  constructor(private readonly db: DatabaseService) {
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly paymentClient: PaymentClient,
+  ) {
     // Seed standard SC01 / SC07 order ceilings for O-001 (delivered now)
     const nowIso = new Date().toISOString();
     this.seedCeiling({
@@ -437,6 +441,52 @@ export class ReturnsRmaService {
       at: nowIso,
       actor,
       note: `Từ chối yêu cầu: ${note}. Đã giải phóng hạn mức trả hàng I07.`,
+    });
+
+    return record;
+  }
+
+  /**
+   * Thực thi hoàn tiền tuân thủ I03 & SC08:
+   * 1. Kiểm tra trạng thái hồ sơ.
+   * 2. Khóa giữ trần hoàn tiền qua paymentClient.reserveRefundCeiling(orderId, refundableAmountVnd).
+   * 3. Thực thi chuyển tiền qua paymentClient.executeRefundPayout(orderId, refundableAmountVnd).
+   * 4. Cập nhật trạng thái REFUNDED và refund.status = 'COMPLETED'.
+   */
+  async disburseRefund(returnId: string, actor: string): Promise<ReturnCaseRecord> {
+    const record = this.getReturn(returnId);
+    if (!['QC_PASSED', 'APPROVED', 'RECEIVED', 'REFUND_PENDING'].includes(record.status)) {
+      throw new ConflictException(`Không thể hoàn tiền cho hồ sơ ở trạng thái ${record.status}`);
+    }
+
+    if (record.refund?.status === 'COMPLETED' || record.status === 'REFUNDED') {
+      throw new ConflictException('Hồ sơ trả hàng này đã được hoàn tiền');
+    }
+
+    const amountVnd = record.refundableAmountVnd;
+
+    // 1. Khóa trần hoàn tiền (I03, SC08)
+    await this.paymentClient.reserveRefundCeiling(record.orderId, amountVnd);
+
+    // 2. Chuyển tiền qua đối tác / simulator
+    await this.paymentClient.executeRefundPayout(record.orderId, amountVnd);
+
+    const nowIso = new Date().toISOString();
+    record.status = 'REFUNDED';
+    record.updatedAt = nowIso;
+    record.refund = {
+      amountVnd,
+      goodsVnd: record.refund?.goodsVnd || amountVnd - record.shippingRefundVnd,
+      shippingVnd: record.shippingRefundVnd,
+      status: 'COMPLETED',
+    };
+
+    record.timeline.push({
+      at: nowIso,
+      actor,
+      note: `Hoàn tất chi trả hoàn tiền ${amountVnd.toLocaleString(
+        'vi-VN',
+      )} đ cho khách hàng (I03/SC08).`,
     });
 
     return record;

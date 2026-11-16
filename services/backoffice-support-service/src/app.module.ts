@@ -7,6 +7,7 @@ import { WarehouseScopeGuard } from './common/guards/warehouse.guard';
 import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
 import { DatabaseModule } from './database/database.module';
+import { PaymentClient } from './modules/returns-rma/payment.client';
 
 @Module({
   imports: [DatabaseModule],
@@ -18,6 +19,7 @@ import { DatabaseModule } from './database/database.module';
     WarehouseScopeGuard,
     ReturnsRmaService,
     ExceptionCasesService,
+    PaymentClient,
   ],
 })
 export class AppModule {}

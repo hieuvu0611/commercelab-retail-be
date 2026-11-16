@@ -157,6 +157,15 @@ export class AppController {
     return new ApiResult(item, 'QC inspection recorded successfully (SC07)');
   }
 
+  @Post('/api/v1/backoffice/returns/:rmaId/refund')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
+  async disburseReturnRefund(@Req() req: any, @Param('rmaId') rmaId: string) {
+    const actor = req.user?.userId || 'finance-officer';
+    const item = await this.returnsService.disburseRefund(rmaId, actor);
+    return new ApiResult(item, 'Refund disbursed successfully through payment simulator (I03/SC08)');
+  }
+
   @Post('/api/v1/backoffice/returns/:rmaId/reject')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
