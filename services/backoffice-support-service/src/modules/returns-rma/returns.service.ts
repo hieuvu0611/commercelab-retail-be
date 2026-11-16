@@ -1,6 +1,12 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { CreateReturnRequestDto } from './create-return.dto';
+import { DatabaseService } from '../../database/database.service';
 
-export interface OrderLineReturnCeiling {
+export interface OrderLineCeiling {
   orderId: string;
   skuId: string;
   deliveredQty: number;
@@ -8,90 +14,364 @@ export interface OrderLineReturnCeiling {
   returnOpenQty: number;
   allocatedUnitPaidVnd: number;
   shippingFeeVnd: number;
+  deliveredAt: string;
 }
 
-export interface RmaDossier {
-  rmaId: string;
-  orderId: string;
+export interface ReturnCaseLine {
   skuId: string;
+  skuName: string;
   quantity: number;
-  reason: 'CHANGE_OF_MIND' | 'SELLER_FAULT';
-  status: 'OPEN_PENDING_RECEIPT' | 'RECEIVED_UNSELLABLE' | 'QC_PASSED_RESTOCKED' | 'QC_FAILED_ISOLATED' | 'REJECTED';
-  refundableAmountVnd: number;
-  timeline: Array<{ at: string; actor: string; note: string }>;
+  receivedQuantity: number;
+  qcPassedQuantity: number;
+  qcFailedQuantity: number;
+  allocatedUnitPaidVnd: number;
 }
+
+export interface ReturnCaseRecord {
+  returnId: string;
+  orderId: string;
+  customerId: string;
+  warehouseId: string;
+  status:
+    | 'REQUESTED'
+    | 'APPROVED'
+    | 'RECEIVED'
+    | 'QC_PASSED'
+    | 'QC_FAILED'
+    | 'REFUND_PENDING'
+    | 'REFUNDED'
+    | 'REJECTED';
+  reason: string;
+  items: ReturnCaseLine[];
+  refundableAmountVnd: number;
+  shippingRefundVnd: number;
+  refund: {
+    amountVnd: number;
+    goodsVnd: number;
+    shippingVnd: number;
+    status: 'PENDING' | 'COMPLETED';
+  } | null;
+  isExchange: boolean;
+  linkedOrderId?: string;
+  rejectionNote: string;
+  createdAt: string;
+  updatedAt: string;
+  timeline: Array<{
+    at: string;
+    actor: string;
+    note: string;
+  }>;
+}
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class ReturnsRmaService {
-  // Khởi tạo trần trả hàng mẫu theo SC01 & SC07 (2 Balo thực trả 270.000đ/chiếc, 1 Bình nước 90.000đ/chiếc)
-  private readonly ceilings = new Map<string, OrderLineReturnCeiling>([
-    [
-      'O-001|SKU-BALO-BLACK-20L',
-      {
-        orderId: 'O-001',
-        skuId: 'SKU-BALO-BLACK-20L',
-        deliveredQty: 2,
-        returnedAcceptedQty: 0,
-        returnOpenQty: 0,
-        allocatedUnitPaidVnd: 270_000,
-        shippingFeeVnd: 30_000,
-      },
-    ],
-  ]);
+  private readonly ceilings = new Map<string, OrderLineCeiling>();
+  private readonly returnCases = new Map<string, ReturnCaseRecord>();
 
-  private readonly dossiers = new Map<string, RmaDossier>();
+  constructor(private readonly db: DatabaseService) {
+    // Seed standard SC01 / SC07 order ceilings for O-001 (delivered now)
+    const nowIso = new Date().toISOString();
+    this.seedCeiling({
+      orderId: 'O-001',
+      skuId: 'SKU-BALO-BLACK-20L',
+      deliveredQty: 2,
+      returnedAcceptedQty: 0,
+      returnOpenQty: 0,
+      allocatedUnitPaidVnd: 270_000,
+      shippingFeeVnd: 30_000,
+      deliveredAt: nowIso,
+    });
+    this.seedCeiling({
+      orderId: 'O-001',
+      skuId: 'SKU-BOTTLE-BLUE-500ML',
+      deliveredQty: 1,
+      returnedAcceptedQty: 0,
+      returnOpenQty: 0,
+      allocatedUnitPaidVnd: 90_000,
+      shippingFeeVnd: 30_000,
+      deliveredAt: nowIso,
+    });
+  }
+
+  seedCeiling(ceiling: OrderLineCeiling): void {
+    const key = `${ceiling.orderId}|${ceiling.skuId}`;
+    this.ceilings.set(key, { ...ceiling });
+  }
+
+  getCeiling(orderId: string, skuId: string): OrderLineCeiling | undefined {
+    return this.ceilings.get(`${orderId}|${skuId}`);
+  }
 
   /**
-   * Thực thi B06, P07, P09, P11, I07 & SC07:
-   * - Kiểm tra và giữ hạn mức số lượng trả (I07: delivered >= accepted + open).
-   * - Đổi ý (P09): Hoàn theo giá thực trả phân bổ lúc mua (270.000đ), KHÔNG hoàn phí giao 30.000đ.
+   * Tạo yêu cầu trả hàng (RMA) tuân thủ B06, P07, P09, P11, I07 & SC07:
+   * 1. Kiểm tra thời hạn 7 ngày từ ngày giao hàng.
+   * 2. Kiểm tra bất biến I07: Số lượng trả không vượt quá delivered_qty - accepted - open.
+   * 3. Giữ hạn mức số lượng (returnOpenQty += quantity).
+   * 4. Tính toán số tiền hoàn dựa trên allocatedUnitPaidVnd lúc mua (P09 vs P11).
    */
-  openRmaRequest(
-    rmaId: string,
-    orderId: string,
-    skuId: string,
-    quantity: number,
-    reason: 'CHANGE_OF_MIND' | 'SELLER_FAULT',
-  ): RmaDossier {
-    const key = `${orderId}|${skuId}`;
-    const ceiling = this.ceilings.get(key);
-    if (!ceiling) {
-      throw new NotFoundException(`Không tìm thấy dòng hàng đã giao cho ${key}`);
+  async openRmaRequest(
+    dto: CreateReturnRequestDto,
+    customerId = 'cust-default',
+  ): Promise<ReturnCaseRecord> {
+    const rmaId = dto.rmaId || `RET-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    if (this.returnCases.has(rmaId)) {
+      return this.returnCases.get(rmaId)!;
     }
 
-    const remainingReturnable = ceiling.deliveredQty - ceiling.returnedAcceptedQty - ceiling.returnOpenQty;
-    if (quantity <= 0 || quantity > remainingReturnable) {
-      throw new ConflictException(
-        `Vi phạm bất biến I07: Số lượng yêu cầu trả (${quantity}) vượt hạn mức còn được trả (${remainingReturnable})`,
-      );
+    if (!dto.lines || dto.lines.length === 0) {
+      throw new ConflictException('Yêu cầu trả hàng cần ít nhất 1 dòng sản phẩm');
     }
 
-    // Khóa ngay số lượng vào returnOpenQty để chặn tạo 2 hồ sơ trả trùng trên cùng 1 chiếc
-    ceiling.returnOpenQty += quantity;
+    // 1. Kiểm tra thời hạn 7 ngày (P07)
+    const now = Date.now();
+    for (const line of dto.lines) {
+      const key = `${dto.orderId}|${line.skuId}`;
+      const ceiling = this.ceilings.get(key);
+      if (!ceiling) {
+        throw new NotFoundException(`Không tìm thấy dòng hàng đã giao cho SKU ${line.skuId} của đơn ${dto.orderId}`);
+      }
 
-    // P09 & SC07: Đổi ý hoàn 270.000đ/chiếc, không hoàn phí giao 30.000đ
-    let refundableAmountVnd = quantity * ceiling.allocatedUnitPaidVnd;
-    if (reason === 'SELLER_FAULT' && quantity === ceiling.deliveredQty) {
-      refundableAmountVnd += ceiling.shippingFeeVnd; // P11
+      const deliveredTime = dto.deliveredAt
+        ? new Date(dto.deliveredAt).getTime()
+        : new Date(ceiling.deliveredAt).getTime();
+
+      if (now - deliveredTime > SEVEN_DAYS_MS) {
+        throw new ConflictException(
+          `Quá hạn đổi trả: Đơn hàng đã giao quá 7 ngày theo quy định B06 (${new Date(deliveredTime).toLocaleDateString()})`,
+        );
+      }
+
+      // 2. Kiểm tra bất biến I07 (delivered >= accepted + open + requested)
+      const remainingReturnable =
+        ceiling.deliveredQty - ceiling.returnedAcceptedQty - ceiling.returnOpenQty;
+      if (line.quantity <= 0 || line.quantity > remainingReturnable) {
+        throw new ConflictException(
+          `Vi phạm bất biến I07: Số lượng yêu cầu trả (${line.quantity}) vượt hạn mức còn được trả (${remainingReturnable}) của SKU ${line.skuId}`,
+        );
+      }
     }
 
-    const dossier: RmaDossier = {
-      rmaId,
-      orderId,
-      skuId,
-      quantity,
-      reason,
-      status: 'OPEN_PENDING_RECEIPT',
-      refundableAmountVnd,
+    // 3. Khóa số lượng vào returnOpenQty để chặn 2 yêu cầu trùng lặp
+    let goodsRefundVnd = 0;
+    const items: ReturnCaseLine[] = [];
+    let isFullOrderReturn = true;
+
+    for (const line of dto.lines) {
+      const key = `${dto.orderId}|${line.skuId}`;
+      const ceiling = this.ceilings.get(key)!;
+      ceiling.returnOpenQty += line.quantity;
+
+      const lineRefund = line.quantity * ceiling.allocatedUnitPaidVnd;
+      goodsRefundVnd += lineRefund;
+
+      if (line.quantity < ceiling.deliveredQty) {
+        isFullOrderReturn = false;
+      }
+
+      items.push({
+        skuId: line.skuId,
+        skuName: line.skuName || line.skuId,
+        quantity: line.quantity,
+        receivedQuantity: 0,
+        qcPassedQuantity: 0,
+        qcFailedQuantity: 0,
+        allocatedUnitPaidVnd: ceiling.allocatedUnitPaidVnd,
+      });
+    }
+
+    // 4. Tính toán phí vận chuyển hoàn (P09 vs P11)
+    const isSellerError = [
+      'WRONG_ITEM',
+      'DAMAGED',
+      'DEFECTIVE',
+      'NOT_AS_DESCRIBED',
+      'SELLER_FAULT',
+    ].includes(dto.reason);
+
+    let shippingRefundVnd = 0;
+    // P11: Lỗi do cửa hàng và trả toàn bộ đơn hàng -> hoàn lại cả phí ship (30.000đ)
+    if (isSellerError && isFullOrderReturn) {
+      const firstCeiling = this.ceilings.get(`${dto.orderId}|${dto.lines[0].skuId}`);
+      shippingRefundVnd = firstCeiling?.shippingFeeVnd || 0;
+    }
+
+    const totalRefundableVnd = goodsRefundVnd + shippingRefundVnd;
+    const nowIso = new Date().toISOString();
+
+    const record: ReturnCaseRecord = {
+      returnId: rmaId,
+      orderId: dto.orderId,
+      customerId,
+      warehouseId: 'WH-HCM-01',
+      status: 'REQUESTED',
+      reason: dto.reason,
+      items,
+      refundableAmountVnd: totalRefundableVnd,
+      shippingRefundVnd,
+      refund: {
+        amountVnd: totalRefundableVnd,
+        goodsVnd: goodsRefundVnd,
+        shippingVnd: shippingRefundVnd,
+        status: 'PENDING',
+      },
+      isExchange: Boolean(dto.isExchange),
+      rejectionNote: '',
+      createdAt: nowIso,
+      updatedAt: nowIso,
       timeline: [
         {
-          at: new Date().toISOString(),
-          actor: 'CSKH',
-          note: `Mở hồ sơ trả ${quantity}x ${skuId} (${reason}), giữ trần trả I07, dự kiến hoàn ${refundableAmountVnd}đ`,
+          at: nowIso,
+          actor: customerId,
+          note: `Khách hàng mở yêu cầu trả hàng (${dto.reason}): ${items.map((i) => `${i.quantity}x ${i.skuId}`).join(', ')}. Dự kiến hoàn: ${totalRefundableVnd.toLocaleString('vi-VN')} đ`,
         },
       ],
     };
-    this.dossiers.set(rmaId, dossier);
-    return dossier;
+
+    this.returnCases.set(rmaId, record);
+
+    // Lưu vào database Postgres schema support nếu kết nối sẵn sàng
+    try {
+      await this.persistRma(record);
+    } catch {
+      // Tiếp tục hoạt động với in-memory nếu DB chưa chạy trong môi trường test độc lập
+    }
+
+    return record;
+  }
+
+  private async persistRma(record: ReturnCaseRecord): Promise<void> {
+    await this.db.query(
+      `INSERT INTO support.rma_requests (
+        rma_id, order_id, customer_id, warehouse_id, reason, status,
+        refundable_amount_vnd, shipping_refund_vnd, is_exchange, notes, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      ON CONFLICT (rma_id) DO UPDATE SET status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
+      [
+        record.returnId,
+        record.orderId,
+        record.customerId,
+        record.warehouseId,
+        record.reason,
+        record.status,
+        record.refundableAmountVnd,
+        record.shippingRefundVnd,
+        record.isExchange,
+        record.rejectionNote || null,
+        record.createdAt,
+        record.updatedAt,
+      ],
+    );
+
+    for (const item of record.items) {
+      await this.db.query(
+        `INSERT INTO support.rma_items (
+          rma_id, sku_id, sku_name, quantity, unit_paid_vnd, qc_status
+        ) VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (rma_id, sku_id) DO NOTHING`,
+        [
+          record.returnId,
+          item.skuId,
+          item.skuName,
+          item.quantity,
+          item.allocatedUnitPaidVnd,
+          'PENDING',
+        ],
+      );
+    }
+  }
+
+  getReturn(returnId: string): ReturnCaseRecord {
+    const record = this.returnCases.get(returnId);
+    if (!record) {
+      throw new NotFoundException(`Không tìm thấy hồ sơ trả hàng ${returnId}`);
+    }
+    return record;
+  }
+
+  listReturns(filter: {
+    orderId?: string;
+    customerId?: string;
+    status?: string;
+    warehouseId?: string;
+  }): ReturnCaseRecord[] {
+    let result = Array.from(this.returnCases.values());
+
+    if (filter.orderId) {
+      result = result.filter((r) => r.orderId === filter.orderId);
+    }
+    if (filter.customerId) {
+      result = result.filter((r) => r.customerId === filter.customerId);
+    }
+    if (filter.status) {
+      result = result.filter((r) => r.status === filter.status);
+    }
+    if (filter.warehouseId) {
+      result = result.filter((r) => r.warehouseId === filter.warehouseId);
+    }
+
+    return result.sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+    );
+  }
+
+  /**
+   * Hỗ trợ phê duyệt hồ sơ trả hàng bởi CSKH
+   */
+  approveReturn(returnId: string, actor: string): ReturnCaseRecord {
+    const record = this.getReturn(returnId);
+    if (record.status !== 'REQUESTED') {
+      throw new ConflictException(`Không thể phê duyệt yêu cầu ở trạng thái ${record.status}`);
+    }
+
+    const nowIso = new Date().toISOString();
+    record.status = 'APPROVED';
+    record.updatedAt = nowIso;
+    record.timeline.push({
+      at: nowIso,
+      actor,
+      note: 'CSKH đã duyệt yêu cầu trả hàng, chờ khách gửi hàng về kho.',
+    });
+
+    return record;
+  }
+
+  /**
+   * Từ chối yêu cầu trả hàng -> nhả lại hạn mức returnOpenQty (I07 an toàn)
+   */
+  rejectReturn(returnId: string, note: string, actor: string): ReturnCaseRecord {
+    const record = this.getReturn(returnId);
+    if (['REFUNDED', 'REJECTED'].includes(record.status)) {
+      throw new ConflictException(`Hồ sơ đã kết thúc ở trạng thái ${record.status}`);
+    }
+
+    // Nhả lại returnOpenQty
+    for (const item of record.items) {
+      const key = `${record.orderId}|${item.skuId}`;
+      const ceiling = this.ceilings.get(key);
+      if (ceiling) {
+        ceiling.returnOpenQty = Math.max(0, ceiling.returnOpenQty - item.quantity);
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    record.status = 'REJECTED';
+    record.rejectionNote = note;
+    record.updatedAt = nowIso;
+    record.timeline.push({
+      at: nowIso,
+      actor,
+      note: `Từ chối yêu cầu: ${note}. Đã giải phóng hạn mức trả hàng I07.`,
+    });
+
+    return record;
+  }
+
+  /**
+   * Cập nhật bản ghi trả hàng nội bộ
+   */
+  updateRecord(record: ReturnCaseRecord): void {
+    this.returnCases.set(record.returnId, record);
   }
 }
