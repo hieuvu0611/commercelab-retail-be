@@ -1,9 +1,11 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ReturnsRmaService } from '../returns.service';
+import { PaymentClient } from '../payment.client';
 import { DatabaseService } from '../../../database/database.service';
 
 describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
   let service: ReturnsRmaService;
+  let paymentClient: PaymentClient;
   let mockDb: any;
 
   beforeEach(() => {
@@ -11,7 +13,8 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
       query: jest.fn().mockResolvedValue({ rows: [] }),
       ping: jest.fn().mockResolvedValue(true),
     };
-    service = new ReturnsRmaService(mockDb as DatabaseService);
+    paymentClient = new PaymentClient();
+    service = new ReturnsRmaService(mockDb as DatabaseService, paymentClient);
   });
 
   it('creates an RMA request within 7 days and calculates SC07 refund amount for change of mind (P09)', async () => {
