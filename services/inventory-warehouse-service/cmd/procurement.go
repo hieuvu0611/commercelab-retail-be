@@ -279,4 +279,116 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		}
 		response.JSON(w, http.StatusOK, "Receiving inspections retrieved", list, nil)
 	}))
+
+	// POST /api/v1/admin/inventory/supplier-returns
+	mux.Handle("POST /api/v1/admin/inventory/supplier-returns", whReceivingStaff(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ReturnID    string                      `json:"returnId"`
+			SupplierID  string                      `json:"supplierId"`
+			WarehouseID string                      `json:"warehouseId"`
+			POID        string                      `json:"poId"`
+			Notes       string                      `json:"notes"`
+			Lines       []domain.SupplierReturnLine `json:"lines"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.SupplierID) == "" || len(req.Lines) == 0 {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "supplierId and non-empty return lines are required", nil)
+			return
+		}
+		if req.WarehouseID == "" {
+			req.WarehouseID = domain.DefaultWarehouseID
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, req.WarehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		ret, err := repo.CreateSupplierReturn(r.Context(), domain.SupplierReturn{
+			ReturnID:    strings.TrimSpace(req.ReturnID),
+			SupplierID:  strings.TrimSpace(req.SupplierID),
+			WarehouseID: req.WarehouseID,
+			POID:        strings.TrimSpace(req.POID),
+			CreatedBy:   claims.UserID,
+			Notes:       strings.TrimSpace(req.Notes),
+			Lines:       req.Lines,
+		})
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusBadRequest, "CREATE_SUPPLIER_RETURN_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusCreated, "Supplier return dossier created", ret, nil)
+	}))
+
+	// POST /api/v1/admin/inventory/supplier-returns/{returnId}/dispatch
+	mux.Handle("POST /api/v1/admin/inventory/supplier-returns/{returnId}/dispatch", whReceivingStaff(func(w http.ResponseWriter, r *http.Request) {
+		returnID := r.PathValue("returnId")
+		claims, _ := auth.ClaimsFrom(r.Context())
+		var req struct {
+			TrackingNumber string `json:"trackingNumber"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		ret, err := repo.DispatchSupplierReturn(r.Context(), returnID, claims.UserID, strings.TrimSpace(req.TrackingNumber))
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if errors.Is(err, domain.ErrInsufficientStock) {
+			response.Error(w, r, http.StatusConflict, "INSUFFICIENT_UNSELLABLE_STOCK", "Insufficient unsellable stock available for supplier return", nil)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusBadRequest, "DISPATCH_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Supplier return dispatched: unsellable stock reduced (I01 verified)", ret, nil)
+	}))
+
+	// GET /api/v1/admin/inventory/supplier-returns
+	mux.Handle("GET /api/v1/admin/inventory/supplier-returns", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
+		supplierID := strings.TrimSpace(r.URL.Query().Get("supplierId"))
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		list, err := repo.ListSupplierReturns(r.Context(), warehouseID, supplierID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve supplier returns", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Supplier returns retrieved", list, nil)
+	}))
+
+	// GET /api/v1/admin/inventory/supplier-returns/{returnId}
+	mux.Handle("GET /api/v1/admin/inventory/supplier-returns/{returnId}", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		returnID := r.PathValue("returnId")
+		ret, ok, err := repo.GetSupplierReturn(r.Context(), returnID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+			return
+		}
+		if !ok {
+			response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Supplier return not found", nil)
+			return
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, ret.WarehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Supplier return retrieved", ret, nil)
+	}))
 }

@@ -271,6 +271,25 @@ func (e *LedgerEngine) ReceiveInboundQC(warehouseID, skuID string, passedQty, da
 	return nil
 }
 
+// DispatchSupplierReturn giảm Tồn thực tế và Hàng không bán được khi xuất trả nhà cung cấp (I01: Khả dụng không đổi).
+func (e *LedgerEngine) DispatchSupplierReturn(warehouseID, skuID string, qty int64) error {
+	if qty <= 0 {
+		return ErrInvalidLines
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	k := stockKey{skuID, warehouseID}
+	st, ok := e.stocks[k]
+	if !ok || st.OnHand < qty || st.Unsellable < qty {
+		return ErrInsufficientStock
+	}
+	st.OnHand -= qty
+	st.Unsellable -= qty
+	st.Version++
+	return nil
+}
+
 // List returns the stock records of one warehouse sorted by SKU id.
 func (e *LedgerEngine) List(warehouseID string) []StockItem {
 	e.mu.Lock()

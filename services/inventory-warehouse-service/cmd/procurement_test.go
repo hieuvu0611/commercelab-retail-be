@@ -276,4 +276,64 @@ func TestProcurementAPI(t *testing.T) {
 			t.Errorf("expected 400 for math mismatch, got %d (%s)", rec.Code, rec.Body.String())
 		}
 	})
+
+	t.Run("supplier return of unsellable goods leaves available unchanged", func(t *testing.T) {
+		// Currently SKU-BALO-BLACK-20L has Unsellable = 5, OnHand = 100, Available = 95
+		stockBefore, _, _ := repo.GetStock(nil, "WH-HCM-01", "SKU-BALO-BLACK-20L")
+		if stockBefore.Unsellable < 5 {
+			t.Fatalf("expected unsellable >= 5, got %d", stockBefore.Unsellable)
+		}
+		availBefore := stockBefore.Available()
+		onHandBefore := stockBefore.OnHand
+
+		// 1. Create draft supplier return for 5 units
+		rtvBody := `{
+			"supplierId": "SUP-EVEREST-01",
+			"warehouseId": "WH-HCM-01",
+			"notes": "Return damaged units from batch",
+			"lines": [
+				{"skuId": "SKU-BALO-BLACK-20L", "quantity": 5, "reason": "Torn fabric detected during inbound QC"}
+			]
+		}`
+		rec := call(t, srv, http.MethodPost, "/api/v1/admin/inventory/supplier-returns", rtvBody, &whStaff)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create supplier return failed: %s", rec.Body.String())
+		}
+		var rtvResp struct {
+			Data struct {
+				ReturnID string `json:"returnId"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &rtvResp)
+		rtvID := rtvResp.Data.ReturnID
+
+		// 2. Dispatch supplier return
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/supplier-returns/%s/dispatch", rtvID), `{"trackingNumber":"VNPOST-RTV-9988"}`, &whStaff)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("dispatch supplier return failed: %s", rec.Body.String())
+		}
+
+		// 3. Verify stock changes:
+		// OnHand decreases by 5
+		// Unsellable decreases by 5
+		// Available remains unchanged!
+		stockAfter, _, _ := repo.GetStock(nil, "WH-HCM-01", "SKU-BALO-BLACK-20L")
+		if stockAfter.OnHand != onHandBefore-5 {
+			t.Errorf("OnHand: got %d, want %d (-5)", stockAfter.OnHand, onHandBefore-5)
+		}
+		if stockAfter.Unsellable != 0 {
+			t.Errorf("Unsellable: got %d, want 0 (-5)", stockAfter.Unsellable)
+		}
+		if stockAfter.Available() != availBefore {
+			t.Errorf("Available changed! got %d, want %d", stockAfter.Available(), availBefore)
+		}
+
+		// 4. Returning more than available unsellable stock is rejected
+		rec = call(t, srv, http.MethodPost, "/api/v1/admin/inventory/supplier-returns", rtvBody, &whStaff)
+		_ = json.Unmarshal(rec.Body.Bytes(), &rtvResp)
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/supplier-returns/%s/dispatch", rtvResp.Data.ReturnID), "", &whStaff)
+		if rec.Code != http.StatusConflict {
+			t.Errorf("expected 409 Conflict when unsellable stock is insufficient, got %d", rec.Code)
+		}
+	})
 }
