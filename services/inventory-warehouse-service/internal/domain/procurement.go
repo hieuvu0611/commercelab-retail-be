@@ -1,0 +1,125 @@
+package domain
+
+import (
+	"errors"
+	"time"
+)
+
+var (
+	ErrSupplierNotFound      = errors.New("supplier not found")
+	ErrPurchaseOrderNotFound = errors.New("purchase order not found")
+	ErrInvalidPOState        = errors.New("invalid purchase order state transition")
+	ErrSelfApprovalRejected  = errors.New("maker-checker violation: PO creator cannot approve their own purchase order (P10)")
+	ErrThresholdExceeded     = errors.New("PO amount exceeds approval authority for role")
+	ErrInvalidPOLines        = errors.New("purchase order must contain at least one line with valid skuId, quantity > 0, and unitCostVnd >= 0")
+)
+
+// PO Statuses
+const (
+	POStatusDraft             = "DRAFT"
+	POStatusPendingApproval   = "PENDING_APPROVAL"
+	POStatusApproved          = "APPROVED"
+	POStatusRejected          = "REJECTED"
+	POStatusOrdered           = "ORDERED"
+	POStatusPartiallyReceived = "PARTIALLY_RECEIVED"
+	POStatusCompleted         = "COMPLETED"
+	POStatusCancelled         = "CANCELLED"
+)
+
+// PO Approval Thresholds (B09, P10, Section 1.7)
+// Up to 20,000,000 VND: PROCUREMENT_MGR, OPS_DIRECTOR, FINANCE_MGR, ADMIN
+// Above 20,000,000 VND: OPS_DIRECTOR, FINANCE_MGR, ADMIN
+const POProcurementManagerLimitVND int64 = 20_000_000
+
+type Supplier struct {
+	SupplierID   string    `json:"supplierId"`
+	Name         string    `json:"name"`
+	Code         string    `json:"code"`
+	ContactEmail string    `json:"contactEmail"`
+	Phone        string    `json:"phone"`
+	Address      string    `json:"address"`
+	Active       bool      `json:"active"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+type PurchaseOrderLine struct {
+	ID          int64  `json:"id,omitempty"`
+	POID        string `json:"poId,omitempty"`
+	SkuID       string `json:"skuId"`
+	OrderedQty  int64  `json:"orderedQty"`
+	UnitCostVND int64  `json:"unitCostVnd"`
+	ReceivedQty int64  `json:"receivedQty"`
+	DamagedQty  int64  `json:"damagedQty"`
+	ShortQty    int64  `json:"shortQty"`
+}
+
+type PurchaseOrder struct {
+	POID           string              `json:"poId"`
+	SupplierID     string              `json:"supplierId"`
+	SupplierName   string              `json:"supplierName,omitempty"`
+	WarehouseID    string              `json:"warehouseId"`
+	Status         string              `json:"status"`
+	TotalAmountVND int64               `json:"totalAmountVnd"`
+	CreatedBy      string              `json:"createdBy"`
+	ApprovedBy     string              `json:"approvedBy,omitempty"`
+	ApprovedAt     *time.Time          `json:"approvedAt,omitempty"`
+	Notes          string              `json:"notes"`
+	Lines          []PurchaseOrderLine `json:"lines,omitempty"`
+	CreatedAt      time.Time           `json:"createdAt"`
+	UpdatedAt      time.Time           `json:"updatedAt"`
+}
+
+// ValidatePOLines validates lines and computes the total amount in VND.
+func ValidatePOLines(lines []PurchaseOrderLine) (int64, error) {
+	if len(lines) == 0 {
+		return 0, ErrInvalidPOLines
+	}
+	var total int64
+	for _, l := range lines {
+		if l.SkuID == "" || l.OrderedQty <= 0 || l.UnitCostVND < 0 {
+			return 0, ErrInvalidPOLines
+		}
+		total += l.OrderedQty * l.UnitCostVND
+	}
+	return total, nil
+}
+
+// CanApprovePO checks P10 (maker != checker) and role authorization based on the 20,000,000 VND threshold.
+func CanApprovePO(po PurchaseOrder, approverID string, approverRoles []string) error {
+	if approverID == "" {
+		return errors.New("approver ID is required")
+	}
+	if po.CreatedBy == approverID {
+		return ErrSelfApprovalRejected
+	}
+	if po.Status != POStatusPendingApproval {
+		return ErrInvalidPOState
+	}
+
+	hasRole := func(target string) bool {
+		for _, r := range approverRoles {
+			if r == target {
+				return true
+			}
+		}
+		return false
+	}
+
+	isAdmin := hasRole("ADMIN")
+	isDirector := hasRole("OPS_DIRECTOR") || hasRole("FINANCE_MGR")
+	isProcMgr := hasRole("PROCUREMENT_MGR")
+
+	if po.TotalAmountVND <= POProcurementManagerLimitVND {
+		if isAdmin || isDirector || isProcMgr {
+			return nil
+		}
+		return errors.New("PO approval requires at least PROCUREMENT_MGR role")
+	}
+
+	// Above 20M requires OPS_DIRECTOR, FINANCE_MGR or ADMIN
+	if isAdmin || isDirector {
+		return nil
+	}
+	return ErrThresholdExceeded
+}

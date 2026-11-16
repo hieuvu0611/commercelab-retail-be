@@ -38,12 +38,14 @@ type ReservationRecord struct {
 }
 
 type InventoryRepository struct {
-	pool         *pgxpool.Pool
-	engine       *domain.LedgerEngine
-	mu           sync.Mutex
-	reservations map[string]*ReservationRecord
-	movements    []domain.Movement // memory mode only; guarded by mu
-	now          func() time.Time
+	pool           *pgxpool.Pool
+	engine         *domain.LedgerEngine
+	mu             sync.Mutex
+	reservations   map[string]*ReservationRecord
+	movements      []domain.Movement // memory mode only; guarded by mu
+	suppliers      map[string]*domain.Supplier
+	purchaseOrders map[string]*domain.PurchaseOrder
+	now            func() time.Time
 }
 
 // SetClock replaces the time source (tests use a fake clock for expiry rules).
@@ -56,10 +58,23 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 		{SkuID: "SKU-BALO-BLACK-20L", WarehouseID: "WH-HN-01", OnHand: 5, Unsellable: 0, Reserved: 0, Committed: 0, Version: 1},
 	}
 	repo := &InventoryRepository{
-		pool:         pool,
-		engine:       domain.NewLedgerEngine(seed),
-		reservations: make(map[string]*ReservationRecord),
-		now:          time.Now,
+		pool:           pool,
+		engine:         domain.NewLedgerEngine(seed),
+		reservations:   make(map[string]*ReservationRecord),
+		suppliers:      make(map[string]*domain.Supplier),
+		purchaseOrders: make(map[string]*domain.PurchaseOrder),
+		now:            time.Now,
+	}
+	// Seed memory suppliers
+	repo.suppliers["SUP-EVEREST-01"] = &domain.Supplier{
+		SupplierID: "SUP-EVEREST-01", Name: "Everest Outdoor Gear Co.", Code: "EVEREST",
+		ContactEmail: "supply@everestgear.vn", Phone: "0901234567", Address: "Lot 4, Tan Binh Industrial Park, HCMC",
+		Active: true, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	repo.suppliers["SUP-HYDRO-01"] = &domain.Supplier{
+		SupplierID: "SUP-HYDRO-01", Name: "Hydro Flask Vietnam Ltd.", Code: "HYDRO",
+		ContactEmail: "sales@hydroflask.vn", Phone: "0912345678", Address: "District 7, HCMC",
+		Active: true, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	for _, it := range seed { // the memory ledger explains the seeded stock like the migration does for Postgres
 		repo.appendMovement(domain.Movement{

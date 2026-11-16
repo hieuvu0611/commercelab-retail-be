@@ -1,0 +1,230 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
+)
+
+func extractRoles(claims *auth.Claims) []string {
+	if claims == nil {
+		return nil
+	}
+	if len(claims.Roles) > 0 {
+		return claims.Roles
+	}
+	if claims.Role != "" {
+		return []string{claims.Role}
+	}
+	return nil
+}
+
+// registerProcurementRoutes adds suppliers, PR, and PO management APIs (B02 Stage 2, P01, P10, SC09).
+func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRepository) {
+	staffOrMgr := func(h http.HandlerFunc) http.Handler {
+		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "WAREHOUSE_MGR", "WAREHOUSE_STAFF", "OPS_DIRECTOR", "FINANCE_MGR", "ADMIN")(h))
+	}
+	procurementCreator := func(h http.HandlerFunc) http.Handler {
+		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "WAREHOUSE_MGR", "ADMIN")(h))
+	}
+	approver := func(h http.HandlerFunc) http.Handler {
+		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "OPS_DIRECTOR", "FINANCE_MGR", "ADMIN")(h))
+	}
+
+	// GET /api/v1/admin/procurement/suppliers
+	mux.Handle("GET /api/v1/admin/procurement/suppliers", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		list, err := repo.ListSuppliers(r.Context())
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve suppliers", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Suppliers retrieved", list, nil)
+	}))
+
+	// POST /api/v1/admin/procurement/suppliers
+	mux.Handle("POST /api/v1/admin/procurement/suppliers", procurementCreator(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			SupplierID   string `json:"supplierId"`
+			Name         string `json:"name"`
+			Code         string `json:"code"`
+			ContactEmail string `json:"contactEmail"`
+			Phone        string `json:"phone"`
+			Address      string `json:"address"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Code) == "" {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "Supplier name and code are required", nil)
+			return
+		}
+		supplier, err := repo.CreateSupplier(r.Context(), domain.Supplier{
+			SupplierID:   strings.TrimSpace(req.SupplierID),
+			Name:         strings.TrimSpace(req.Name),
+			Code:         strings.TrimSpace(req.Code),
+			ContactEmail: strings.TrimSpace(req.ContactEmail),
+			Phone:        strings.TrimSpace(req.Phone),
+			Address:      strings.TrimSpace(req.Address),
+			Active:       true,
+		})
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusConflict, "SUPPLIER_CREATE_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusCreated, "Supplier created successfully", supplier, nil)
+	}))
+
+	// GET /api/v1/admin/procurement/orders
+	mux.Handle("GET /api/v1/admin/procurement/orders", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
+		status := strings.TrimSpace(r.URL.Query().Get("status"))
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		list, err := repo.ListPurchaseOrders(r.Context(), warehouseID, status)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve purchase orders", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Purchase orders retrieved", list, nil)
+	}))
+
+	// GET /api/v1/admin/procurement/orders/{poId}
+	mux.Handle("GET /api/v1/admin/procurement/orders/{poId}", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
+		poID := r.PathValue("poId")
+		po, ok, err := repo.GetPurchaseOrder(r.Context(), poID)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+			return
+		}
+		if !ok {
+			response.Error(w, r, http.StatusNotFound, "PO_NOT_FOUND", "Purchase order not found", nil)
+			return
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, po.WarehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Purchase order retrieved", po, nil)
+	}))
+
+	// POST /api/v1/admin/procurement/orders
+	mux.Handle("POST /api/v1/admin/procurement/orders", procurementCreator(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			POID        string                     `json:"poId"`
+			SupplierID  string                     `json:"supplierId"`
+			WarehouseID string                     `json:"warehouseId"`
+			Notes       string                     `json:"notes"`
+			Lines       []domain.PurchaseOrderLine `json:"lines"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.SupplierID) == "" {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "supplierId and valid lines are required", nil)
+			return
+		}
+		if req.WarehouseID == "" {
+			req.WarehouseID = domain.DefaultWarehouseID
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		if !auth.CanAccessWarehouse(claims, req.WarehouseID) {
+			auth.ForbiddenWarehouse(w, r)
+			return
+		}
+		po, err := repo.CreatePurchaseOrder(r.Context(), domain.PurchaseOrder{
+			POID:        strings.TrimSpace(req.POID),
+			SupplierID:  strings.TrimSpace(req.SupplierID),
+			WarehouseID: req.WarehouseID,
+			CreatedBy:   claims.UserID,
+			Notes:       strings.TrimSpace(req.Notes),
+			Lines:       req.Lines,
+		})
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if errors.Is(err, domain.ErrInvalidPOLines) {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_LINES", err.Error(), nil)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusConflict, "CREATE_PO_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusCreated, "Purchase order created", po, nil)
+	}))
+
+	// POST /api/v1/admin/procurement/orders/{poId}/approve
+	mux.Handle("POST /api/v1/admin/procurement/orders/{poId}/approve", approver(func(w http.ResponseWriter, r *http.Request) {
+		poID := r.PathValue("poId")
+		claims, _ := auth.ClaimsFrom(r.Context())
+		roles := extractRoles(claims)
+
+		po, err := repo.ApprovePurchaseOrder(r.Context(), poID, claims.UserID, roles)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		switch {
+		case errors.Is(err, domain.ErrPurchaseOrderNotFound):
+			response.Error(w, r, http.StatusNotFound, "PO_NOT_FOUND", err.Error(), nil)
+		case errors.Is(err, domain.ErrSelfApprovalRejected):
+			response.Error(w, r, http.StatusForbidden, "MAKER_CHECKER_VIOLATION", err.Error(), nil)
+		case errors.Is(err, domain.ErrThresholdExceeded):
+			response.Error(w, r, http.StatusForbidden, "THRESHOLD_EXCEEDED", err.Error(), nil)
+		case errors.Is(err, domain.ErrInvalidPOState):
+			response.Error(w, r, http.StatusConflict, "INVALID_PO_STATE", err.Error(), nil)
+		case err != nil:
+			response.Error(w, r, http.StatusConflict, "APPROVAL_FAILED", err.Error(), nil)
+		default:
+			response.JSON(w, http.StatusOK, "Purchase order approved (P10 Maker != Checker verified)", po, nil)
+		}
+	}))
+
+	// POST /api/v1/admin/procurement/orders/{poId}/reject
+	mux.Handle("POST /api/v1/admin/procurement/orders/{poId}/reject", approver(func(w http.ResponseWriter, r *http.Request) {
+		poID := r.PathValue("poId")
+		claims, _ := auth.ClaimsFrom(r.Context())
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		po, err := repo.RejectPurchaseOrder(r.Context(), poID, claims.UserID, req.Reason)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		switch {
+		case errors.Is(err, domain.ErrPurchaseOrderNotFound):
+			response.Error(w, r, http.StatusNotFound, "PO_NOT_FOUND", err.Error(), nil)
+		case errors.Is(err, domain.ErrInvalidPOState):
+			response.Error(w, r, http.StatusConflict, "INVALID_PO_STATE", err.Error(), nil)
+		case err != nil:
+			response.Error(w, r, http.StatusConflict, "REJECT_FAILED", err.Error(), nil)
+		default:
+			response.JSON(w, http.StatusOK, "Purchase order rejected", po, nil)
+		}
+	}))
+}
