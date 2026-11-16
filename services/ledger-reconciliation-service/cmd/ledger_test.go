@@ -36,7 +36,8 @@ func call(t *testing.T, srv http.Handler, method, path, body string, id *auth.Id
 func TestLedgerAPI(t *testing.T) {
 	authtest.Configure(t)
 	repo := repository.NewLedgerRepository(nil)
-	srv := NewServer(repo, nil, false)
+	settleRepo := repository.NewSettlementRepository(nil)
+	srv := NewServer(repo, settleRepo, nil, false)
 
 	financeStaff := auth.Identity{UserID: "fin-01", Roles: []string{"FINANCE"}, WarehouseScopes: []string{"ALL"}}
 	customer := auth.Identity{UserID: "cust-01", Roles: []string{"CUSTOMER"}}
