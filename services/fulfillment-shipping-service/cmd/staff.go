@@ -32,6 +32,8 @@ type shipmentView struct {
 	ShipmentID         string     `json:"shipmentId"`
 	OrderID            string     `json:"orderId"`
 	WarehouseID        string     `json:"warehouseId"`
+	ParcelIndex        int        `json:"parcelIndex,omitempty"`
+	TotalParcels       int        `json:"totalParcels,omitempty"`
 	PaymentMethod      string     `json:"paymentMethod,omitempty"`
 	CodAmountToCollect int64      `json:"codAmountToCollect,omitempty"`
 	Status             string     `json:"status"`
@@ -48,6 +50,7 @@ type shipmentView struct {
 
 func viewOf(s shipment.Shipment) shipmentView {
 	v := shipmentView{ShipmentID: s.ShipmentID, OrderID: s.OrderID, WarehouseID: s.WarehouseID,
+		ParcelIndex: s.ParcelIndex, TotalParcels: s.TotalParcels,
 		PaymentMethod: s.PaymentMethod, CodAmountToCollect: s.CodAmountToCollect, Status: string(s.Status),
 		Version: s.Version, HandedOverAt: s.HandedOverAt, StopRequestedAt: s.StopRequestedAt, DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt, FailureReason: s.FailureReason, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
 	for i, it := range s.Items {
@@ -77,6 +80,7 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(h))
 	}
 	mux.Handle("GET /api/v1/admin/shipments", staff(listShipments(d)))
+	mux.Handle("GET /api/v1/admin/orders/{orderId}/shipments", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR", "CSKH", "SUPPORT_AGENT", "SUPPORT_LEAD", "FINANCE", "FINANCE_MGR")(listOrderShipments(d))))
 	mux.Handle("GET /api/v1/admin/fulfillment-cases", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD")(listCases(d))))
 	mux.Handle("GET /api/v1/admin/shipments/{shipmentId}", staff(withShipment(d, func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
 		response.JSON(w, http.StatusOK, "Shipment", viewOf(s), nil)
@@ -126,6 +130,36 @@ func listShipments(d Deps) http.HandlerFunc {
 		}
 		response.JSON(w, http.StatusOK, "Shipments", views,
 			&response.Metadata{Total: int64(total), Page: page, PageCount: (total + limit - 1) / limit, Limit: limit})
+	}
+}
+
+func listOrderShipments(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		orderID := r.PathValue("orderId")
+		var list []shipment.Shipment
+		var err error
+		if mp, ok := d.Shipments.(shipment.MultiParcelStore); ok {
+			list, err = mp.ListByOrder(r.Context(), orderID)
+		} else {
+			var s shipment.Shipment
+			s, err = d.Shipments.GetByOrder(r.Context(), orderID)
+			if err == nil {
+				list = []shipment.Shipment{s}
+			}
+		}
+		if errors.Is(err, shipment.ErrNotFound) {
+			response.JSON(w, http.StatusOK, "Order shipments", []shipmentView{}, nil)
+			return
+		}
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		views := make([]shipmentView, len(list))
+		for i, s := range list {
+			views[i] = viewOf(s)
+		}
+		response.JSON(w, http.StatusOK, "Order shipments", views, nil)
 	}
 }
 

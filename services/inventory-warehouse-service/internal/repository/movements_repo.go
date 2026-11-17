@@ -206,10 +206,39 @@ func (r *InventoryRepository) listMovementsInMemory(f MovementFilter, offset int
 	return matched[offset:end], total, nil
 }
 
-// AvailableBySku returns the available quantity of each requested SKU in one warehouse. SKUs without a stock
-// record are absent from the result (callers treat them as out of stock).
+// AvailableBySku returns the available quantity of each requested SKU in one warehouse (or combined across all
+// warehouses when warehouseID == "ALL"). SKUs without a stock record are absent from the result.
 func (r *InventoryRepository) AvailableBySku(ctx context.Context, warehouseID string, skuIDs []string) (map[string]int64, error) {
 	out := make(map[string]int64, len(skuIDs))
+	if warehouseID == "ALL" {
+		if r.pool == nil {
+			for _, sku := range skuIDs {
+				if avail := r.engine.AvailableTotal(sku); avail > 0 {
+					out[sku] = avail
+				}
+			}
+			return out, nil
+		}
+		rows, err := r.pool.Query(ctx, `
+			SELECT sku_id, COALESCE(SUM(GREATEST(on_hand - unsellable - reserved - committed, 0)), 0)
+			FROM stock_items WHERE sku_id = ANY($1)
+			GROUP BY sku_id
+		`, skuIDs)
+		if err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var sku string
+			var available int64
+			if err := rows.Scan(&sku, &available); err != nil {
+				return nil, dependency.Wrap(err)
+			}
+			out[sku] = available
+		}
+		return out, dependency.Wrap(rows.Err())
+	}
+
 	if r.pool == nil {
 		for _, sku := range skuIDs {
 			if st, ok := r.engine.GetStock(warehouseID, sku); ok {
@@ -238,4 +267,42 @@ func (r *InventoryRepository) AvailableBySku(ctx context.Context, warehouseID st
 		return nil, dependency.Wrap(err)
 	}
 	return out, nil
+}
+
+// AvailableBreakdown returns per-warehouse available quantities for the requested SKUs.
+func (r *InventoryRepository) AvailableBreakdown(ctx context.Context, skuIDs []string) (map[string]map[string]int64, error) {
+	out := make(map[string]map[string]int64)
+	for _, wh := range domain.ActiveWarehouses {
+		out[wh] = make(map[string]int64)
+	}
+	if r.pool == nil {
+		for _, wh := range domain.ActiveWarehouses {
+			for _, sku := range skuIDs {
+				if st, ok := r.engine.GetStock(wh, sku); ok {
+					out[wh][sku] = st.Available()
+				}
+			}
+		}
+		return out, nil
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT warehouse_id, sku_id, GREATEST(on_hand - unsellable - reserved - committed, 0)
+		FROM stock_items WHERE sku_id = ANY($1)
+	`, skuIDs)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var wh, sku string
+		var avail int64
+		if err := rows.Scan(&wh, &sku, &avail); err != nil {
+			return nil, dependency.Wrap(err)
+		}
+		if out[wh] == nil {
+			out[wh] = make(map[string]int64)
+		}
+		out[wh][sku] = avail
+	}
+	return out, dependency.Wrap(rows.Err())
 }

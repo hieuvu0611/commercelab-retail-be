@@ -19,7 +19,7 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, payment_method, cod_amount_to_collect, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, stop_requested_at, created_at, updated_at`
+const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, parcel_index, total_parcels, payment_method, cod_amount_to_collect, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, stop_requested_at, created_at, updated_at`
 
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -28,8 +28,8 @@ type querier interface {
 
 func load(ctx context.Context, q querier, where string, arg string) (Shipment, error) {
 	var s Shipment
-	err := q.QueryRow(ctx, `SELECT `+shipmentColumns+` FROM fulfillment.shipments WHERE `+where+` = $1`, arg).
-		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.PaymentMethod, &s.CodAmountToCollect, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.StopRequestedAt, &s.CreatedAt, &s.UpdatedAt)
+	err := q.QueryRow(ctx, `SELECT `+shipmentColumns+` FROM fulfillment.shipments WHERE `+where+` = $1 ORDER BY parcel_index, shipment_id LIMIT 1`, arg).
+		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.ParcelIndex, &s.TotalParcels, &s.PaymentMethod, &s.CodAmountToCollect, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.StopRequestedAt, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Shipment{}, ErrNotFound
 	}
@@ -59,20 +59,58 @@ func (p *PostgresStore) GetByOrder(ctx context.Context, orderID string) (Shipmen
 	return load(ctx, p.pool, "order_id", orderID)
 }
 
+func (p *PostgresStore) ListByOrder(ctx context.Context, orderID string) ([]Shipment, error) {
+	rows, err := p.pool.Query(ctx, `SELECT shipment_id FROM fulfillment.shipments WHERE order_id = $1 ORDER BY parcel_index, shipment_id`, orderID)
+	if err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, dependency.Wrap(err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, dependency.Wrap(err)
+	}
+	if len(ids) == 0 {
+		return nil, ErrNotFound
+	}
+	out := make([]Shipment, 0, len(ids))
+	for _, id := range ids {
+		s, err := load(ctx, p.pool, "shipment_id", id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
 func (p *PostgresStore) Create(ctx context.Context, s Shipment, eventID string, ev ...events.DomainEvent) (Shipment, bool, error) {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return Shipment{}, false, dependency.Wrap(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	// The unique order id makes concurrent deliveries queue on the first insert; the losers see 0 rows.
 	method := s.PaymentMethod
 	if method == "" {
 		method = "PREPAID"
 	}
-	tag, err := tx.Exec(ctx, `INSERT INTO fulfillment.shipments (shipment_id, order_id, user_id, warehouse_id, payment_method, cod_amount_to_collect, status, version, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) ON CONFLICT DO NOTHING`,
-		s.ShipmentID, s.OrderID, s.UserID, s.WarehouseID, method, s.CodAmountToCollect, s.Status, s.Version, s.CreatedAt)
+	pIdx, pTotal := s.ParcelIndex, s.TotalParcels
+	if pIdx < 1 {
+		pIdx = 1
+	}
+	if pTotal < 1 {
+		pTotal = 1
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO fulfillment.shipments (shipment_id, order_id, user_id, warehouse_id, parcel_index, total_parcels, payment_method, cod_amount_to_collect, status, version, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11) ON CONFLICT DO NOTHING`,
+		s.ShipmentID, s.OrderID, s.UserID, s.WarehouseID, pIdx, pTotal, method, s.CodAmountToCollect, s.Status, s.Version, s.CreatedAt)
 	if err != nil {
 		return Shipment{}, false, dependency.Wrap(err)
 	}
@@ -93,9 +131,12 @@ func (p *PostgresStore) Create(ctx context.Context, s Shipment, eventID string, 
 			}
 		}
 	}
-	stored, err := load(ctx, tx, "order_id", s.OrderID)
+	stored, err := load(ctx, tx, "shipment_id", s.ShipmentID)
 	if err != nil {
-		return Shipment{}, false, err
+		stored, err = load(ctx, tx, "order_id", s.OrderID)
+		if err != nil {
+			return Shipment{}, false, err
+		}
 	}
 	return stored, created, dependency.Wrap(tx.Commit(ctx))
 }

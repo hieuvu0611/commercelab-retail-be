@@ -23,6 +23,8 @@ const (
 	StateConfirmed State = "CONFIRMED"
 	// StateInFulfillment: the warehouse has a shipment for the confirmed order (set from a fulfillment event).
 	StateInFulfillment State = "IN_FULFILLMENT"
+	// StatePartiallyDelivered: at least one parcel of a split order was delivered while another is in transit (B04).
+	StatePartiallyDelivered State = "PARTIALLY_DELIVERED"
 	// StateDelivered: the carrier delivered the parcel (set from a fulfillment event).
 	StateDelivered State = "DELIVERED"
 	// StateFailedClosed: the order is closed and everything it held was released.

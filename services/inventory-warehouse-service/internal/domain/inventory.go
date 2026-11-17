@@ -35,20 +35,32 @@ func (s StockItem) Available() int64 {
 	return s.OnHand - s.Unsellable - s.Reserved - s.Committed
 }
 
+// ActiveWarehouses lists the active 1P warehouses in Stage 3 (WH-HCM-01, WH-HN-01).
+var ActiveWarehouses = []string{"WH-HCM-01", "WH-HN-01"}
+
 // Movement types of the stock ledger (I06): every change of a stock bucket has one record.
 const (
-	MovementOpening         = "OPENING"
-	MovementReserve         = "RESERVE"
-	MovementCommit          = "COMMIT"
-	MovementRelease         = "RELEASE"
-	MovementHandover        = "HANDOVER"
-	MovementReturnReceive   = "RETURN_RECEIVE"
-	MovementQCPass          = "QC_PASS"
-	MovementAdjust          = "ADJUST"
-	MovementPOReceiveGood   = "PO_RECEIVE_GOOD"
-	MovementPOReceiveDamage = "PO_RECEIVE_DAMAGED"
-	MovementSupplierReturn  = "SUPPLIER_RETURN"
+	MovementOpening           = "OPENING"
+	MovementReserve           = "RESERVE"
+	MovementCommit            = "COMMIT"
+	MovementRelease           = "RELEASE"
+	MovementHandover          = "HANDOVER"
+	MovementReturnReceive     = "RETURN_RECEIVE"
+	MovementQCPass            = "QC_PASS"
+	MovementAdjust            = "ADJUST"
+	MovementPOReceiveGood     = "PO_RECEIVE_GOOD"
+	MovementPOReceiveDamage   = "PO_RECEIVE_DAMAGED"
+	MovementSupplierReturn    = "SUPPLIER_RETURN"
+	MovementTransferOut       = "TRANSFER_OUT"
+	MovementTransferInGood    = "TRANSFER_IN_GOOD"
+	MovementTransferInDamaged = "TRANSFER_IN_DAMAGED"
 )
+
+// WarehouseAllocation holds the lines reserved for one order in one warehouse.
+type WarehouseAllocation struct {
+	WarehouseID string        `json:"warehouseId"`
+	Lines       []ReserveLine `json:"lines"`
+}
 
 // SystemActor is the actor of movements that no signed-in user caused (order flow, workers).
 const SystemActor = "system"
@@ -349,6 +361,94 @@ func (e *LedgerEngine) List(warehouseID string) []StockItem {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].SkuID < out[j].SkuID })
 	return out
+}
+
+// ReserveAllocations reserves stock across 1 or 2 warehouses atomically.
+func (e *LedgerEngine) ReserveAllocations(allocations []WarehouseAllocation) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, alloc := range allocations {
+		for _, line := range alloc.Lines {
+			st, ok := e.stocks[stockKey{line.SkuID, alloc.WarehouseID}]
+			if !ok || line.Quantity <= 0 || st.Available() < line.Quantity {
+				return ErrInsufficientStock
+			}
+		}
+	}
+	for _, alloc := range allocations {
+		for _, line := range alloc.Lines {
+			st := e.stocks[stockKey{line.SkuID, alloc.WarehouseID}]
+			st.Reserved += line.Quantity
+			st.Version++
+		}
+	}
+	return nil
+}
+
+// DispatchTransfer moves qty from source OnHand into destination InTransit (SC09).
+func (e *LedgerEngine) DispatchTransfer(fromWH, toWH string, lines []ReserveLine) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, line := range lines {
+		st, ok := e.stocks[stockKey{line.SkuID, fromWH}]
+		if !ok || line.Quantity <= 0 || st.Available() < line.Quantity {
+			return ErrInsufficientStock
+		}
+	}
+	for _, line := range lines {
+		src := e.stocks[stockKey{line.SkuID, fromWH}]
+		src.OnHand -= line.Quantity
+		src.Version++
+
+		dstKey := stockKey{line.SkuID, toWH}
+		dst, ok := e.stocks[dstKey]
+		if !ok {
+			dst = &StockItem{SkuID: line.SkuID, WarehouseID: toWH, Version: 1}
+			e.stocks[dstKey] = dst
+		}
+		dst.InTransit += line.Quantity
+		dst.Version++
+	}
+	return nil
+}
+
+// ReceiveTransfer clears InTransit on destination and records good/damaged quantities (SC09).
+func (e *LedgerEngine) ReceiveTransfer(toWH string, dispatched map[string]int64, lines []TransferReceiveLine) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, line := range lines {
+		qty := dispatched[line.SkuID]
+		if st, ok := e.stocks[stockKey{line.SkuID, toWH}]; !ok || st.InTransit < qty {
+			return ErrTransferInvalidState
+		}
+	}
+	for _, line := range lines {
+		qty := dispatched[line.SkuID]
+		dst := e.stocks[stockKey{line.SkuID, toWH}]
+		dst.InTransit -= qty
+		dst.OnHand += (line.ReceivedGoodQty + line.DamagedQty)
+		dst.Unsellable += line.DamagedQty
+		dst.Version++
+	}
+	return nil
+}
+
+// AvailableTotal returns combined sellable stock across all warehouses for one SKU.
+func (e *LedgerEngine) AvailableTotal(skuID string) int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var total int64
+	for k, st := range e.stocks {
+		if k.sku == skuID {
+			if avail := st.Available(); avail > 0 {
+				total += avail
+			}
+		}
+	}
+	return total
 }
 
 // AddOpening adds opening stock to on hand (creating the record when needed).

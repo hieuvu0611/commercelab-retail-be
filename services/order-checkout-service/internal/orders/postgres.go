@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -56,7 +57,25 @@ func loadOrder(ctx context.Context, q queryer, orderID string) (Order, error) {
 		}
 		o.Items = append(o.Items, it)
 	}
-	return o, dependency.Wrap(rows.Err())
+	if err := rows.Err(); err != nil {
+		return Order{}, dependency.Wrap(err)
+	}
+	pRows, err := q.Query(ctx, `SELECT parcel_seq, warehouse_id, items_json, cod_amount_vnd, status
+		FROM orders.order_parcels WHERE order_id = $1 ORDER BY parcel_seq`, orderID)
+	if err != nil {
+		return Order{}, dependency.Wrap(err)
+	}
+	defer pRows.Close()
+	for pRows.Next() {
+		var p Parcel
+		var rawItems []byte
+		if err := pRows.Scan(&p.ParcelSeq, &p.WarehouseID, &rawItems, &p.CodAmountVND, &p.Status); err != nil {
+			return Order{}, dependency.Wrap(err)
+		}
+		_ = json.Unmarshal(rawItems, &p.Items)
+		o.Parcels = append(o.Parcels, p)
+	}
+	return o, dependency.Wrap(pRows.Err())
 }
 
 // replay returns the order stored for a claimed key after checking that the stored hash matches.
@@ -121,6 +140,18 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, e
 			return Order{}, false, dependency.Wrap(err)
 		}
 	}
+	for _, p := range o.Parcels {
+		itemsJSON, _ := json.Marshal(p.Items)
+		pStatus := p.Status
+		if pStatus == "" {
+			pStatus = status
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO orders.order_parcels (order_id, parcel_seq, warehouse_id, items_json, cod_amount_vnd, status)
+			VALUES ($1, $2, $3, $4::jsonb, $5, $6)`,
+			o.OrderID, p.ParcelSeq, p.WarehouseID, string(itemsJSON), p.CodAmountVND, pStatus); err != nil {
+			return Order{}, false, dependency.Wrap(err)
+		}
+	}
 	for _, e := range ev {
 		if err := outbox.Insert(ctx, tx, outbox.OrdersTable, e); err != nil {
 			return Order{}, false, dependency.Wrap(err)
@@ -173,9 +204,9 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	}
 	const where = `WHERE ($1 = '' OR user_id = $1) AND (cardinality($2::text[]) = 0 OR status = ANY($2)) AND ($3 = '' OR failure_code = $3)
 		AND ($4::timestamptz IS NULL OR updated_at <= $4) AND ($5::timestamptz IS NULL OR updated_at >= $5)
-		AND (cardinality($6::text[]) = 0 OR warehouse_id = ANY($6))`
+		AND (cardinality($6::text[]) = 0 OR warehouse_id = ANY($6) OR EXISTS (SELECT 1 FROM orders.order_parcels op WHERE op.order_id = o.order_id AND op.warehouse_id = ANY($6)))`
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders `+where, f.UserID, statuses, f.FailureCode, before, after, warehouses).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders o `+where, f.UserID, statuses, f.FailureCode, before, after, warehouses).Scan(&total); err != nil {
 		return nil, 0, dependency.Wrap(err)
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+orderColumns+`, (SELECT COALESCE(SUM(quantity), 0) FROM orders.order_items i WHERE i.order_id = o.order_id)
@@ -188,7 +219,7 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	out := []Order{}
 	for rows.Next() {
 		var o Order
-		if err := rows.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentStatus,
+		if err := rows.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentMethod, &o.PaymentStatus,
 			&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND,
 			&o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt, &o.ItemCount); err != nil {
 			return nil, 0, dependency.Wrap(err)
@@ -261,4 +292,35 @@ func (s *PostgresStore) Transition(ctx context.Context, orderID, from, to, payme
 		return Order{}, err
 	}
 	return moved, dependency.Wrap(tx.Commit(ctx))
+}
+
+// MarkParcelDelivered marks one warehouse's parcel DELIVERED and returns true when all parcels of orderID are delivered.
+func (s *PostgresStore) MarkParcelDelivered(ctx context.Context, orderID, warehouseID string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE orders.order_parcels
+		SET status = 'DELIVERED', updated_at = NOW()
+		WHERE order_id = $1 AND ($2 = '' OR warehouse_id = $2)
+	`, orderID, warehouseID); err != nil {
+		return false, dependency.Wrap(err)
+	}
+	var total, pending int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE status <> 'DELIVERED')
+		FROM orders.order_parcels WHERE order_id = $1
+	`, orderID).Scan(&total, &pending); err != nil {
+		return false, dependency.Wrap(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, dependency.Wrap(err)
+	}
+	if total <= 1 {
+		return true, nil
+	}
+	return pending == 0, nil
 }

@@ -276,6 +276,7 @@ services:
       <<: [*go-env, *jwt-env, *internal-env]
       INVENTORY_WAREHOUSE_PORT: 8082
       DATABASE_URL_INVENTORY: postgres://inventory_svc_user:inventory_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=inventory
+      BACKOFFICE_SERVICE_URL: http://backoffice-support-service:8088
       MIGRATE_ON_START: "true"
     depends_on: *infra-healthy
     healthcheck:
