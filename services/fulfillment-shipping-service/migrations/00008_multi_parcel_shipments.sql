@@ -6,6 +6,7 @@ ALTER TABLE fulfillment.shipments
     ADD COLUMN IF NOT EXISTS parcel_index  INT NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS total_parcels INT NOT NULL DEFAULT 1;
 
+-- +goose StatementBegin
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -15,6 +16,7 @@ BEGIN
             ADD CONSTRAINT uq_shipments_order_warehouse UNIQUE (order_id, warehouse_id);
     END IF;
 END $$;
+-- +goose StatementEnd
 
 CREATE INDEX IF NOT EXISTS idx_shipments_order_id ON fulfillment.shipments (order_id, parcel_index);
 
