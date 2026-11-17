@@ -145,8 +145,10 @@ export class ClickhouseAnalyticsService {
   }
 
   private async fetchServiceList(url: string, authHeader?: string): Promise<any[]> {
+    const internalToken = process.env.INTERNAL_SERVICE_TOKEN;
     const res = await fetch(url, {
       headers: {
+        ...(internalToken ? { 'X-Internal-Token': internalToken } : {}),
         ...(authHeader ? { Authorization: authHeader } : {}),
       },
     });
@@ -157,15 +159,21 @@ export class ClickhouseAnalyticsService {
     return Array.isArray(json?.data) ? json.data : [];
   }
 
+  private toClickhouseDateTime(iso?: string): string {
+    const d = iso ? new Date(iso) : new Date();
+    const safe = Number.isNaN(d.getTime()) ? new Date() : d;
+    return safe.toISOString().replace('T', ' ').replace('Z', '');
+  }
+
   async syncFromSources(authHeader?: string) {
     await this.ensureSchema();
     const cfg = this.config();
-    const nowIso = new Date().toISOString().replace('T', ' ').replace('Z', '');
+    const nowIso = this.toClickhouseDateTime();
 
     const [orders, shipments, stockRows] = await Promise.all([
-      this.fetchServiceList(`${cfg.orderUrl}/api/v1/admin/orders?limit=100`, authHeader),
-      this.fetchServiceList(`${cfg.fulfillmentUrl}/api/v1/admin/shipments?limit=100`, authHeader),
-      this.fetchServiceList(`${cfg.inventoryUrl}/api/v1/admin/inventory/stock`, authHeader),
+      this.fetchServiceList(`${cfg.orderUrl}/api/v1/orders/internal?limit=100`, authHeader),
+      this.fetchServiceList(`${cfg.fulfillmentUrl}/api/v1/shipments/internal?limit=100`, authHeader),
+      this.fetchServiceList(`${cfg.inventoryUrl}/api/v1/inventory/internal/stock`, authHeader),
     ]);
 
     await this.execClickhouse('TRUNCATE TABLE IF EXISTS order_facts');
@@ -182,7 +190,7 @@ export class ClickhouseAnalyticsService {
             warehouse_id: String(o.warehouseId || 'WH-HCM-01'),
             total_payable_vnd: Number(o.totalPayableVnd || 0),
             discount_vnd: Number(o.discountVnd || 0),
-            created_at: String(o.createdAt || new Date().toISOString()).replace('T', ' ').replace('Z', ''),
+            created_at: this.toClickhouseDateTime(o.createdAt),
             synced_at: nowIso,
           }),
         )
@@ -296,8 +304,8 @@ export class ClickhouseAnalyticsService {
     let totalRma = 0;
     if (this.db) {
       const [cRes, rRes] = await Promise.all([
-        this.db.query(`SELECT COUNT(*) AS cnt FROM support.exception_cases WHERE status IN ('OPEN', 'INVESTIGATING')`),
-        this.db.query(`SELECT COUNT(*) AS cnt FROM support.returns_rma`),
+        this.db.query(`SELECT COUNT(*) AS cnt FROM support.exception_cases WHERE status IN ('OPEN_UNASSIGNED', 'ASSIGNED_IN_PROGRESS')`),
+        this.db.query(`SELECT COUNT(*) AS cnt FROM support.rma_requests`),
       ]);
       openCases = Number(cRes.rows?.[0]?.cnt || 0);
       totalRma = Number(rRes.rows?.[0]?.cnt || 0);

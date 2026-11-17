@@ -9,6 +9,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
@@ -146,6 +147,25 @@ func registerAdminRoutes(mux *http.ServeMux, repo *repository.InventoryRepositor
 		}
 		response.JSON(w, http.StatusOK, "Stock retrieved", views, nil)
 	}))
+
+	mux.Handle("GET /api/v1/inventory/internal/stock", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		warehouses := []string{"WH-HCM-01", "WH-HN-01"}
+		if wh := strings.TrimSpace(r.URL.Query().Get("warehouse")); wh != "" {
+			warehouses = []string{wh}
+		}
+		views := make([]map[string]any, 0)
+		for _, wh := range warehouses {
+			items, err := repo.ListStock(r.Context(), wh)
+			if dependency.IsUnavailable(err) {
+				dependency.WriteUnavailable(w, r, err)
+				return
+			}
+			for _, st := range items {
+				views = append(views, stockView(st))
+			}
+		}
+		response.JSON(w, http.StatusOK, "Internal stock retrieved", views, nil)
+	})))
 
 	mux.Handle(adminMovementPath, warehouseStaff(func(w http.ResponseWriter, r *http.Request) {
 		warehouseID, ok := warehouseParam(w, r)

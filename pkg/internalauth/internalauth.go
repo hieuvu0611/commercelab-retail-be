@@ -53,16 +53,34 @@ func Token() string {
 // Reset removes the secret (tests).
 func Reset() { token.Store(nil) }
 
+// IsValid reports whether r carries the configured internal service secret.
+func IsValid(r *http.Request) bool {
+	want := Token()
+	got := r.Header.Get(Header)
+	return want != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
 // Require lets the request through only when it carries the configured secret. Without a configured secret
 // every request is refused (fail closed). The comparison is constant-time.
 func Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		want := Token()
-		got := r.Header.Get(Header)
-		if want == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		if !IsValid(r) {
 			response.Error(w, r, http.StatusUnauthorized, "INTERNAL_AUTH_REQUIRED", "This endpoint is only available to internal services", nil)
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// RequireOr authorizes internal callers presenting X-Internal-Token (failing closed on an invalid token) and
+// otherwise delegates to fallback.
+func RequireOr(next, fallback http.Handler) http.Handler {
+	internal := Require(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(Header) != "" {
+			internal.ServeHTTP(w, r)
+			return
+		}
+		fallback.ServeHTTP(w, r)
 	})
 }

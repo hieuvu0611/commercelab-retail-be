@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
@@ -27,6 +28,7 @@ func registerOrderAdminRoutes(mux *http.ServeMux, svc *checkout.Service) {
 		return auth.RequireAuth(auth.RequireRole(roleSupportAgent, roleSupportLead, roleOpsMgr, roleWarehouseMgr)(h))
 	}
 	mux.Handle("GET /api/v1/admin/orders", staff(listStaffOrders(svc)))
+	mux.Handle("GET /api/v1/orders/internal", internalauth.Require(listStaffOrders(svc)))
 	mux.Handle("GET /api/v1/admin/orders/{orderId}", staff(getStaffOrder(svc)))
 }
 
@@ -80,7 +82,7 @@ type staffOrderRow struct {
 // warehouseScope is the warehouses a caller may read orders of: nil means all. A warehouse manager without any
 // other staff role is limited to their token scopes (an empty scope list sees nothing).
 func warehouseScope(c *auth.Claims) (ids []string, limited bool) {
-	if !c.HasRole(roleWarehouseMgr) || c.HasRole(roleSupportAgent) || c.HasRole(roleSupportLead) || c.HasRole(roleOpsMgr) {
+	if c == nil || !c.HasRole(roleWarehouseMgr) || c.HasRole(roleSupportAgent) || c.HasRole(roleSupportLead) || c.HasRole(roleOpsMgr) {
 		return nil, false
 	}
 	for _, s := range c.WarehouseScopes {
