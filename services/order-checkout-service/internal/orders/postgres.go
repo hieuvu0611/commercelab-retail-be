@@ -20,13 +20,17 @@ type PostgresStore struct {
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), status, payment_method, payment_status,
+const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), applied_promotions_json, status, payment_method, payment_status,
 	failure_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, refund_pending_vnd, refunded_amount_vnd, version, expires_at, created_at, updated_at`
 
 func scanOrder(row pgx.Row) (Order, error) {
 	var o Order
-	err := row.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentMethod, &o.PaymentStatus,
+	var promoRaw []byte
+	err := row.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &promoRaw, &o.Status, &o.PaymentMethod, &o.PaymentStatus,
 		&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND, &o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
+	if len(promoRaw) > 0 {
+		_ = json.Unmarshal(promoRaw, &o.AppliedPromotions)
+	}
 	return o, err
 }
 
@@ -127,10 +131,14 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, e
 	if method == "" {
 		method = "PREPAID"
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO orders.orders (order_id, user_id, quote_id, address_id, warehouse_id, voucher_code, status, payment_method, payment_status,
+	promoJSON, _ := json.Marshal(o.AppliedPromotions)
+	if len(o.AppliedPromotions) == 0 {
+		promoJSON = []byte("[]")
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO orders.orders (order_id, user_id, quote_id, address_id, warehouse_id, voucher_code, applied_promotions_json, status, payment_method, payment_status,
 			subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, expires_at)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, $13, $14)`,
-		o.OrderID, o.UserID, o.QuoteID, o.AddressID, o.WarehouseID, o.VoucherCode, status, method, payment,
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15)`,
+		o.OrderID, o.UserID, o.QuoteID, o.AddressID, o.WarehouseID, o.VoucherCode, string(promoJSON), status, method, payment,
 		o.SubtotalVND, o.DiscountVND, o.ShippingFeeVND, o.TotalPayableVND, o.ExpiresAt); err != nil {
 		return Order{}, false, dependency.Wrap(err)
 	}

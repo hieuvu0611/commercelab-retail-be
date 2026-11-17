@@ -286,21 +286,29 @@ func (r *CatalogPricingRepository) SaveQuote(ctx context.Context, q *domain.Quot
 	if err != nil {
 		return err
 	}
+	campJSON, err := json.Marshal(q.AppliedCampaigns)
+	if err != nil {
+		return err
+	}
+	if len(q.AppliedCampaigns) == 0 {
+		campJSON = []byte("[]")
+	}
 	if r.pgPool != nil {
 		_, err := r.pgPool.Exec(ctx, `
-			INSERT INTO quotes (quote_id, user_id, voucher_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, lines_json, expires_at, address_id, discount_pct, version_hash)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, NULLIF($10, ''), $11, $12)
+			INSERT INTO quotes (quote_id, user_id, voucher_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, lines_json, applied_campaigns_json, expires_at, address_id, discount_pct, version_hash)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, NULLIF($11, ''), $12, $13)
 			ON CONFLICT (quote_id) DO UPDATE SET
 				subtotal_vnd = EXCLUDED.subtotal_vnd,
 				discount_vnd = EXCLUDED.discount_vnd,
 				shipping_fee_vnd = EXCLUDED.shipping_fee_vnd,
 				total_payable_vnd = EXCLUDED.total_payable_vnd,
 				lines_json = EXCLUDED.lines_json,
+				applied_campaigns_json = EXCLUDED.applied_campaigns_json,
 				expires_at = EXCLUDED.expires_at,
 				address_id = EXCLUDED.address_id,
 				discount_pct = EXCLUDED.discount_pct,
 				version_hash = EXCLUDED.version_hash
-		`, q.QuoteID, q.UserID, q.VoucherCode, q.SubtotalVND, q.DiscountVND, q.ShippingFeeVND, q.TotalPayableVND, string(linesJSON), q.ExpiresAt, q.AddressID, q.DiscountPct, q.Version)
+		`, q.QuoteID, q.UserID, q.VoucherCode, q.SubtotalVND, q.DiscountVND, q.ShippingFeeVND, q.TotalPayableVND, string(linesJSON), string(campJSON), q.ExpiresAt, q.AddressID, q.DiscountPct, q.Version)
 		if err != nil {
 			return dependency.Wrap(err)
 		}
@@ -316,16 +324,19 @@ func (r *CatalogPricingRepository) SaveQuote(ctx context.Context, q *domain.Quot
 func (r *CatalogPricingRepository) GetQuoteByID(ctx context.Context, quoteID string) (*domain.Quote, error) {
 	if r.pgPool != nil {
 		var q domain.Quote
-		var linesRaw []byte
+		var linesRaw, campRaw []byte
 		err := r.pgPool.QueryRow(ctx, `
-			SELECT quote_id, user_id, COALESCE(voucher_code, ''), subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, lines_json, expires_at,
+			SELECT quote_id, user_id, COALESCE(voucher_code, ''), subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, lines_json, COALESCE(applied_campaigns_json, '[]'::jsonb), expires_at,
 				COALESCE(address_id, ''), discount_pct, version_hash
 			FROM quotes
 			WHERE quote_id = $1
-		`, quoteID).Scan(&q.QuoteID, &q.UserID, &q.VoucherCode, &q.SubtotalVND, &q.DiscountVND, &q.ShippingFeeVND, &q.TotalPayableVND, &linesRaw, &q.ExpiresAt,
+		`, quoteID).Scan(&q.QuoteID, &q.UserID, &q.VoucherCode, &q.SubtotalVND, &q.DiscountVND, &q.ShippingFeeVND, &q.TotalPayableVND, &linesRaw, &campRaw, &q.ExpiresAt,
 			&q.AddressID, &q.DiscountPct, &q.Version)
 		if err == nil {
 			_ = json.Unmarshal(linesRaw, &q.Lines)
+			if len(campRaw) > 0 {
+				_ = json.Unmarshal(campRaw, &q.AppliedCampaigns)
+			}
 			return &q, nil
 		}
 		if errors.Is(err, pgx.ErrNoRows) {

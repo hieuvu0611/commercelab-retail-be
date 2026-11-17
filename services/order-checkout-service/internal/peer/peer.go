@@ -14,6 +14,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 )
 
@@ -42,9 +43,10 @@ type quoteView struct {
 		SubtotalVND     int64     `json:"subtotalVnd"`
 		DiscountVND     int64     `json:"discountVnd"`
 		ShippingFeeVND  int64     `json:"shippingFeeVnd"`
-		TotalPayableVND int64     `json:"totalPayableVnd"`
-		ExpiresAt       time.Time `json:"expiresAt"`
-		Lines           []struct {
+		TotalPayableVND  int64                     `json:"totalPayableVnd"`
+		ExpiresAt        time.Time                 `json:"expiresAt"`
+		AppliedCampaigns []orders.AppliedPromotion `json:"appliedCampaigns"`
+		Lines            []struct {
 			SkuID                string `json:"skuId"`
 			SkuName              string `json:"skuName"`
 			Quantity             int64  `json:"quantity"`
@@ -69,7 +71,8 @@ func (q *Quotes) Get(ctx context.Context, bearer, quoteID string) (checkout.Quot
 	out := checkout.Quote{
 		ID: src.QuoteID, UserID: src.UserID, AddressID: src.AddressID, VoucherCode: src.VoucherCode,
 		SubtotalVND: src.SubtotalVND, DiscountVND: src.DiscountVND, ShippingFeeVND: src.ShippingFeeVND, TotalPayableVND: src.TotalPayableVND,
-		ExpiresAt: src.ExpiresAt, Stale: view.IsStale,
+		AppliedPromotions: src.AppliedCampaigns,
+		ExpiresAt:         src.ExpiresAt, Stale: view.IsStale,
 	}
 	for _, l := range src.Lines {
 		out.Lines = append(out.Lines, checkout.QuoteLine{SkuID: l.SkuID, SkuName: l.SkuName, Quantity: l.Quantity, UnitPriceVND: l.UnitPriceVND,

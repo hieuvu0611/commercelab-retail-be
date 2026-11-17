@@ -27,6 +27,11 @@ type VoucherChecker interface {
 	Eligibility(ctx context.Context, bearer, code string) (peer.Eligibility, error)
 }
 
+// PromotionEvaluator optionally evaluates B08 campaigns alongside single vouchers.
+type PromotionEvaluator interface {
+	EvaluatePromotions(ctx context.Context, bearer string, campaignIDs []string, lines []peer.PromoEvalLine) (peer.PromoEvaluation, error)
+}
+
 // AddressChecker asks the IAM service whether an address is in the token owner's address book.
 type AddressChecker interface {
 	Exists(ctx context.Context, bearer, addressID string) (bool, error)
@@ -56,8 +61,9 @@ func registerQuoteRoutes(mux *http.ServeMux, store quoteStore, carts *cart.Servi
 // carries only the delivery address and an optional voucher code, and any other field is rejected.
 func (a *quoteAPI) create(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		AddressID   string `json:"addressId"`
-		VoucherCode string `json:"voucherCode"`
+		AddressID   string   `json:"addressId"`
+		VoucherCode string   `json:"voucherCode"`
+		CampaignIDs []string `json:"campaignIds"`
 	}
 	if !request.DecodeJSON(w, r, &body) {
 		return
@@ -88,8 +94,29 @@ func (a *quoteAPI) create(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var promoDiscount int64
+	var appliedCampaigns []domain.AppliedCampaign
+	if eval, ok := a.vouchers.(PromotionEvaluator); ok {
+		evalLines := make([]peer.PromoEvalLine, len(lines))
+		for i, l := range lines {
+			evalLines[i] = peer.PromoEvalLine{SkuID: l.SkuID, Quantity: l.Quantity, UnitPriceVND: l.UnitPriceVND}
+		}
+		if res, err := eval.EvaluatePromotions(r.Context(), bearer, body.CampaignIDs, evalLines); err != nil {
+			if len(body.CampaignIDs) > 0 {
+				writeQuoteError(w, r, err)
+				return
+			}
+		} else {
+			promoDiscount = res.TotalDiscountVND
+			for _, ap := range res.Applied {
+				appliedCampaigns = append(appliedCampaigns, domain.AppliedCampaign{
+					CampaignID: ap.CampaignID, Code: ap.Code, Name: ap.Name, DiscountVND: ap.DiscountVND,
+				})
+			}
+		}
+	}
 
-	quote, err := domain.CalculateQuote(newQuoteID(), claims.UserID, code, discountPct, lines, a.now())
+	quote, err := domain.CalculateQuoteWithPromotions(newQuoteID(), claims.UserID, code, discountPct, promoDiscount, appliedCampaigns, lines, a.now())
 	if err != nil {
 		log.Printf("[catalog] quote calculation failed: %v", err)
 		response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error", nil)

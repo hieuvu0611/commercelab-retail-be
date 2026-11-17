@@ -16,6 +16,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/ids"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/promotion"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/saga"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
@@ -87,6 +88,7 @@ type Quote struct {
 	ID, UserID, AddressID, VoucherCode                        string
 	SubtotalVND, DiscountVND, ShippingFeeVND, TotalPayableVND int64
 	Lines                                                     []QuoteLine
+	AppliedPromotions                                         []orders.AppliedPromotion
 	ExpiresAt                                                 time.Time
 	// Stale: the catalog says a price changed or a SKU is no longer orderable since the quote was made.
 	Stale bool
@@ -171,7 +173,8 @@ type Deps struct {
 	Stock       Stock
 	Payments    Payments
 	Vouchers    voucher.Reserver
-	Carts       Carts // optional
+	Promotions  promotion.Store // optional B08 promotion store
+	Carts       Carts           // optional
 	Addresses   Addresses
 	Snapshots   snapshot.Store
 	Fulfillment Fulfillment // asked to stop the parcel of a paid order that is cancelled (B05)
@@ -321,7 +324,8 @@ func (s *Service) buildOrder(q Quote, expires time.Time) orders.Order {
 	}
 	return orders.Order{
 		OrderID: s.newID(), UserID: q.UserID, QuoteID: q.ID, AddressID: q.AddressID, WarehouseID: s.WarehouseID, VoucherCode: q.VoucherCode,
-		Status: orders.StatusPending, PaymentStatus: orders.PaymentUnpaid,
+		AppliedPromotions: append([]orders.AppliedPromotion(nil), q.AppliedPromotions...),
+		Status:            orders.StatusPending, PaymentStatus: orders.PaymentUnpaid,
 		SubtotalVND: q.SubtotalVND, DiscountVND: q.DiscountVND, ShippingFeeVND: q.ShippingFeeVND, TotalPayableVND: q.TotalPayableVND,
 		Items: items, ExpiresAt: &expires,
 	}
@@ -332,6 +336,13 @@ func (s *Service) run(ctx context.Context, p Principal, o orders.Order) orders.O
 	if o.VoucherCode != "" {
 		if err := s.Vouchers.Reserve(ctx, o.VoucherCode, p.UserID, o.OrderID, s.now()); err != nil {
 			return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(err))
+		}
+	}
+	if s.Promotions != nil && len(o.AppliedPromotions) > 0 {
+		for _, ap := range o.AppliedPromotions {
+			if err := s.Promotions.Reserve(ctx, ap.CampaignID, p.UserID, o.OrderID, ap.DiscountVND, s.now()); err != nil {
+				return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(err))
+			}
 		}
 	}
 
@@ -369,6 +380,9 @@ func (s *Service) run(ctx context.Context, p Principal, o orders.Order) orders.O
 		if o.VoucherCode != "" {
 			_ = s.Vouchers.Consume(ctx, o.VoucherCode, o.OrderID)
 		}
+		if s.Promotions != nil && len(o.AppliedPromotions) > 0 {
+			_ = s.Promotions.ConsumeOrder(ctx, o.OrderID)
+		}
 		confirmed, err := s.Orders.Transition(ctx, o.OrderID, string(saga.StatePending), string(saga.StateConfirmed), PayCODPending, "", s.orderConfirmed(o, 0))
 		if err != nil {
 			return s.undoAfterStoreFailure(ctx, o)
@@ -397,6 +411,8 @@ func failureOf(err error) string {
 	switch {
 	case errors.As(err, &refusal):
 		return refusal.Reason
+	case errors.Is(err, promotion.ErrQuotaExhausted), errors.Is(err, promotion.ErrBudgetExceeded), errors.Is(err, promotion.ErrCustomerLimitHit):
+		return "PROMOTION_EXHAUSTED"
 	case errors.Is(err, ErrOutOfStock):
 		return FailureOutOfStock
 	}
@@ -466,11 +482,15 @@ func (s *Service) releaseStock(ctx context.Context, orderID string) {
 }
 
 func (s *Service) releaseVoucher(ctx context.Context, o orders.Order) {
-	if o.VoucherCode == "" {
-		return
+	if o.VoucherCode != "" {
+		if err := s.Vouchers.Release(ctx, o.VoucherCode, o.OrderID); err != nil {
+			log.Printf("[order] voucher release failed for order %s: %v", o.OrderID, redact(err))
+		}
 	}
-	if err := s.Vouchers.Release(ctx, o.VoucherCode, o.OrderID); err != nil {
-		log.Printf("[order] voucher release failed for order %s: %v", o.OrderID, redact(err))
+	if s.Promotions != nil && len(o.AppliedPromotions) > 0 {
+		if err := s.Promotions.ReleaseOrder(ctx, o.OrderID); err != nil {
+			log.Printf("[order] promotion release failed for order %s: %v", o.OrderID, redact(err))
+		}
 	}
 }
 

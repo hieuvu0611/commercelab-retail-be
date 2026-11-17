@@ -46,14 +46,23 @@ type Parcel struct {
 	Status       string `json:"status"`
 }
 
+// AppliedPromotion freezes a B08 promotion campaign discount applied to an order.
+type AppliedPromotion struct {
+	CampaignID  string `json:"campaignId"`
+	Code        string `json:"code"`
+	Name        string `json:"name"`
+	DiscountVND int64  `json:"discountVnd"`
+}
+
 // Order is a placed order. Status is the saga state; PaymentStatus is tracked separately.
 type Order struct {
-	OrderID          string     `json:"orderId"`
-	UserID           string     `json:"-"`
-	QuoteID          string     `json:"quoteId"`
-	AddressID        string     `json:"addressId"`
-	WarehouseID      string     `json:"warehouseId,omitempty"`
-	VoucherCode      string     `json:"voucherCode,omitempty"`
+	OrderID           string             `json:"orderId"`
+	UserID            string             `json:"-"`
+	QuoteID           string             `json:"quoteId"`
+	AddressID         string             `json:"addressId"`
+	WarehouseID       string             `json:"warehouseId,omitempty"`
+	VoucherCode       string             `json:"voucherCode,omitempty"`
+	AppliedPromotions []AppliedPromotion `json:"appliedPromotions,omitempty"`
 	Status           string     `json:"status"`
 	PaymentMethod    string     `json:"paymentMethod,omitempty"`
 	PaymentStatus    string     `json:"paymentStatus"`
