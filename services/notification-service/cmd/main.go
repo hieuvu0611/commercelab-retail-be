@@ -70,12 +70,40 @@ func main() {
 	mux.HandleFunc("GET /api/v1/notifications/{recipientId}", func(w http.ResponseWriter, r *http.Request) {
 		recipientID := r.PathValue("recipientId")
 		items := dispatcher.ListInbox(recipientID)
-		response.JSON(w, http.StatusOK, "Lấy hộp thư thông báo thành công", items, &response.Metadata{
+		unread := dispatcher.UnreadCount(recipientID)
+		response.JSON(w, http.StatusOK, "Lấy hộp thư thông báo thành công", map[string]any{
+			"items":       items,
+			"unreadCount": unread,
+		}, &response.Metadata{
 			Total:     int64(len(items)),
 			Page:      1,
 			PageCount: 1,
-			Limit:     20,
+			Limit:     50,
 		})
+	})
+
+	mux.HandleFunc("PATCH /api/v1/notifications/{recipientId}/{notificationId}/read", func(w http.ResponseWriter, r *http.Request) {
+		recipientID := r.PathValue("recipientId")
+		notificationID := r.PathValue("notificationId")
+		found := dispatcher.MarkAsRead(recipientID, notificationID)
+		if !found {
+			response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Không tìm thấy thông báo", nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Đã đánh dấu thông báo là đã đọc", map[string]any{
+			"notificationId": notificationID,
+			"isRead":         true,
+			"unreadCount":    dispatcher.UnreadCount(recipientID),
+		}, nil)
+	})
+
+	mux.HandleFunc("PATCH /api/v1/notifications/{recipientId}/read-all", func(w http.ResponseWriter, r *http.Request) {
+		recipientID := r.PathValue("recipientId")
+		count := dispatcher.MarkAllAsRead(recipientID)
+		response.JSON(w, http.StatusOK, "Đã đánh dấu tất cả thông báo là đã đọc", map[string]any{
+			"updatedCount": count,
+			"unreadCount":  0,
+		}, nil)
 	})
 
 	mux.HandleFunc("POST /api/v1/notifications/dispatch", func(w http.ResponseWriter, r *http.Request) {
@@ -104,9 +132,34 @@ func main() {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
 		fmt.Fprintf(w, "event: connected\ndata: {\"recipientId\":%q,\"timestamp\":%q}\n\n", recipientID, time.Now().UTC().Format(time.RFC3339))
-		if f, ok := w.(http.Flusher); ok {
-			f.Flush()
+		flusher.Flush()
+
+		ch, unsub := dispatcher.Subscribe(recipientID)
+		defer unsub()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case noti, ok := <-ch:
+				if !ok {
+					return
+				}
+				data, err := json.Marshal(noti)
+				if err == nil {
+					fmt.Fprintf(w, "event: notification\ndata: %s\n\n", data)
+					flusher.Flush()
+				}
+			}
 		}
 	})
 
