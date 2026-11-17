@@ -14,7 +14,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/repository"
 )
 
-func registerSettlementRoutes(mux *http.ServeMux, settleRepo *repository.SettlementRepository, ledgerRepo *repository.LedgerRepository) {
+func registerSettlementRoutes(mux *http.ServeMux, settleRepo *repository.SettlementRepository, ledgerRepo *repository.LedgerRepository, caseRepo *repository.CaseRepository) {
 	financeAuth := func(h http.HandlerFunc) http.Handler {
 		return auth.RequireAuth(auth.RequireRole("FINANCE", "FINANCE_MGR", "OPS_MGR", "ADMIN", "ACCESS_ADMIN")(h))
 	}
@@ -168,7 +168,7 @@ func registerSettlementRoutes(mux *http.ServeMux, settleRepo *repository.Settlem
 			}
 		}
 
-		summary, err := settleRepo.MatchBatch(r.Context(), batchID, ledgerRepo, actor)
+		summary, err := settleRepo.MatchBatch(r.Context(), batchID, ledgerRepo, caseRepo, actor)
 		if err != nil {
 			if errors.Is(err, repository.ErrBatchNotFound) {
 				response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Settlement batch not found", nil)

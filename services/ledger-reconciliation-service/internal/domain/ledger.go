@@ -217,3 +217,47 @@ func NewSettlementMatchedEntry(
 	}
 	return entry, nil
 }
+
+// NewCompensatingAdjustmentEntry builds a balanced double entry to offset an investigated discrepancy from account 1388
+// Debit: compensatingAccountCode (default 6410 Payment Gateway Processing Fees)
+// Credit: 1388 (Reconciliation Discrepancies Receivable)
+func NewCompensatingAdjustmentEntry(
+	entryID, caseID, orderID string,
+	discrepancyVND int64,
+	compensatingAccountCode string,
+	category, notes string,
+	actor string,
+) (JournalEntry, error) {
+	if discrepancyVND <= 0 {
+		return JournalEntry{}, fmt.Errorf("discrepancy amount must be positive, got %d", discrepancyVND)
+	}
+	if compensatingAccountCode == "" {
+		compensatingAccountCode = "6410" // Default to payment gateway processing fees
+	}
+	now := time.Now().UTC()
+	entry := JournalEntry{
+		EntryID:     entryID,
+		EventType:   "DISCREPANCY_RESOLVED",
+		ReferenceID: caseID,
+		Description: fmt.Sprintf("Discrepancy resolved for case %s (order %s, %s): %s", caseID, orderID, category, notes),
+		PostedAt:    now,
+		CreatedBy:   actor,
+		CreatedAt:   now,
+		Postings: []Posting{
+			{
+				AccountCode: compensatingAccountCode,
+				Direction:   DirectionDebit,
+				AmountVND:   discrepancyVND,
+			},
+			{
+				AccountCode: "1388",
+				Direction:   DirectionCredit,
+				AmountVND:   discrepancyVND,
+			},
+		},
+	}
+	if err := ValidateJournalEntry(entry); err != nil {
+		return JournalEntry{}, err
+	}
+	return entry, nil
+}

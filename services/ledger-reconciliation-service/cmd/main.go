@@ -21,9 +21,13 @@ import (
 func NewServer(
 	repo *repository.LedgerRepository,
 	settleRepo *repository.SettlementRepository,
+	caseRepo *repository.CaseRepository,
 	s3Client *s3.Client,
 	pgConnected bool,
 ) http.Handler {
+	if caseRepo == nil {
+		caseRepo = repository.NewCaseRepository(nil)
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -62,9 +66,10 @@ func NewServer(
 		response.JSON(w, http.StatusOK, "Đối soát giao dịch hoàn tất (SC11)", result, nil)
 	})
 
-	// Register P10 Ledger & Settlement APIs
+	// Register P10 Ledger, Settlement & Case APIs
 	registerLedgerRoutes(mux, repo)
-	registerSettlementRoutes(mux, settleRepo, repo)
+	registerSettlementRoutes(mux, settleRepo, repo, caseRepo)
+	registerCaseRoutes(mux, caseRepo, repo, settleRepo)
 
 	return middleware.Chain(mux)
 }
@@ -92,7 +97,8 @@ func main() {
 
 	repo := repository.NewLedgerRepository(pgPool)
 	settleRepo := repository.NewSettlementRepository(pgPool)
-	server := NewServer(repo, settleRepo, s3Client, pgPool != nil)
+	caseRepo := repository.NewCaseRepository(pgPool)
+	server := NewServer(repo, settleRepo, caseRepo, s3Client, pgPool != nil)
 
 	log.Printf("[ledger-reconciliation-service] listening on :%s (schema: ledger, S3 bucket: %s)", port, s3Client.Bucket)
 	log.Fatal(http.ListenAndServe(":"+port, server))
