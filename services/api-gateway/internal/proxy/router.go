@@ -94,7 +94,7 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (rt *Router) resolveTarget(path string) string {
 	switch {
-	case strings.HasPrefix(path, "/api/v1/admin/categories") || strings.HasPrefix(path, "/api/v1/admin/products") || strings.HasPrefix(path, "/api/v1/admin/skus") || strings.HasPrefix(path, "/api/v1/admin/prices"):
+	case strings.HasPrefix(path, "/api/v1/admin/categories") || strings.HasPrefix(path, "/api/v1/admin/products") || strings.HasPrefix(path, "/api/v1/admin/skus") || strings.HasPrefix(path, "/api/v1/admin/prices") || strings.HasPrefix(path, "/api/v1/admin/search"):
 		return rt.targets.Catalog
 	case strings.HasPrefix(path, "/api/v1/admin/inventory") || strings.HasPrefix(path, "/api/v1/admin/procurement"):
 		return rt.targets.Inventory

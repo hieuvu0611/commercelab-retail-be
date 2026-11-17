@@ -14,6 +14,7 @@ import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
 import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
 import { ManagementMetricsService } from './modules/metrics/management-metrics.service';
+import { ClickhouseAnalyticsService } from './modules/analytics/clickhouse-analytics.service';
 import { CreateReturnRequestDto } from './modules/returns-rma/create-return.dto';
 import { ApiResult } from './common/http/api-response.interceptor';
 import { DatabaseService } from './database/database.service';
@@ -30,6 +31,7 @@ export class AppController {
     private readonly databaseService: DatabaseService,
     private readonly auditLogs: AuditLogsService,
     private readonly metricsService: ManagementMetricsService,
+    private readonly clickhouseAnalytics: ClickhouseAnalyticsService,
   ) {}
 
   @Get('/health')
@@ -416,6 +418,27 @@ export class AppController {
   async getManagementMetrics(@Query('period') period?: string) {
     const data = await this.metricsService.getMetrics(period || 'TODAY');
     return new ApiResult(data, 'Management metrics retrieved successfully');
+  }
+
+  // ==========================================
+  // CLICKHOUSE OLAP ANALYTICS API (Module 4, SC12)
+  // ==========================================
+
+  @Get('/api/v1/backoffice/analytics/olap')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'MARKETING', 'ADMIN')
+  async getOlapAnalytics(@Query('period') period?: string) {
+    const data = await this.clickhouseAnalytics.getOlapDashboard(period || '30D');
+    return new ApiResult(data, 'ClickHouse OLAP analytics retrieved successfully');
+  }
+
+  @Post('/api/v1/backoffice/analytics/sync')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async syncOlapAnalytics(@Req() req: any) {
+    const authHeader = req.headers?.authorization;
+    const data = await this.clickhouseAnalytics.syncFromSources(authHeader);
+    return new ApiResult(data, 'ClickHouse OLAP snapshot synchronized successfully');
   }
 
   @Post('/api/v1/backoffice/approvals/validate')
