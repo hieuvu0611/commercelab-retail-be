@@ -9,6 +9,7 @@ import { ExceptionCasesService } from './modules/exception-cases/exception-cases
 import { DatabaseModule } from './database/database.module';
 import { PaymentClient } from './modules/returns-rma/payment.client';
 import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
+import { ManagementMetricsService } from './modules/metrics/management-metrics.service';
 
 @Module({
   imports: [DatabaseModule],
@@ -22,6 +23,7 @@ import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
     ExceptionCasesService,
     PaymentClient,
     AuditLogsService,
+    ManagementMetricsService,
   ],
 })
 export class AppModule {}

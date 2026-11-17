@@ -13,6 +13,7 @@ import { ApprovalCandidate, ApprovalType, MakerCheckerPolicyService } from './co
 import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
 import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
+import { ManagementMetricsService } from './modules/metrics/management-metrics.service';
 import { CreateReturnRequestDto } from './modules/returns-rma/create-return.dto';
 import { ApiResult } from './common/http/api-response.interceptor';
 import { DatabaseService } from './database/database.service';
@@ -28,6 +29,7 @@ export class AppController {
     private readonly exceptionCases: ExceptionCasesService,
     private readonly databaseService: DatabaseService,
     private readonly auditLogs: AuditLogsService,
+    private readonly metricsService: ManagementMetricsService,
   ) {}
 
   @Get('/health')
@@ -402,6 +404,18 @@ export class AppController {
       pageCount: 1,
       limit: items.length || 50,
     });
+  }
+
+  // ==========================================
+  // MANAGEMENT METRICS API (P11-T05, SC12)
+  // ==========================================
+
+  @Get('/api/v1/backoffice/metrics')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async getManagementMetrics(@Query('period') period?: string) {
+    const data = await this.metricsService.getMetrics(period || 'TODAY');
+    return new ApiResult(data, 'Management metrics retrieved successfully');
   }
 
   @Post('/api/v1/backoffice/approvals/validate')
