@@ -128,11 +128,19 @@ type StorefrontItem struct {
 
 // StorefrontPage is one page of results with real totals.
 type StorefrontPage struct {
-	Items     []StorefrontItem
-	Total     int64
-	Page      int
-	PageCount int
-	Limit     int
+	Items        []StorefrontItem
+	Total        int64
+	Page         int
+	PageCount    int
+	Limit        int
+	SearchEngine string
+	Facets       any
+}
+
+// SearchEngine optionally resolves published product candidates and faceted counts (e.g., OpenSearch).
+// Per SC12, authoritative prices and stock are still read directly from transactional stores after search.
+type SearchEngine interface {
+	SearchProducts(ctx context.Context, q StorefrontQuery, categoryIDs []string) (refs []PublishedRef, facets any, ok bool)
 }
 
 // StorefrontSKU is a SKU of the product detail. UnitPriceVND is nil when the SKU cannot be ordered now.
@@ -166,11 +174,18 @@ type StorefrontService struct {
 	categories CategoryLister
 	prices     PriceLookup
 	stock      AvailabilityLookup
+	search     SearchEngine
 }
 
 // WithAvailability connects the inventory lookup; without it every availability is unknown.
 func (s *StorefrontService) WithAvailability(stock AvailabilityLookup) *StorefrontService {
 	s.stock = stock
+	return s
+}
+
+// WithSearchEngine connects an optional OpenSearch read-model for full-text search & facets.
+func (s *StorefrontService) WithSearchEngine(engine SearchEngine) *StorefrontService {
+	s.search = engine
 	return s
 }
 
@@ -293,9 +308,21 @@ func (s *StorefrontService) List(ctx context.Context, q StorefrontQuery) (Storef
 	if err != nil {
 		return StorefrontPage{}, err
 	}
-	refs, err := s.store.FindPublished(ctx, q.Q, categoryIDs)
-	if err != nil {
-		return StorefrontPage{}, err
+	var refs []PublishedRef
+	var facets any
+	searchEngine := "mongodb"
+	if s.search != nil {
+		if osRefs, osFacets, ok := s.search.SearchProducts(ctx, q, categoryIDs); ok {
+			refs = osRefs
+			facets = osFacets
+			searchEngine = "opensearch"
+		}
+	}
+	if refs == nil {
+		refs, err = s.store.FindPublished(ctx, q.Q, categoryIDs)
+		if err != nil {
+			return StorefrontPage{}, err
+		}
 	}
 	if len(refs) > maxStorefrontCandidates {
 		refs = refs[:maxStorefrontCandidates]
@@ -356,7 +383,7 @@ func (s *StorefrontService) List(ctx context.Context, q StorefrontQuery) (Storef
 	})
 
 	total := len(ordered)
-	page := StorefrontPage{Items: []StorefrontItem{}, Total: int64(total), Page: q.Page, Limit: q.Limit, PageCount: (total + q.Limit - 1) / q.Limit}
+	page := StorefrontPage{Items: []StorefrontItem{}, Total: int64(total), Page: q.Page, Limit: q.Limit, PageCount: (total + q.Limit - 1) / q.Limit, SearchEngine: searchEngine, Facets: facets}
 	start := min((q.Page-1)*q.Limit, total)
 	window := ordered[start:min(start+q.Limit, total)]
 	if len(window) == 0 {

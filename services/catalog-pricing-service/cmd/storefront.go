@@ -89,6 +89,7 @@ func (a *storefrontAPI) list(w http.ResponseWriter, r *http.Request) {
 	}
 	response.JSON(w, http.StatusOK, "Products", page.Items, &response.Metadata{
 		Total: page.Total, Page: page.Page, PageCount: page.PageCount, Limit: page.Limit,
+		SearchEngine: page.SearchEngine, Facets: page.Facets,
 	})
 }
 

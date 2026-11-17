@@ -10,6 +10,7 @@ import { DatabaseModule } from './database/database.module';
 import { PaymentClient } from './modules/returns-rma/payment.client';
 import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
 import { ManagementMetricsService } from './modules/metrics/management-metrics.service';
+import { ClickhouseAnalyticsService } from './modules/analytics/clickhouse-analytics.service';
 
 @Module({
   imports: [DatabaseModule],
@@ -24,6 +25,7 @@ import { ManagementMetricsService } from './modules/metrics/management-metrics.s
     PaymentClient,
     AuditLogsService,
     ManagementMetricsService,
+    ClickhouseAnalyticsService,
   ],
 })
 export class AppModule {}
