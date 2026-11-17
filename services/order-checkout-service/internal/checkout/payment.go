@@ -27,6 +27,9 @@ const (
 	payFailed       = "FAILED"
 	payExpired30m   = "EXPIRED_30M"
 	payCapturedLate = "CAPTURED_LATE"
+	payCODPending   = "COD_PENDING"
+	payCODCollected = "COLLECTED"
+	payCODCancelled = "COD_CANCELLED"
 )
 
 // PaymentReport is what the payment service says about an order's attempt. The expected amount is never part of
@@ -89,7 +92,7 @@ func paymentEvents(o orders.Order, r PaymentReport) ([]saga.Event, error) {
 	// included) says nothing new, and the refund is never created twice.
 	lateMoney := o.Status == string(saga.StateCancelled) && o.CapturedVND == 0
 	switch r.Status {
-	case payProcessing:
+	case payProcessing, payCODPending, payCODCollected, payCODCancelled:
 		return nil, nil
 	case payCaptured, payCapturedLate:
 		if cancelled && !lateMoney {
@@ -101,7 +104,7 @@ func paymentEvents(o orders.Order, r PaymentReport) ([]saga.Event, error) {
 		}
 	}
 	switch r.Status {
-	case payProcessing:
+	case payProcessing, payCODPending, payCODCollected, payCODCancelled:
 		return nil, nil
 	case payCaptured:
 		return []saga.Event{saga.PaymentCaptured{CapturedVND: r.CapturedVND, ExpectedVND: o.TotalPayableVND}}, nil
@@ -250,6 +253,28 @@ func (s *Service) closeLost(ctx context.Context, o orders.Order, from saga.State
 
 // recordCapture stores the captured and refundable amounts the report carries.
 func (s *Service) recordCapture(ctx context.Context, o orders.Order, r PaymentReport) (orders.Order, error) {
+	if r.Status == payCODCollected {
+		captured := r.CapturedVND
+		if captured <= 0 {
+			captured = o.TotalPayableVND
+		}
+		if err := s.Orders.RecordRefund(ctx, o.OrderID, 0, 0, payCODCollected); err != nil {
+			return o, err
+		}
+		if err := s.Orders.RecordCapture(ctx, o.OrderID, captured, 0); err != nil {
+			return o, err
+		}
+		o.PaymentStatus = payCODCollected
+		o.CapturedVND = captured
+		return o, nil
+	}
+	if r.Status == payCODCancelled {
+		if err := s.Orders.RecordRefund(ctx, o.OrderID, 0, 0, payCODCancelled); err != nil {
+			return o, err
+		}
+		o.PaymentStatus = payCODCancelled
+		return o, nil
+	}
 	if r.Status != payCaptured && r.Status != payCapturedLate {
 		return o, nil
 	}

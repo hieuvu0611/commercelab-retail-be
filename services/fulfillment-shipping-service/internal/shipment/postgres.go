@@ -19,7 +19,7 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, stop_requested_at, created_at, updated_at`
+const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, payment_method, cod_amount_to_collect, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, stop_requested_at, created_at, updated_at`
 
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -29,7 +29,7 @@ type querier interface {
 func load(ctx context.Context, q querier, where string, arg string) (Shipment, error) {
 	var s Shipment
 	err := q.QueryRow(ctx, `SELECT `+shipmentColumns+` FROM fulfillment.shipments WHERE `+where+` = $1`, arg).
-		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.StopRequestedAt, &s.CreatedAt, &s.UpdatedAt)
+		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.PaymentMethod, &s.CodAmountToCollect, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.StopRequestedAt, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Shipment{}, ErrNotFound
 	}
@@ -66,9 +66,13 @@ func (p *PostgresStore) Create(ctx context.Context, s Shipment, eventID string, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	// The unique order id makes concurrent deliveries queue on the first insert; the losers see 0 rows.
-	tag, err := tx.Exec(ctx, `INSERT INTO fulfillment.shipments (shipment_id, order_id, user_id, warehouse_id, status, version, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $7) ON CONFLICT DO NOTHING`,
-		s.ShipmentID, s.OrderID, s.UserID, s.WarehouseID, s.Status, s.Version, s.CreatedAt)
+	method := s.PaymentMethod
+	if method == "" {
+		method = "PREPAID"
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO fulfillment.shipments (shipment_id, order_id, user_id, warehouse_id, payment_method, cod_amount_to_collect, status, version, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) ON CONFLICT DO NOTHING`,
+		s.ShipmentID, s.OrderID, s.UserID, s.WarehouseID, method, s.CodAmountToCollect, s.Status, s.Version, s.CreatedAt)
 	if err != nil {
 		return Shipment{}, false, dependency.Wrap(err)
 	}

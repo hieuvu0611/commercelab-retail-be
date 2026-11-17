@@ -19,12 +19,12 @@ type PostgresStore struct {
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), status, payment_status,
+const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), status, payment_method, payment_status,
 	failure_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, refund_pending_vnd, refunded_amount_vnd, version, expires_at, created_at, updated_at`
 
 func scanOrder(row pgx.Row) (Order, error) {
 	var o Order
-	err := row.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentStatus,
+	err := row.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentMethod, &o.PaymentStatus,
 		&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND, &o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
 	return o, err
 }
@@ -98,17 +98,20 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, e
 		return existing, true, nil
 	}
 
-	status, payment := o.Status, o.PaymentStatus
+	status, payment, method := o.Status, o.PaymentStatus, o.PaymentMethod
 	if status == "" {
 		status = StatusPending
 	}
 	if payment == "" {
 		payment = PaymentUnpaid
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO orders.orders (order_id, user_id, quote_id, address_id, warehouse_id, voucher_code, status, payment_status,
+	if method == "" {
+		method = "PREPAID"
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO orders.orders (order_id, user_id, quote_id, address_id, warehouse_id, voucher_code, status, payment_method, payment_status,
 			subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, expires_at)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, $13)`,
-		o.OrderID, o.UserID, o.QuoteID, o.AddressID, o.WarehouseID, o.VoucherCode, status, payment,
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, $13, $14)`,
+		o.OrderID, o.UserID, o.QuoteID, o.AddressID, o.WarehouseID, o.VoucherCode, status, method, payment,
 		o.SubtotalVND, o.DiscountVND, o.ShippingFeeVND, o.TotalPayableVND, o.ExpiresAt); err != nil {
 		return Order{}, false, dependency.Wrap(err)
 	}
@@ -205,6 +208,17 @@ func (s *PostgresStore) RecordCapture(ctx context.Context, orderID string, captu
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *PostgresStore) CountActiveCODOrders(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders
+		WHERE user_id = $1 AND payment_method = 'COD' AND payment_status = 'COD_PENDING'
+		AND status NOT IN ('DELIVERED', 'CANCELLED', 'FAILED_CLOSED')`, userID).Scan(&count)
+	if err != nil {
+		return 0, dependency.Wrap(err)
+	}
+	return count, nil
 }
 
 func (s *PostgresStore) RecordRefund(ctx context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error {

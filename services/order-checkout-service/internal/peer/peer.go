@@ -131,7 +131,21 @@ func (p *Payments) CreateAttempt(ctx context.Context, orderID, userID string, am
 	}
 	_, err := p.client.Do(ctx, http.MethodPost, p.base+"/api/v1/payments/attempts",
 		svcclient.Options{Internal: true, IdempotencyKey: "pay-" + orderID},
-		map[string]any{"orderId": orderID, "userId": userID, "amountVnd": amountVND}, &out)
+		map[string]any{"orderId": orderID, "userId": userID, "amountVnd": amountVND, "paymentMethod": "PREPAID"}, &out)
+	if err != nil {
+		return checkout.Attempt{}, err
+	}
+	return checkout.Attempt{AttemptID: out.AttemptID, Status: out.Status}, nil
+}
+
+func (p *Payments) CreateCODAttempt(ctx context.Context, orderID, userID string, amountVND int64) (checkout.Attempt, error) {
+	var out struct {
+		AttemptID string `json:"attemptId"`
+		Status    string `json:"status"`
+	}
+	_, err := p.client.Do(ctx, http.MethodPost, p.base+"/api/v1/payments/attempts",
+		svcclient.Options{Internal: true, IdempotencyKey: "pay-" + orderID},
+		map[string]any{"orderId": orderID, "userId": userID, "amountVnd": amountVND, "paymentMethod": "COD"}, &out)
 	if err != nil {
 		return checkout.Attempt{}, err
 	}

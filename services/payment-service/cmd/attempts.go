@@ -58,6 +58,8 @@ func registerAttemptRoutes(mux *http.ServeMux, store attempt.Store, opts Options
 	mux.Handle("POST /api/v1/payments/simulator/{attemptId}/outcome", auth.RequireAuth(http.HandlerFunc(api.simulate)))
 	mux.Handle("GET /api/v1/payments/orders/{orderId}/attempt", internalauth.Require(http.HandlerFunc(api.byOrder)))
 	mux.Handle("POST /api/v1/payments/attempts/{attemptId}/close", internalauth.Require(http.HandlerFunc(api.close)))
+	mux.Handle("POST /api/v1/payments/orders/{orderId}/cod-collect", internalauth.Require(http.HandlerFunc(api.codCollect)))
+	mux.Handle("POST /api/v1/payments/orders/{orderId}/cod-cancel", internalauth.Require(http.HandlerFunc(api.codCancel)))
 	mux.HandleFunc("POST /api/v1/payments/webhooks/simulator", api.webhook)
 }
 
@@ -73,14 +75,19 @@ func (a *attemptAPI) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		OrderID   string `json:"orderId"`
-		UserID    string `json:"userId"`
-		AmountVND int64  `json:"amountVnd"`
+		OrderID       string `json:"orderId"`
+		UserID        string `json:"userId"`
+		AmountVND     int64  `json:"amountVnd"`
+		PaymentMethod string `json:"paymentMethod"`
 	}
 	if !request.DecodeJSON(w, r, &body) {
 		return
 	}
 	body.OrderID, body.UserID = strings.TrimSpace(body.OrderID), strings.TrimSpace(body.UserID)
+	method := strings.ToUpper(strings.TrimSpace(body.PaymentMethod))
+	if method == "" {
+		method = "PREPAID"
+	}
 	problems := map[string][]string{}
 	if body.OrderID == "" || len(body.OrderID) > maxIDLength {
 		problems["orderId"] = []string{"orderId is required"}
@@ -97,6 +104,7 @@ func (a *attemptAPI) create(w http.ResponseWriter, r *http.Request) {
 	}
 	stored, replayed, err := a.store.Create(r.Context(), attempt.Attempt{
 		AttemptID: ids.PaymentAttemptID(body.OrderID), OrderID: body.OrderID, UserID: body.UserID, IdempotencyKey: key, AmountVND: body.AmountVND,
+		PaymentMethod: method,
 	})
 	switch {
 	case errors.Is(err, attempt.ErrIdempotencyConflict):
@@ -292,6 +300,67 @@ func (a *attemptAPI) close(w http.ResponseWriter, r *http.Request) {
 	default:
 		response.JSON(w, http.StatusOK, "Payment attempt closed", closed, nil)
 	}
+}
+
+func (a *attemptAPI) codCollect(w http.ResponseWriter, r *http.Request) {
+	orderID := r.PathValue("orderId")
+	cur, err := a.store.GetByOrder(r.Context(), orderID)
+	if errors.Is(err, attempt.ErrNotFound) {
+		response.Error(w, r, http.StatusNotFound, "PAYMENT_NOT_FOUND", "No payment attempt for this order", nil)
+		return
+	}
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	var body struct {
+		AmountVND int64  `json:"amountVnd"`
+		EventID   string `json:"eventId"`
+	}
+	_ = request.DecodeJSON(w, r, &body)
+	amount := body.AmountVND
+	if amount <= 0 {
+		amount = cur.AmountVND
+	}
+	updated, change, err := a.store.Apply(r.Context(), cur.AttemptID, attempt.OutcomeCODCollected, amount, body.EventID)
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	if !change.Replay && a.opts.Orders != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+			defer cancel()
+			_ = a.opts.Orders.PaymentOutcome(ctx, updated)
+		}()
+	}
+	response.JSON(w, http.StatusOK, "COD payment marked as collected", updated, nil)
+}
+
+func (a *attemptAPI) codCancel(w http.ResponseWriter, r *http.Request) {
+	orderID := r.PathValue("orderId")
+	cur, err := a.store.GetByOrder(r.Context(), orderID)
+	if errors.Is(err, attempt.ErrNotFound) {
+		response.Error(w, r, http.StatusNotFound, "PAYMENT_NOT_FOUND", "No payment attempt for this order", nil)
+		return
+	}
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	updated, change, err := a.store.Apply(r.Context(), cur.AttemptID, attempt.OutcomeCODCancelled, 0, "")
+	if err != nil {
+		writeStoreError(w, r, err)
+		return
+	}
+	if !change.Replay && a.opts.Orders != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+			defer cancel()
+			_ = a.opts.Orders.PaymentOutcome(ctx, updated)
+		}()
+	}
+	response.JSON(w, http.StatusOK, "COD payment marked as cancelled", updated, nil)
 }
 
 // validSignature checks hex(HMAC-SHA256(secret, body)) in constant time. An empty secret never validates.

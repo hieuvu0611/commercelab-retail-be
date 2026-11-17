@@ -46,6 +46,7 @@ type Order struct {
 	WarehouseID      string     `json:"warehouseId,omitempty"`
 	VoucherCode      string     `json:"voucherCode,omitempty"`
 	Status           string     `json:"status"`
+	PaymentMethod    string     `json:"paymentMethod,omitempty"`
 	PaymentStatus    string     `json:"paymentStatus"`
 	FailureCode      string     `json:"failureCode,omitempty"`
 	SubtotalVND      int64      `json:"subtotalVnd"`
@@ -108,6 +109,8 @@ type Store interface {
 	// RecordCapture stores how much money the payment captured and how much of it is owed back (absolute values,
 	// so repeating it changes nothing); ErrNotFound when the order does not exist.
 	RecordCapture(ctx context.Context, orderID string, capturedVND, refundPendingVND int64) error
+	// CountActiveCODOrders counts active delivering/pending COD orders for a user (velocity control).
+	CountActiveCODOrders(ctx context.Context, userID string) (int, error)
 	// RecordRefund stores how much was paid back and how much is still owed, with the resulting payment status
 	// (absolute values, so repeating it changes nothing); ErrNotFound when the order does not exist.
 	RecordRefund(ctx context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error

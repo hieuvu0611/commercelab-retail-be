@@ -32,6 +32,8 @@ type shipmentView struct {
 	ShipmentID         string     `json:"shipmentId"`
 	OrderID            string     `json:"orderId"`
 	WarehouseID        string     `json:"warehouseId"`
+	PaymentMethod      string     `json:"paymentMethod,omitempty"`
+	CodAmountToCollect int64      `json:"codAmountToCollect,omitempty"`
 	Status             string     `json:"status"`
 	Version            int64      `json:"version"`
 	Items              []itemView `json:"items"`
@@ -45,7 +47,8 @@ type shipmentView struct {
 }
 
 func viewOf(s shipment.Shipment) shipmentView {
-	v := shipmentView{ShipmentID: s.ShipmentID, OrderID: s.OrderID, WarehouseID: s.WarehouseID, Status: string(s.Status),
+	v := shipmentView{ShipmentID: s.ShipmentID, OrderID: s.OrderID, WarehouseID: s.WarehouseID,
+		PaymentMethod: s.PaymentMethod, CodAmountToCollect: s.CodAmountToCollect, Status: string(s.Status),
 		Version: s.Version, HandedOverAt: s.HandedOverAt, StopRequestedAt: s.StopRequestedAt, DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt, FailureReason: s.FailureReason, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
 	for i, it := range s.Items {
 		v.Items[i] = itemView{SkuID: it.SkuID, Quantity: it.Quantity, PickedQuantity: it.PickedQuantity, DeliveredQuantity: it.DeliveredQuantity}

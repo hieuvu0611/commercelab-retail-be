@@ -21,11 +21,11 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool, now: func() time.Time { return time.Now().UTC() }}
 }
 
-const attemptColumns = `attempt_id, order_id, user_id, idempotency_key, amount_vnd, captured_amount_vnd, status, unknown_deadline, outcome_at, created_at`
+const attemptColumns = `attempt_id, order_id, user_id, idempotency_key, payment_method, amount_vnd, captured_amount_vnd, status, unknown_deadline, outcome_at, created_at`
 
 func scanAttempt(row pgx.Row) (Attempt, error) {
 	var a Attempt
-	err := row.Scan(&a.AttemptID, &a.OrderID, &a.UserID, &a.IdempotencyKey, &a.AmountVND, &a.CapturedAmountVND, &a.Status, &a.UnknownDeadline, &a.OutcomeAt, &a.CreatedAt)
+	err := row.Scan(&a.AttemptID, &a.OrderID, &a.UserID, &a.IdempotencyKey, &a.PaymentMethod, &a.AmountVND, &a.CapturedAmountVND, &a.Status, &a.UnknownDeadline, &a.OutcomeAt, &a.CreatedAt)
 	return a, err
 }
 
@@ -38,9 +38,21 @@ func (s *PostgresStore) Create(ctx context.Context, a Attempt) (Attempt, bool, e
 
 	// ON CONFLICT DO NOTHING covers every unique rule at once (key, attempt id, one attempt per order); a
 	// concurrent duplicate waits for the first insert and then falls through to the checks below.
-	tag, err := tx.Exec(ctx, `INSERT INTO payments.payment_attempts (attempt_id, order_id, user_id, idempotency_key, amount_vnd, status, created_at)
-		VALUES ($1, $2, $3, $4, $5, 'PROCESSING', $6) ON CONFLICT DO NOTHING`,
-		a.AttemptID, a.OrderID, a.UserID, a.IdempotencyKey, a.AmountVND, s.now())
+	status := a.Status
+	if status == "" {
+		if a.PaymentMethod == "COD" {
+			status = StatusCODPending
+		} else {
+			status = StatusProcessing
+		}
+	}
+	method := a.PaymentMethod
+	if method == "" {
+		method = "PREPAID"
+	}
+	tag, err := tx.Exec(ctx, `INSERT INTO payments.payment_attempts (attempt_id, order_id, user_id, idempotency_key, payment_method, amount_vnd, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`,
+		a.AttemptID, a.OrderID, a.UserID, a.IdempotencyKey, method, a.AmountVND, status, s.now())
 	if err != nil {
 		return Attempt{}, false, dependency.Wrap(err)
 	}

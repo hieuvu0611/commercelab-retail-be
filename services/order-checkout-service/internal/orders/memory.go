@@ -61,6 +61,9 @@ func (s *MemoryStore) Create(_ context.Context, key, hash string, o Order, ev ..
 	if o.PaymentStatus == "" {
 		o.PaymentStatus = PaymentUnpaid
 	}
+	if o.PaymentMethod == "" {
+		o.PaymentMethod = "PREPAID"
+	}
 	s.keys[k] = memEntry{hash: hash, orderID: o.OrderID}
 	s.orders[o.OrderID] = clone(o)
 	s.outbox = append(s.outbox, ev...)
@@ -166,6 +169,19 @@ func (s *MemoryStore) RecordCapture(_ context.Context, orderID string, capturedV
 	o.CapturedVND, o.RefundPendingVND, o.UpdatedAt = capturedVND, refundPendingVND, s.now()
 	s.orders[orderID] = o
 	return nil
+}
+
+func (s *MemoryStore) CountActiveCODOrders(_ context.Context, userID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var count int
+	for _, o := range s.orders {
+		if o.UserID == userID && o.PaymentMethod == "COD" && o.PaymentStatus == "COD_PENDING" &&
+			o.Status != "DELIVERED" && o.Status != "CANCELLED" && o.Status != "FAILED_CLOSED" {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (s *MemoryStore) RecordRefund(_ context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error {

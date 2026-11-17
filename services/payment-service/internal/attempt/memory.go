@@ -51,12 +51,22 @@ func (s *MemoryStore) Create(_ context.Context, a Attempt) (Attempt, bool, error
 		return Attempt{}, false, ErrIdempotencyConflict
 	}
 	if id, ok := s.byOrder[a.OrderID]; ok {
-		if st := s.byID[id].Status; st == StatusProcessing || st == StatusUnknown {
+		if st := s.byID[id].Status; st == StatusProcessing || st == StatusUnknown || st == StatusCODPending {
 			return Attempt{}, false, ErrActivePayment
 		}
 		return Attempt{}, false, ErrAttemptExists
 	}
-	a.Status, a.CreatedAt = StatusProcessing, s.now()
+	if a.PaymentMethod == "" {
+		a.PaymentMethod = "PREPAID"
+	}
+	if a.Status == "" {
+		if a.PaymentMethod == "COD" {
+			a.Status = StatusCODPending
+		} else {
+			a.Status = StatusProcessing
+		}
+	}
+	a.CreatedAt = s.now()
 	s.byID[a.AttemptID], s.byKey[a.IdempotencyKey], s.byOrder[a.OrderID] = a, a.AttemptID, a.AttemptID
 	s.summaries[a.OrderID] = &Summary{OrderID: a.OrderID, ExpectedVND: a.AmountVND}
 	return a, false, nil

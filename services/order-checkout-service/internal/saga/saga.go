@@ -45,6 +45,9 @@ const (
 	// PayRefunded and PayPartiallyRefunded: the owed money was paid back, completely or in part.
 	PayRefunded          = "REFUNDED"
 	PayPartiallyRefunded = "PARTIALLY_REFUNDED"
+	PayCODPending        = "COD_PENDING"
+	PayCODCollected      = "COLLECTED"
+	PayCODCancelled      = "COD_CANCELLED"
 )
 
 // Effect is a side effect the caller performs after storing the new state.

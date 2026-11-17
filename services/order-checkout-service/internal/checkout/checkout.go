@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/ids"
@@ -32,6 +33,18 @@ const (
 	FailureUnknownExpired        = "PAYMENT_UNKNOWN_EXPIRED"
 	FailureStockLost             = "STOCK_RESERVATION_LOST"
 	FailurePlacementInterrupted  = "PLACEMENT_INTERRUPTED"
+	FailureCODCeilingExceeded    = "COD_CEILING_EXCEEDED"
+	FailureCODVelocityLimit      = "COD_VELOCITY_LIMIT_EXCEEDED"
+
+	PaymentMethodPrepaid = "PREPAID"
+	PaymentMethodCOD     = "COD"
+
+	CODMaxTotalVND     = 2_000_000 // 2,000,000 VND order ceiling
+	CODMaxActiveOrders = 2         // At most 2 active delivering COD orders
+
+	PayCODPending   = saga.PayCODPending
+	PayCODCollected = saga.PayCODCollected
+	PayCODCancelled = saga.PayCODCancelled
 )
 
 // PayRefundPending is the payment status of an order that is closed while the customer's money is held: it is
@@ -57,6 +70,10 @@ var (
 	ErrReservationLost = errors.New("stock reservation is not available")
 	// ErrOutOfStock: the warehouse cannot cover the whole order (SC03).
 	ErrOutOfStock = errors.New("insufficient stock")
+	// ErrCODCeilingExceeded: COD exceeds the 2,000,000 VND ceiling limit.
+	ErrCODCeilingExceeded = errors.New("order total exceeds COD ceiling limit of 2,000,000 VND")
+	// ErrCODVelocityLimit: Customer already has >= 2 active COD orders in transit.
+	ErrCODVelocityLimit = errors.New("customer has reached maximum active COD orders limit (2)")
 )
 
 // QuoteLine is one priced line of an accepted quote (whole VND).
@@ -113,6 +130,7 @@ type PaymentState struct {
 // Payments creates the single payment attempt of an order.
 type Payments interface {
 	CreateAttempt(ctx context.Context, orderID, userID string, amountVND int64) (Attempt, error)
+	CreateCODAttempt(ctx context.Context, orderID, userID string, amountVND int64) (Attempt, error)
 	// AttemptState reads where the order's payment stands; found=false when the payment service has no attempt.
 	AttemptState(ctx context.Context, orderID string) (state PaymentState, found bool, err error)
 	// CloseAttempt tells the payment service the order is closed: money that arrives later is refunded, and
@@ -177,12 +195,16 @@ func randomOrderID() string {
 	return "O-" + hex.EncodeToString(b[:])
 }
 
-// Place records and runs the order for (caller, key, quoteID). It returns replayed=true when the key already
+// Place records and runs the order for (caller, key, quoteID, paymentMethod). It returns replayed=true when the key already
 // produced an order (the stored order is returned and nothing runs again, even if the quote has expired since).
 // A step that fails closes the order: the returned order then has Status FAILED_CLOSED and a FailureCode, and
 // the error is nil. Errors are for calls that created no order (bad quote, conflict, store outage).
-func (s *Service) Place(ctx context.Context, p Principal, key, quoteID string) (orders.Order, bool, error) {
-	hash := orders.HashIntent(p.UserID, quoteID)
+func (s *Service) Place(ctx context.Context, p Principal, key, quoteID, paymentMethod string) (orders.Order, bool, error) {
+	method := strings.ToUpper(strings.TrimSpace(paymentMethod))
+	if method == "" {
+		method = PaymentMethodPrepaid
+	}
+	hash := orders.HashIntent(p.UserID, quoteID+"|"+method)
 	if existing, found, err := s.Orders.Lookup(ctx, p.UserID, key, hash); err != nil || found {
 		return existing, found, err
 	}
@@ -193,12 +215,28 @@ func (s *Service) Place(ctx context.Context, p Principal, key, quoteID string) (
 	if err := s.checkQuote(quote, p.UserID); err != nil {
 		return orders.Order{}, false, err
 	}
+	if method == PaymentMethodCOD {
+		if quote.TotalPayableVND > CODMaxTotalVND {
+			return orders.Order{}, false, ErrCODCeilingExceeded
+		}
+		activeCODCount, err := s.Orders.CountActiveCODOrders(ctx, p.UserID)
+		if err != nil {
+			return orders.Order{}, false, err
+		}
+		if activeCODCount >= CODMaxActiveOrders {
+			return orders.Order{}, false, ErrCODVelocityLimit
+		}
+	}
 	address, err := s.Addresses.Get(ctx, p.Bearer, quote.AddressID)
 	if err != nil {
 		return orders.Order{}, false, err
 	}
 	expires := s.now().Add(ReservationTTL)
 	built := s.buildOrder(quote, expires)
+	built.PaymentMethod = method
+	if method == PaymentMethodCOD {
+		built.PaymentStatus = PayCODPending
+	}
 	stored, replayed, err := s.Orders.Create(ctx, key, hash, built, s.orderCreated(built))
 	if err != nil || replayed {
 		return stored, replayed, err
@@ -279,6 +317,26 @@ func (s *Service) run(ctx context.Context, p Principal, o orders.Order) orders.O
 		}
 		return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(err))
 	}
+	if o.PaymentMethod == PaymentMethodCOD {
+		if err := s.Stock.Commit(ctx, o.OrderID); err != nil {
+			s.releaseStock(ctx, o.OrderID)
+			s.releaseVoucher(ctx, o)
+			return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, FailureDependencyUnavailable)
+		}
+		if o.VoucherCode != "" {
+			_ = s.Vouchers.Consume(ctx, o.VoucherCode, o.OrderID)
+		}
+		confirmed, err := s.Orders.Transition(ctx, o.OrderID, string(saga.StatePending), string(saga.StateConfirmed), PayCODPending, "", s.orderConfirmed(o, 0))
+		if err != nil {
+			return s.undoAfterStoreFailure(ctx, o)
+		}
+		if _, err := s.Payments.CreateCODAttempt(ctx, confirmed.OrderID, p.UserID, confirmed.TotalPayableVND); err != nil {
+			log.Printf("[order] COD payment attempt creation error for order %s: %v", confirmed.OrderID, err)
+		}
+		s.clearCart(ctx, confirmed)
+		return confirmed
+	}
+
 	reserved, err := s.transition(ctx, o, saga.StatePending, saga.Reserved{}, "")
 	if err != nil {
 		return s.undoAfterStoreFailure(ctx, o)

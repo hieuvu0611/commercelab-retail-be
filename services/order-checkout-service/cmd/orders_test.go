@@ -80,6 +80,14 @@ func (f *fakePayments) CreateAttempt(_ context.Context, orderID, _ string, _ int
 	return checkout.Attempt{AttemptID: "PAY-" + orderID, Status: "PROCESSING"}, nil
 }
 
+func (f *fakePayments) CreateCODAttempt(_ context.Context, orderID, _ string, _ int64) (checkout.Attempt, error) {
+	f.calls.Add(1)
+	if f.err != nil {
+		return checkout.Attempt{}, f.err
+	}
+	return checkout.Attempt{AttemptID: "PAY-" + orderID, Status: "COD_PENDING"}, nil
+}
+
 func (f *fakePayments) AttemptState(context.Context, string) (checkout.PaymentState, bool, error) {
 	return checkout.PaymentState{}, false, nil
 }
@@ -343,4 +351,36 @@ func TestErrorResponsesDoNotLeakInternals(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "10.0.0.7") || strings.Contains(rec.Body.String(), "refused") {
 		t.Fatalf("response leaks an internal address: %s", rec.Body.String())
 	}
+}
+
+func TestPlaceOrderCOD_API(t *testing.T) {
+	t.Run("COD order placement via API succeeds with 201", func(t *testing.T) {
+		f := newOrderFixture(t)
+		token := bearer(t, "user-lan", "CUSTOMER")
+		rec := f.place(t, token, "key-cod-api-1", `{"quoteId":"Q-1","paymentMethod":"COD"}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected 201 Created, got %d %s", rec.Code, rec.Body.String())
+		}
+		res := decodeJSON[placed](t, rec)
+		if res.Data.Status != "CONFIRMED" || res.Data.PaymentStatus != "COD_PENDING" {
+			t.Fatalf("expected CONFIRMED and COD_PENDING, got %+v", res.Data)
+		}
+	})
+
+	t.Run("COD order ceiling exceeded returns 422", func(t *testing.T) {
+		f := newOrderFixture(t)
+		f.quotes.quote.SubtotalVND = 2_140_000
+		f.quotes.quote.DiscountVND = 70_000
+		f.quotes.quote.ShippingFeeVND = 30_000
+		f.quotes.quote.TotalPayableVND = 2_100_000
+		token := bearer(t, "user-lan", "CUSTOMER")
+		rec := f.place(t, token, "key-cod-api-high", `{"quoteId":"Q-1","paymentMethod":"COD"}`)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422 Unprocessable Entity, got %d %s", rec.Code, rec.Body.String())
+		}
+		errObj := decodeJSON[orderError](t, rec)
+		if errObj.Code != "COD_CEILING_EXCEEDED" {
+			t.Fatalf("expected COD_CEILING_EXCEEDED code, got %s", errObj.Code)
+		}
+	})
 }

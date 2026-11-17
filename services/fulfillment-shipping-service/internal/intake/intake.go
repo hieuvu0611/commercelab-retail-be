@@ -25,10 +25,13 @@ type Intake struct {
 }
 
 type confirmedPayload struct {
-	OrderID     string          `json:"orderId"`
-	UserID      string          `json:"userId"`
-	WarehouseID string          `json:"warehouseId"`
-	Items       []shipment.Item `json:"items"`
+	OrderID            string          `json:"orderId"`
+	UserID             string          `json:"userId"`
+	WarehouseID        string          `json:"warehouseId"`
+	PaymentMethod      string          `json:"paymentMethod"`
+	CodAmountToCollect int64           `json:"codAmountToCollect"`
+	TotalPayableVND    int64           `json:"totalPayableVnd"`
+	Items              []shipment.Item `json:"items"`
 }
 
 // Handle implements eventconsumer.Handler. Events other than order.confirmed are ignored. A confirmed event
@@ -47,7 +50,11 @@ func (i *Intake) Handle(ctx context.Context, e events.DomainEvent) error {
 		log.Printf("[fulfillment] skipping %s of order %s: unreadable payload", e.EventType, e.AggregateID)
 		return nil
 	}
-	s, err := shipment.New(p.OrderID, p.UserID, p.WarehouseID, p.Items, i.Now())
+	codAmount := p.CodAmountToCollect
+	if p.PaymentMethod == "COD" && codAmount <= 0 {
+		codAmount = p.TotalPayableVND
+	}
+	s, err := shipment.NewWithCOD(p.OrderID, p.UserID, p.WarehouseID, p.PaymentMethod, codAmount, p.Items, i.Now())
 	if err != nil {
 		log.Printf("[fulfillment] skipping %s of order %s: %v (warehouse %q, %d lines)", e.EventType, p.OrderID, err, p.WarehouseID, len(p.Items))
 		return nil
@@ -57,7 +64,10 @@ func (i *Intake) Handle(ctx context.Context, e events.DomainEvent) error {
 		items[n] = map[string]any{"skuId": it.SkuID, "quantity": it.Quantity}
 	}
 	created := outbox.NewEvent(events.EventShipmentCreated, AggregateShipment, s.ShipmentID, i.Now(),
-		map[string]any{"shipmentId": s.ShipmentID, "orderId": s.OrderID, "warehouseId": s.WarehouseID, "items": items})
+		map[string]any{
+			"shipmentId": s.ShipmentID, "orderId": s.OrderID, "warehouseId": s.WarehouseID, "items": items,
+			"paymentMethod": s.PaymentMethod, "codAmountToCollect": s.CodAmountToCollect,
+		})
 	_, isNew, err := i.Store.Create(ctx, s, e.EventID, created)
 	if err == nil && isNew && i.Timeline != nil {
 		if tlErr := i.Timeline.Append(ctx, s.ShipmentID, s.OrderID, timeline.Entry{At: i.Now(), Type: timeline.TypeCreated}); tlErr != nil {

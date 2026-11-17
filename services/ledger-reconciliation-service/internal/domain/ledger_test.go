@@ -105,3 +105,46 @@ func TestNewSettlementMatchedEntry_SC11(t *testing.T) {
 		}
 	})
 }
+
+func TestNewCODDeliveryAndSettlementEntries(t *testing.T) {
+	t.Run("COD delivery confirmation entry is balanced", func(t *testing.T) {
+		entry, err := NewCODDeliveryConfirmedEntry("JE-COD-DELIV", "O-100", "GHN", 1_500_000, "staff")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := ValidateJournalEntry(entry); err != nil {
+			t.Fatalf("expected valid entry, got: %v", err)
+		}
+		if len(entry.Postings) != 2 {
+			t.Fatalf("expected 2 postings, got %d", len(entry.Postings))
+		}
+		if entry.Postings[0].AccountCode != "1310" || entry.Postings[0].Direction != DirectionDebit {
+			t.Errorf("expected debit 1310, got %+v", entry.Postings[0])
+		}
+		if entry.Postings[1].AccountCode != "5110" || entry.Postings[1].Direction != DirectionCredit {
+			t.Errorf("expected credit 5110, got %+v", entry.Postings[1])
+		}
+	})
+
+	t.Run("COD settlement matched entry is balanced", func(t *testing.T) {
+		// Gross 1.500.000, fee 15.000, net 1.485.000
+		entry, err := NewCODSettlementMatchedEntry("JE-COD-SETTLE", "O-100", "BATCH-COD-1", "GHN", 1_500_000, 15_000, 1_485_000, 0, "finance-mgr")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := ValidateJournalEntry(entry); err != nil {
+			t.Fatalf("expected valid entry, got: %v", err)
+		}
+		var debits, credits int64
+		for _, p := range entry.Postings {
+			if p.Direction == DirectionDebit {
+				debits += p.AmountVND
+			} else {
+				credits += p.AmountVND
+			}
+		}
+		if debits != 1_500_000 || credits != 1_500_000 {
+			t.Fatalf("expected balanced debits (%d) and credits (%d)", debits, credits)
+		}
+	})
+}

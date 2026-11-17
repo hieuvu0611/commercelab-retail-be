@@ -15,6 +15,9 @@ const (
 	StatusFailed       = "FAILED"
 	StatusExpired30m   = "EXPIRED_30M"
 	StatusCapturedLate = "CAPTURED_LATE"
+	StatusCODPending   = "COD_PENDING"
+	StatusCOLLECTED    = "COLLECTED"
+	StatusCODCancelled = "COD_CANCELLED"
 )
 
 // Reasons of a refund obligation: why money is owed back.
@@ -32,9 +35,11 @@ const UnknownWindow = 30 * time.Minute
 type Outcome string
 
 const (
-	OutcomeCaptured Outcome = "CAPTURED"
-	OutcomeFailed   Outcome = "FAILED"
-	OutcomeUnknown  Outcome = "UNKNOWN"
+	OutcomeCaptured     Outcome = "CAPTURED"
+	OutcomeFailed       Outcome = "FAILED"
+	OutcomeUnknown      Outcome = "UNKNOWN"
+	OutcomeCODCollected Outcome = "COLLECTED"
+	OutcomeCODCancelled Outcome = "COD_CANCELLED"
 )
 
 var (
@@ -60,6 +65,7 @@ type Attempt struct {
 	OrderID           string     `json:"orderId"`
 	UserID            string     `json:"-"`
 	IdempotencyKey    string     `json:"-"`
+	PaymentMethod     string     `json:"paymentMethod,omitempty"`
 	AmountVND         int64      `json:"amountVnd"`
 	CapturedAmountVND int64      `json:"capturedAmountVnd"`
 	Status            string     `json:"status"`
@@ -85,16 +91,41 @@ type Change struct {
 // a capture after the window is CAPTURED_LATE and creates a refund obligation, not a confirmation.
 func Apply(a Attempt, o Outcome, amountVND int64, now time.Time) (Attempt, Change, error) {
 	switch o {
-	case OutcomeCaptured:
+	case OutcomeCaptured, OutcomeCODCollected:
 		if amountVND <= 0 {
-			return a, Change{}, ErrInvalidOutcome
+			if a.PaymentMethod == "COD" || a.Status == StatusCODPending {
+				amountVND = a.AmountVND
+			} else {
+				return a, Change{}, ErrInvalidOutcome
+			}
 		}
-	case OutcomeFailed, OutcomeUnknown:
+	case OutcomeFailed, OutcomeUnknown, OutcomeCODCancelled:
 	default:
 		return a, Change{}, ErrInvalidOutcome
 	}
 
 	switch a.Status {
+	case StatusCODPending:
+		switch o {
+		case OutcomeCaptured, OutcomeCODCollected:
+			a.Status, a.CapturedAmountVND, a.OutcomeAt = StatusCOLLECTED, amountVND, &now
+			return a, Change{CapturedVND: amountVND}, nil
+		case OutcomeFailed, OutcomeCODCancelled:
+			a.Status, a.OutcomeAt = StatusCODCancelled, &now
+			return a, Change{}, nil
+		default:
+			return a, Change{}, ErrInvalidOutcome
+		}
+	case StatusCOLLECTED:
+		if (o == OutcomeCaptured || o == OutcomeCODCollected) && (amountVND == a.CapturedAmountVND || amountVND <= 0) {
+			return a, Change{Replay: true}, nil
+		}
+		return a, Change{}, ErrFinalOutcome
+	case StatusCODCancelled:
+		if o == OutcomeFailed || o == OutcomeCODCancelled {
+			return a, Change{Replay: true}, nil
+		}
+		return a, Change{}, ErrFinalOutcome
 	case StatusProcessing:
 		return fromProcessing(a, o, amountVND, now)
 	case StatusUnknown:

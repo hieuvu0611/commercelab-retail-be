@@ -199,7 +199,7 @@ func TestAVoucherLeftReservedByAClosedOrderIsGivenBack(t *testing.T) {
 	}
 	// A use held by an order that is still alive is left alone.
 	f.quotes.quote.ExpiresAt = at(11, 0)
-	live, _, err := f.svc.Place(context.Background(), Principal{UserID: "user-lan", Bearer: "t"}, "key-2", "Q-2")
+	live, _, err := f.svc.Place(context.Background(), Principal{UserID: "user-lan", Bearer: "t"}, "key-2", "Q-2", "")
 	if err != nil {
 		t.Fatal(err)
 	}

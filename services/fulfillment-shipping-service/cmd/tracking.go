@@ -47,6 +47,8 @@ type entryView struct {
 type trackingView struct {
 	OrderID            string         `json:"orderId"`
 	ShipmentID         string         `json:"shipmentId"`
+	PaymentMethod      string         `json:"paymentMethod,omitempty"`
+	CodAmountToCollect int64          `json:"codAmountToCollect,omitempty"`
 	Status             string         `json:"status"`
 	HandedOverAt       *time.Time     `json:"handedOverAt,omitempty"`
 	DeliveredAt        *time.Time     `json:"deliveredAt,omitempty"`
@@ -108,7 +110,9 @@ func registerTrackingRoute(mux *http.ServeMux, d Deps) {
 }
 
 func trackingOf(s shipment.Shipment, entries []timeline.Entry) trackingView {
-	v := trackingView{OrderID: s.OrderID, ShipmentID: s.ShipmentID, Status: string(s.Status), HandedOverAt: s.HandedOverAt,
+	v := trackingView{OrderID: s.OrderID, ShipmentID: s.ShipmentID,
+		PaymentMethod: s.PaymentMethod, CodAmountToCollect: s.CodAmountToCollect,
+		Status: string(s.Status), HandedOverAt: s.HandedOverAt,
 		DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt,
 		Quantities: make([]quantityView, len(s.Items)), Timeline: make([]entryView, len(entries))}
 	for i, it := range s.Items {

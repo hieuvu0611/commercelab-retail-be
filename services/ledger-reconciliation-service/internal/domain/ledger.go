@@ -261,3 +261,95 @@ func NewCompensatingAdjustmentEntry(
 	}
 	return entry, nil
 }
+
+// NewCODDeliveryConfirmedEntry builds a balanced double entry when a COD order is delivered and cash is collected by the carrier
+// Debit: 1310 (3PL COD Receivables: carrier has collected cash from customer)
+// Credit: 5110 (Gross Sales Revenue)
+func NewCODDeliveryConfirmedEntry(entryID, orderID, carrierID string, amountVND int64, actor string) (JournalEntry, error) {
+	if amountVND <= 0 {
+		return JournalEntry{}, fmt.Errorf("collected amount must be positive, got %d", amountVND)
+	}
+	if carrierID == "" {
+		carrierID = "DEFAULT_CARRIER"
+	}
+	now := time.Now().UTC()
+	entry := JournalEntry{
+		EntryID:     entryID,
+		EventType:   "COD_DELIVERY_CONFIRMED",
+		ReferenceID: orderID,
+		Description: fmt.Sprintf("COD delivery confirmed and cash collected for order %s via carrier %s", orderID, carrierID),
+		PostedAt:    now,
+		CreatedBy:   actor,
+		CreatedAt:   now,
+		Postings: []Posting{
+			{
+				AccountCode: "1310",
+				Direction:   DirectionDebit,
+				AmountVND:   amountVND,
+			},
+			{
+				AccountCode: "5110",
+				Direction:   DirectionCredit,
+				AmountVND:   amountVND,
+			},
+		},
+	}
+	if err := ValidateJournalEntry(entry); err != nil {
+		return JournalEntry{}, err
+	}
+	return entry, nil
+}
+
+// NewCODSettlementMatchedEntry builds a balanced double entry for a carrier COD cash settlement payout
+// Debit: 1110 (Cash in Bank: net cash remitted by carrier = collected - fee)
+// Debit: 6420 (Carrier COD Processing Fees)
+// Optional Debit: 1388 (Discrepancy Receivable: shortfall to be investigated)
+// Credit: 1310 (3PL COD Receivables: gross collected amount)
+func NewCODSettlementMatchedEntry(
+	entryID, orderID, batchID, carrierID string,
+	grossCollectedVND, feeVND, netPayoutVND, diffVND int64,
+	actor string,
+) (JournalEntry, error) {
+	if grossCollectedVND <= 0 {
+		return JournalEntry{}, fmt.Errorf("gross collected amount must be positive, got %d", grossCollectedVND)
+	}
+	now := time.Now().UTC()
+	postings := []Posting{
+		{
+			AccountCode: "1110",
+			Direction:   DirectionDebit,
+			AmountVND:   netPayoutVND,
+		},
+		{
+			AccountCode: "6420",
+			Direction:   DirectionDebit,
+			AmountVND:   feeVND,
+		},
+	}
+	if diffVND > 0 {
+		postings = append(postings, Posting{
+			AccountCode: "1388",
+			Direction:   DirectionDebit,
+			AmountVND:   diffVND,
+		})
+	}
+	postings = append(postings, Posting{
+		AccountCode: "1310",
+		Direction:   DirectionCredit,
+		AmountVND:   grossCollectedVND,
+	})
+	entry := JournalEntry{
+		EntryID:     entryID,
+		EventType:   "COD_SETTLEMENT_MATCHED",
+		ReferenceID: fmt.Sprintf("%s:%s", batchID, orderID),
+		Description: fmt.Sprintf("Carrier COD settlement payout matched for order %s via carrier %s (batch %s)", orderID, carrierID, batchID),
+		PostedAt:    now,
+		CreatedBy:   actor,
+		CreatedAt:   now,
+		Postings:    postings,
+	}
+	if err := ValidateJournalEntry(entry); err != nil {
+		return JournalEntry{}, err
+	}
+	return entry, nil
+}

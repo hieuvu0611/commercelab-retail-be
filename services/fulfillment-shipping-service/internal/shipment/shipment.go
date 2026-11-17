@@ -21,6 +21,7 @@ const (
 	StatusInTransit          Status = "IN_TRANSIT"
 	StatusDelivered          Status = "DELIVERED"
 	StatusDeliveryFailed     Status = "DELIVERY_FAILED"
+	StatusReturnToSender     Status = "RETURN_TO_SENDER"
 	StatusPartiallyDelivered Status = "PARTIALLY_DELIVERED"
 	StatusPickBlocked        Status = "PICK_BLOCKED"
 	// StatusStoppedForCancel: the order was cancelled before handover; the parcel can never be handed over (B05, SC06).
@@ -51,8 +52,10 @@ type Shipment struct {
 	ShipmentID   string     `json:"shipmentId"`
 	OrderID      string     `json:"orderId"`
 	UserID       string     `json:"-"`
-	WarehouseID  string     `json:"warehouseId"`
-	Status       Status     `json:"status"`
+	WarehouseID        string     `json:"warehouseId"`
+	PaymentMethod      string     `json:"paymentMethod,omitempty"`
+	CodAmountToCollect int64      `json:"codAmountToCollect,omitempty"`
+	Status             Status     `json:"status"`
 	Items        []Item     `json:"items"`
 	Version      int64      `json:"version"`
 	HandedOverAt *time.Time `json:"handedOverAt,omitempty"`
@@ -88,7 +91,33 @@ func New(orderID, userID, warehouseID string, items []Item, now time.Time) (Ship
 		merged = append(merged, it)
 	}
 	return Shipment{ShipmentID: ID(orderID), OrderID: orderID, UserID: userID, WarehouseID: warehouseID,
+		PaymentMethod: "PREPAID", CodAmountToCollect: 0,
 		Status: StatusPendingPick, Items: merged, Version: 1, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}, nil
+}
+
+// NewWithCOD builds a parcel with payment method and COD collection amount specified.
+func NewWithCOD(orderID, userID, warehouseID, paymentMethod string, codAmount int64, items []Item, now time.Time) (Shipment, error) {
+	s, err := New(orderID, userID, warehouseID, items, now)
+	if err != nil {
+		return Shipment{}, err
+	}
+	if paymentMethod == "" {
+		paymentMethod = "PREPAID"
+	}
+	s.PaymentMethod = paymentMethod
+	s.CodAmountToCollect = codAmount
+	return s, nil
+}
+
+func (s Shipment) MarkReturnToSender(reason string, now time.Time) (Shipment, error) {
+	if s.Status == StatusReturnToSender {
+		return s, nil
+	}
+	s.Status = StatusReturnToSender
+	s.FailureReason = reason
+	s.Version++
+	s.UpdatedAt = now.UTC()
+	return s, nil
 }
 
 // ReturnWindow is how long after delivery a customer may request a return.

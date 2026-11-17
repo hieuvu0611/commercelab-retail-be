@@ -165,6 +165,17 @@ func (f *fakePayments) CreateAttempt(_ context.Context, orderID, userID string, 
 	return Attempt{AttemptID: "PAY-" + orderID, Status: "PROCESSING"}, nil
 }
 
+func (f *fakePayments) CreateCODAttempt(_ context.Context, orderID, userID string, amountVND int64) (Attempt, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.amount, f.userID = amountVND, userID
+	if f.failure != nil {
+		return Attempt{}, f.failure
+	}
+	return Attempt{AttemptID: "PAY-" + orderID, Status: "COD_PENDING"}, nil
+}
+
 func (f *fakePayments) AttemptState(_ context.Context, orderID string) (PaymentState, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -241,7 +252,61 @@ var lan = Principal{UserID: "user-lan", Bearer: "tok-lan"}
 
 func place(t *testing.T, f *fixture, p Principal, key, quote string) (orders.Order, bool, error) {
 	t.Helper()
-	return f.svc.Place(context.Background(), p, key, quote)
+	return f.svc.Place(context.Background(), p, key, quote, "")
+}
+
+func placeWithMethod(t *testing.T, f *fixture, p Principal, key, quote, method string) (orders.Order, bool, error) {
+	t.Helper()
+	return f.svc.Place(context.Background(), p, key, quote, method)
+}
+
+func TestPlaceOrderCOD_SuccessAndLimits(t *testing.T) {
+	t.Run("COD order <= 2M confirms immediately with COD_PENDING", func(t *testing.T) {
+		f := newFixture()
+		o, replayed, err := placeWithMethod(t, f, lan, "key-cod-1", "Q-1", PaymentMethodCOD)
+		if err != nil || replayed {
+			t.Fatalf("unexpected err: %v, replayed: %v", err, replayed)
+		}
+		if o.Status != string(saga.StateConfirmed) || o.PaymentStatus != PayCODPending {
+			t.Fatalf("expected CONFIRMED and COD_PENDING, got status=%s, pay=%s", o.Status, o.PaymentStatus)
+		}
+		if o.PaymentMethod != PaymentMethodCOD {
+			t.Fatalf("expected paymentMethod COD, got %s", o.PaymentMethod)
+		}
+		if f.stock.commits != 1 {
+			t.Fatalf("expected stock committed for COD order, got %d", f.stock.commits)
+		}
+	})
+
+	t.Run("COD order > 2M is rejected with ErrCODCeilingExceeded", func(t *testing.T) {
+		f := newFixture()
+		f.quotes.quote.SubtotalVND = 2_540_000
+		f.quotes.quote.DiscountVND = 70_000
+		f.quotes.quote.ShippingFeeVND = 30_000
+		f.quotes.quote.TotalPayableVND = 2_500_000
+		_, _, err := placeWithMethod(t, f, lan, "key-cod-high", "Q-HIGH", PaymentMethodCOD)
+		if !errors.Is(err, ErrCODCeilingExceeded) {
+			t.Fatalf("expected ErrCODCeilingExceeded, got %v", err)
+		}
+	})
+
+	t.Run("Customer with >= 2 active COD orders is rejected with ErrCODVelocityLimit", func(t *testing.T) {
+		f := newFixture()
+		// Place 2 COD orders
+		_, _, err1 := placeWithMethod(t, f, lan, "key-cod-1", "Q-1", PaymentMethodCOD)
+		if err1 != nil {
+			t.Fatalf("err1: %v", err1)
+		}
+		_, _, err2 := placeWithMethod(t, f, lan, "key-cod-2", "Q-2", PaymentMethodCOD)
+		if err2 != nil {
+			t.Fatalf("err2: %v", err2)
+		}
+		// 3rd COD order should fail
+		_, _, err3 := placeWithMethod(t, f, lan, "key-cod-3", "Q-3", PaymentMethodCOD)
+		if !errors.Is(err3, ErrCODVelocityLimit) {
+			t.Fatalf("expected ErrCODVelocityLimit, got %v", err3)
+		}
+	})
 }
 
 func TestPlaceOrderReservesStockVoucherAndPayment_SC01(t *testing.T) {
