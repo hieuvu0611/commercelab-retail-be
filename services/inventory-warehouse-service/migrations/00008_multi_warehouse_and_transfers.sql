@@ -8,6 +8,7 @@ VALUES
 ON CONFLICT (sku_id, warehouse_id) DO NOTHING;
 
 ALTER TABLE inventory.reservations DROP CONSTRAINT IF EXISTS reservations_order_id_key;
+-- +goose StatementBegin
 DO $$
 BEGIN
     IF NOT EXISTS (
@@ -17,6 +18,7 @@ BEGIN
             ADD CONSTRAINT uq_reservations_order_warehouse UNIQUE (order_id, warehouse_id);
     END IF;
 END $$;
+-- +goose StatementEnd
 
 ALTER TABLE inventory.stock_movements DROP CONSTRAINT IF EXISTS chk_movement_type;
 ALTER TABLE inventory.stock_movements ADD CONSTRAINT chk_movement_type CHECK (type IN
