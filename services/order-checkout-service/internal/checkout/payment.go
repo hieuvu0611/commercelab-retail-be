@@ -219,6 +219,11 @@ func (s *Service) runEffects(ctx context.Context, o orders.Order, effects []saga
 					return false, err
 				}
 			}
+			if s.Promotions != nil && len(o.AppliedPromotions) > 0 {
+				if err := s.Promotions.ConsumeOrder(ctx, o.OrderID); err != nil {
+					return false, err
+				}
+			}
 		case saga.HoldStockException:
 			if err := s.Stock.ExceptionHold(ctx, o.OrderID); errors.Is(err, ErrReservationLost) {
 				log.Printf("[order] exception hold for order %s: the reservation is already gone", o.OrderID)
