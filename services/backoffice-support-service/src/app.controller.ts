@@ -108,7 +108,7 @@ export class AppController {
 
   @Get('/api/v1/backoffice/returns')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'ADMIN')
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
   listBackofficeReturns(
     @Query('status') status?: string,
     @Query('orderId') orderId?: string,
@@ -125,7 +125,7 @@ export class AppController {
 
   @Get('/api/v1/backoffice/returns/:rmaId')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'ADMIN')
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
   getBackofficeReturnDetail(@Param('rmaId') rmaId: string) {
     const item = this.returnsService.getReturn(rmaId);
     return new ApiResult(item, 'Backoffice return detail retrieved successfully');
@@ -133,7 +133,7 @@ export class AppController {
 
   @Post('/api/v1/backoffice/returns/:rmaId/approve')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
   approveBackofficeReturn(@Req() req: any, @Param('rmaId') rmaId: string) {
     const actor = req.user?.userId || 'support-agent';
     const item = this.returnsService.approveReturn(rmaId, actor);
@@ -142,7 +142,7 @@ export class AppController {
 
   @Post('/api/v1/backoffice/returns/:rmaId/receive')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'ADMIN')
+  @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN')
   receiveReturnParcel(@Req() req: any, @Param('rmaId') rmaId: string) {
     const actor = req.user?.userId || 'warehouse-staff';
     const item = this.returnsService.receiveRma(rmaId, actor);
@@ -151,7 +151,7 @@ export class AppController {
 
   @Post('/api/v1/backoffice/returns/:rmaId/qc')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'ADMIN')
+  @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN')
   submitQcInspection(
     @Req() req: any,
     @Param('rmaId') rmaId: string,
@@ -164,7 +164,7 @@ export class AppController {
 
   @Post('/api/v1/backoffice/returns/:rmaId/refund')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_LEAD', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
+  @Roles('SUPPORT_LEAD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
   async disburseReturnRefund(@Req() req: any, @Param('rmaId') rmaId: string) {
     const actor = req.user?.userId || 'finance-officer';
     const item = await this.returnsService.disburseRefund(rmaId, actor);
@@ -173,7 +173,7 @@ export class AppController {
 
   @Post('/api/v1/backoffice/returns/:rmaId/request-approval')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
   async requestRefundApproval(
     @Req() req: any,
     @Param('rmaId') rmaId: string,
@@ -186,7 +186,7 @@ export class AppController {
 
   @Post('/api/v1/backoffice/approvals')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'PROCUREMENT_STAFF', 'PROCUREMENT_MGR', 'ADMIN')
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'PROCUREMENT', 'PROCUREMENT_STAFF', 'PROCUREMENT_MGR', 'OPS_MGR', 'ADMIN')
   async createApproval(
     @Req() req: any,
     @Body() body: {
@@ -207,21 +207,21 @@ export class AppController {
 
   @Get('/api/v1/backoffice/approvals')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'PROCUREMENT_MGR', 'ADMIN')
-  listApprovals(
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'PROCUREMENT', 'PROCUREMENT_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async listApprovals(
     @Query('status') status?: string,
     @Query('requestType') requestType?: any,
     @Query('makerUserId') makerUserId?: string,
   ) {
-    const list = this.makerChecker.listApprovals({ status, requestType, makerUserId });
+    const list = await this.makerChecker.listApprovals({ status, requestType, makerUserId });
     return new ApiResult(list, 'Approvals retrieved successfully');
   }
 
   @Get('/api/v1/backoffice/approvals/:id')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'PROCUREMENT_MGR', 'ADMIN')
-  getApprovalDetail(@Param('id') id: string) {
-    const item = this.makerChecker.getApproval(id);
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'PROCUREMENT', 'PROCUREMENT_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async getApprovalDetail(@Param('id') id: string) {
+    const item = await this.makerChecker.getApproval(id);
     if (!item) {
       throw new NotFoundException(`Approval request ${id} not found`);
     }
@@ -230,7 +230,7 @@ export class AppController {
 
   @Post('/api/v1/backoffice/approvals/:id/decide')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'ADMIN')
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'PROCUREMENT_MGR', 'OPS_MGR', 'ADMIN')
   async decideApproval(
     @Req() req: any,
     @Param('id') id: string,
@@ -251,20 +251,20 @@ export class AppController {
 
   @Post('/api/v1/backoffice/returns/:rmaId/reject')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
   rejectBackofficeReturn(
     @Req() req: any,
     @Param('rmaId') rmaId: string,
     @Body('note') note: string,
   ) {
     const actor = req.user?.userId || 'support-agent';
-    const item = this.returnsService.rejectReturn(rmaId, note || 'Không đủ điều kiện đổi trả', actor);
+    const item = this.returnsService.rejectReturn(rmaId, note || 'Ineligible return request', actor);
     return new ApiResult(item, 'Return request rejected and ceiling released');
   }
 
   @Post('/api/v1/backoffice/returns/:rmaId/exchange')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
   async createExchangeOrder(
     @Req() req: any,
     @Param('rmaId') rmaId: string,
@@ -285,8 +285,8 @@ export class AppController {
 
   @Post('/api/v1/backoffice/exception-cases')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
-  createExceptionCase(
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'DELIVERY_COORD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async createExceptionCase(
     @Req() req: any,
     @Body() body: {
       referenceId: string;
@@ -296,7 +296,7 @@ export class AppController {
     },
   ) {
     const actor = req.user?.userId || 'system-staff';
-    const item = this.exceptionCases.createCase({
+    const item = await this.exceptionCases.createCase({
       ...body,
       actor,
     });
@@ -305,14 +305,14 @@ export class AppController {
 
   @Get('/api/v1/backoffice/exception-cases')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
-  listExceptionCases(
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'DELIVERY_COORD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async listExceptionCases(
     @Query('status') status?: string,
     @Query('category') category?: string,
     @Query('ownerId') ownerId?: string,
     @Query('overdueOnly') overdueOnly?: string,
   ) {
-    const items = this.exceptionCases.listCases({
+    const items = await this.exceptionCases.listCases({
       status,
       category,
       ownerId,
@@ -328,35 +328,35 @@ export class AppController {
 
   @Get('/api/v1/backoffice/exception-cases/:caseId')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
-  getExceptionCaseDetail(@Param('caseId') caseId: string) {
-    const item = this.exceptionCases.getCase(caseId);
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'DELIVERY_COORD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async getExceptionCaseDetail(@Param('caseId') caseId: string) {
+    const item = await this.exceptionCases.getCase(caseId);
     return new ApiResult(item, 'Exception case retrieved successfully');
   }
 
   @Post('/api/v1/backoffice/exception-cases/:caseId/assign')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
-  assignExceptionCase(
+  async assignExceptionCase(
     @Req() req: any,
     @Param('caseId') caseId: string,
     @Body('ownerId') ownerId: string,
   ) {
     const actor = req.user?.userId || 'ops-lead';
-    const item = this.exceptionCases.assignCase(caseId, ownerId, actor);
+    const item = await this.exceptionCases.assignCase(caseId, ownerId, actor);
     return new ApiResult(item, `Exception case assigned to ${ownerId} successfully`);
   }
 
   @Post('/api/v1/backoffice/exception-cases/:caseId/timeline')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
-  appendCaseTimeline(
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'DELIVERY_COORD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async appendCaseTimeline(
     @Req() req: any,
     @Param('caseId') caseId: string,
     @Body() body: { action: string; evidenceUrl?: string; note?: string },
   ) {
     const actor = req.user?.userId || 'staff';
-    const item = this.exceptionCases.appendTimeline(caseId, {
+    const item = await this.exceptionCases.appendTimeline(caseId, {
       ...body,
       actor,
     });
@@ -366,14 +366,14 @@ export class AppController {
   @Post('/api/v1/backoffice/exception-cases/:caseId/resolve')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
-  resolveExceptionCase(
+  async resolveExceptionCase(
     @Req() req: any,
     @Param('caseId') caseId: string,
     @Body('evidence') evidence: string,
     @Body('note') note?: string,
   ) {
     const actor = req.user?.userId || 'ops-lead';
-    const item = this.exceptionCases.resolveCase(caseId, actor, evidence, note);
+    const item = await this.exceptionCases.resolveCase(caseId, actor, evidence, note);
     return new ApiResult(item, 'Exception case resolved with evidence successfully');
   }
 
@@ -383,7 +383,7 @@ export class AppController {
 
   @Get('/api/v1/backoffice/audit-logs')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
   async listAuditLogs(
     @Query('actorId') actorId?: string,
     @Query('event') event?: string,
@@ -412,7 +412,7 @@ export class AppController {
 
   @Get('/api/v1/backoffice/metrics')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'PRODUCT_STAFF', 'MARKETING', 'PROCUREMENT', 'DELIVERY_COORD', 'WAREHOUSE_STAFF', 'ADMIN')
   async getManagementMetrics(@Query('period') period?: string) {
     const data = await this.metricsService.getMetrics(period || 'TODAY');
     return new ApiResult(data, 'Management metrics retrieved successfully');

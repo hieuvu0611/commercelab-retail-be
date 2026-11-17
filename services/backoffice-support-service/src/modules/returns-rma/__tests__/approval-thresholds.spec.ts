@@ -85,7 +85,7 @@ describe('Shipping Refund Rules & Approval Thresholds (P8-T05, P09, P11, P10)', 
       'WAREHOUSE_MGR',
       'APPROVE',
     );
-    expect(makerChecker.getApprovalByReference(rma.returnId)?.status).toBe('APPROVED');
+    expect((await makerChecker.getApprovalByReference(rma.returnId))?.status).toBe('APPROVED');
 
     // 5. Now refund disbursement succeeds
     const refunded = await service.disburseRefund(rma.returnId, 'finance-agent');

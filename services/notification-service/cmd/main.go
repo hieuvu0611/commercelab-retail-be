@@ -10,12 +10,16 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/eventconsumer"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/internal/stopalert"
+	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/migrations"
 )
 
 // consumerGroup is the consumer group of this service on the shipment topic.
@@ -23,8 +27,24 @@ const consumerGroup = "notification-service"
 
 func main() {
 	port := config.EnvOrDefault("NOTIFICATION_PORT", "8089")
+	pgURL := config.EnvOrDefault("DATABASE_URL_NOTIFICATIONS", "postgres://notify_svc_user:notify_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=notifications")
 	auth.LoadSecrets(config.NewLoader())
+
+	ctx := context.Background()
+	if migrate.EnabledOnStart() {
+		if _, err := migrate.Up(ctx, pgURL, migrations.FS); err != nil {
+			log.Fatalf("[notification-service] migrations failed: %v", err)
+		}
+	}
+	pool, pgErr := db.ConnectPostgres(ctx, pgURL)
+	if err := dependency.CheckStartup("notification-service", "postgres", pgErr); err != nil {
+		log.Fatal(err)
+	}
 	dispatcher := domain.NewDispatcher()
+	if pool != nil {
+		defer pool.Close()
+		dispatcher = domain.NewDispatcherWithStore(domain.NewPostgresStore(pool))
+	}
 
 	// Shipment events feed the warehouse stop alerts (SC06).
 	hub := stopalert.NewHub()

@@ -76,7 +76,7 @@ func NewServer(
 
 func main() {
 	port := config.EnvOrDefault("LEDGER_RECONCILIATION_PORT", "8086")
-	pgURL := config.EnvOrDefault("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/commerce_lab?sslmode=disable&search_path=ledger")
+	pgURL := config.EnvOrDefault("DATABASE_URL_LEDGER", config.EnvOrDefault("DATABASE_URL", "postgres://ledger_svc_user:ledger_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=ledger"))
 	s3Client := s3.NewFromEnv()
 
 	ctx := context.Background()

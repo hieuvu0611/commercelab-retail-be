@@ -147,15 +147,15 @@ export class MakerCheckerPolicyService {
     action: 'APPROVE' | 'REJECT',
     note?: string,
   ): Promise<ApprovalRecord> {
-    const record = this.approvals.get(approvalId);
+    const record = await this.getApproval(approvalId);
     if (!record) {
-      throw new NotFoundException(`Không tìm thấy yêu cầu phê duyệt ${approvalId}`);
+      throw new NotFoundException(`Approval request ${approvalId} not found`);
     }
     if (record.status !== 'PENDING') {
-      throw new ConflictException(`Yêu cầu phê duyệt này đã được xử lý (trạng thái: ${record.status})`);
+      throw new ConflictException(`Approval request already processed (status: ${record.status})`);
     }
 
-    // Kiểm tra chính sách P10
+    // Policy P10 validation
     this.validateApproval({
       requestType: record.requestType,
       makerUserId: record.makerUserId,
@@ -176,27 +176,57 @@ export class MakerCheckerPolicyService {
     }
 
     if (this.db) {
-      try {
-        await this.db.query(
-          `UPDATE support.approval_requests
-           SET status = $1, checker_user_id = $2, decision_note = $3, updated_at = $4
-           WHERE approval_id = $5`,
-          [record.status, checkerUserId, record.decisionNote, record.updatedAt, approvalId],
-        );
-      } catch {
-        // Fallback in-memory
-      }
+      await this.db.query(
+        `UPDATE support.approval_requests
+         SET status = $1, checker_user_id = $2, decision_note = $3, updated_at = $4
+         WHERE approval_id = $5`,
+        [record.status, checkerUserId, record.decisionNote, record.updatedAt, approvalId],
+      );
     }
+    this.approvals.set(approvalId, record);
 
     return record;
   }
 
-  getApproval(approvalId: string): ApprovalRecord | undefined {
-    return this.approvals.get(approvalId);
+  private mapRow(row: any): ApprovalRecord {
+    return {
+      approvalId: row.approval_id,
+      requestType: row.request_type,
+      referenceId: row.reference_id,
+      amountVnd: Number(row.amount_vnd || 0),
+      quantityDiff: Number(row.quantity_diff || 0),
+      makerUserId: row.maker_user_id,
+      checkerUserId: row.checker_user_id ?? undefined,
+      status: row.status,
+      reason: row.reason,
+      decisionNote: row.decision_note ?? undefined,
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at || row.created_at).toISOString(),
+    };
   }
 
-  listApprovals(filter?: { status?: string; requestType?: string; makerUserId?: string }): ApprovalRecord[] {
-    let list = Array.from(this.approvals.values());
+  async getApproval(approvalId: string): Promise<ApprovalRecord | undefined> {
+    if (!this.db) {
+      return this.approvals.get(approvalId);
+    }
+    const res = await this.db.query(
+      'SELECT * FROM support.approval_requests WHERE approval_id = $1',
+      [approvalId],
+    );
+    if (res.rows.length === 0) return this.approvals.get(approvalId);
+    return this.mapRow(res.rows[0]);
+  }
+
+  async listApprovals(filter?: { status?: string; requestType?: string; makerUserId?: string }): Promise<ApprovalRecord[]> {
+    let list: ApprovalRecord[];
+    if (!this.db) {
+      list = Array.from(this.approvals.values());
+    } else {
+      const res = await this.db.query(
+        'SELECT * FROM support.approval_requests ORDER BY created_at DESC',
+      );
+      list = res.rows.map((r) => this.mapRow(r));
+    }
     if (filter?.status) {
       list = list.filter((a) => a.status === filter.status);
     }
@@ -209,7 +239,17 @@ export class MakerCheckerPolicyService {
     return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
-  getApprovalByReference(referenceId: string): ApprovalRecord | undefined {
-    return Array.from(this.approvals.values()).find((a) => a.referenceId === referenceId);
+  async getApprovalByReference(referenceId: string): Promise<ApprovalRecord | undefined> {
+    if (!this.db) {
+      return Array.from(this.approvals.values()).find((a) => a.referenceId === referenceId);
+    }
+    const res = await this.db.query(
+      'SELECT * FROM support.approval_requests WHERE reference_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [referenceId],
+    );
+    if (res.rows.length === 0) {
+      return Array.from(this.approvals.values()).find((a) => a.referenceId === referenceId);
+    }
+    return this.mapRow(res.rows[0]);
   }
 }
