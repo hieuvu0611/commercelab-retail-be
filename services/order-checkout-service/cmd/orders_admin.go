@@ -66,6 +66,7 @@ type staffOrderRow struct {
 	OrderID         string    `json:"orderId"`
 	CustomerID      string    `json:"customerId"`
 	Status          string    `json:"status"`
+	PaymentMethod   string    `json:"paymentMethod,omitempty"`
 	PaymentStatus   string    `json:"paymentStatus"`
 	FailureCode     string    `json:"failureCode,omitempty"`
 	WarehouseID     string    `json:"warehouseId"`
@@ -120,7 +121,7 @@ func listStaffOrders(svc *checkout.Service) http.HandlerFunc {
 		}
 		rows := make([]staffOrderRow, len(list))
 		for i, o := range list {
-			rows[i] = staffOrderRow{OrderID: o.OrderID, CustomerID: o.UserID, Status: o.Status, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
+			rows[i] = staffOrderRow{OrderID: o.OrderID, CustomerID: o.UserID, Status: o.Status, PaymentMethod: o.PaymentMethod, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
 				WarehouseID: o.WarehouseID, TotalPayableVND: o.TotalPayableVND, ItemCount: o.ItemCount, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 			if snap, found, err := svc.Snapshots.Get(r.Context(), o.OrderID); err == nil && found {
 				rows[i].staffContact = contactOf(snap.ShippingAddress)
@@ -160,7 +161,7 @@ func getStaffOrder(svc *checkout.Service) http.HandlerFunc {
 		}
 		own := detailOf(r, svc, o)
 		d := staffOrderDetail{
-			staffOrderRow: staffOrderRow{OrderID: o.OrderID, CustomerID: o.UserID, Status: o.Status, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
+			staffOrderRow: staffOrderRow{OrderID: o.OrderID, CustomerID: o.UserID, Status: o.Status, PaymentMethod: o.PaymentMethod, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
 				WarehouseID: o.WarehouseID, TotalPayableVND: o.TotalPayableVND, ItemCount: own.ItemCount, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt},
 			QuoteID: o.QuoteID, VoucherCode: o.VoucherCode, SubtotalVND: o.SubtotalVND, DiscountVND: o.DiscountVND, ShippingFeeVND: o.ShippingFeeVND,
 			Items: own.Items, Payment: own.Payment, RefundObligation: own.RefundObligation,

@@ -454,3 +454,44 @@ func TestCloseForACancellationOwesTheCapturedAmountWithItsReason(t *testing.T) {
 		t.Fatalf("obligations = %+v", obs)
 	}
 }
+
+func TestCODCollectAndCancelAllowStaffBearerAndAccumulateMultiParcel(t *testing.T) {
+	f := newFixture(t, true)
+	rec := f.do(http.MethodPost, "/api/v1/payments/attempts", internalHeaders("cod-key-1"),
+		`{"orderId":"O-COD-1","userId":"user-lan","amountVnd":760000,"paymentMethod":"COD"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create COD attempt: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// Customer Bearer tokens must never mark COD collected.
+	if r := f.do(http.MethodPost, "/api/v1/payments/orders/O-COD-1/cod-collect",
+		map[string]string{"Authorization": "Bearer " + token("user-lan")}, `{"collectedAmount":270685}`); r.Code != http.StatusForbidden {
+		t.Fatalf("customer token must be forbidden: %d %s", r.Code, r.Body.String())
+	}
+
+	whStaff, err := auth.SignAccessToken(auth.Identity{UserID: "staff-whm-all", Roles: []string{"WAREHOUSE_MGR"}, WarehouseScopes: []string{"ALL"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Parcel 1 collects 270,685 -> stays COD_PENDING while capturedAmountVnd tracks 270,685.
+	r1 := f.do(http.MethodPost, "/api/v1/payments/orders/O-COD-1/cod-collect",
+		map[string]string{"Authorization": "Bearer " + whStaff}, `{"collectedAmount":270685}`)
+	if got := decode[attemptResp](t, r1); r1.Code != http.StatusOK || got.Data.Status != "COD_PENDING" || got.Data.CapturedAmountVND != 270685 {
+		t.Fatalf("parcel 1 cod-collect = %d %+v", r1.Code, got)
+	}
+	// Parcel 2 collects 489,315 -> total reaches 760,000 and transitions to COLLECTED.
+	r2 := f.do(http.MethodPost, "/api/v1/payments/orders/O-COD-1/cod-collect",
+		map[string]string{"Authorization": "Bearer " + whStaff}, `{"collectedAmount":489315}`)
+	if got := decode[attemptResp](t, r2); r2.Code != http.StatusOK || got.Data.Status != "COLLECTED" || got.Data.CapturedAmountVND != 760000 {
+		t.Fatalf("parcel 2 cod-collect = %d %+v", r2.Code, got)
+	}
+
+	// Delivery failed on a separate COD order via staff token.
+	_ = f.do(http.MethodPost, "/api/v1/payments/attempts", internalHeaders("cod-key-2"),
+		`{"orderId":"O-COD-2","userId":"user-lan","amountVnd":400000,"paymentMethod":"COD"}`)
+	rc := f.do(http.MethodPost, "/api/v1/payments/orders/O-COD-2/cod-cancel",
+		map[string]string{"Authorization": "Bearer " + whStaff}, `{"reason":"failed"}`)
+	if got := decode[attemptResp](t, rc); rc.Code != http.StatusOK || got.Data.Status != "COD_CANCELLED" {
+		t.Fatalf("cod-cancel = %d %+v", rc.Code, got)
+	}
+}

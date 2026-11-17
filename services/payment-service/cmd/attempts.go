@@ -51,15 +51,28 @@ type OrderNotifier interface {
 // notifyTimeout bounds the callback to the order service; it outlives a client that hangs up.
 const notifyTimeout = 10 * time.Second
 
+func requireInternalOrStaff(h http.HandlerFunc, roles ...string) http.Handler {
+	internal := internalauth.Require(h)
+	staff := auth.RequireAuth(auth.RequireRole(roles...)(h))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(internalauth.Header) != "" {
+			internal.ServeHTTP(w, r)
+			return
+		}
+		staff.ServeHTTP(w, r)
+	})
+}
+
 func registerAttemptRoutes(mux *http.ServeMux, store attempt.Store, opts Options) {
 	api := &attemptAPI{store: store, opts: opts}
+	codStaff := []string{"WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR", "FINANCE", "FINANCE_MGR", "CSKH"}
 	mux.Handle("POST /api/v1/payments/attempts", internalauth.Require(http.HandlerFunc(api.create)))
 	mux.Handle("GET /api/v1/payments/attempts/{attemptId}", auth.RequireAuth(http.HandlerFunc(api.get)))
 	mux.Handle("POST /api/v1/payments/simulator/{attemptId}/outcome", auth.RequireAuth(http.HandlerFunc(api.simulate)))
 	mux.Handle("GET /api/v1/payments/orders/{orderId}/attempt", internalauth.Require(http.HandlerFunc(api.byOrder)))
 	mux.Handle("POST /api/v1/payments/attempts/{attemptId}/close", internalauth.Require(http.HandlerFunc(api.close)))
-	mux.Handle("POST /api/v1/payments/orders/{orderId}/cod-collect", internalauth.Require(http.HandlerFunc(api.codCollect)))
-	mux.Handle("POST /api/v1/payments/orders/{orderId}/cod-cancel", internalauth.Require(http.HandlerFunc(api.codCancel)))
+	mux.Handle("POST /api/v1/payments/orders/{orderId}/cod-collect", requireInternalOrStaff(api.codCollect, codStaff...))
+	mux.Handle("POST /api/v1/payments/orders/{orderId}/cod-cancel", requireInternalOrStaff(api.codCancel, codStaff...))
 	mux.HandleFunc("POST /api/v1/payments/webhooks/simulator", api.webhook)
 }
 
@@ -314,11 +327,15 @@ func (a *attemptAPI) codCollect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		AmountVND int64  `json:"amountVnd"`
-		EventID   string `json:"eventId"`
+		AmountVND       int64  `json:"amountVnd"`
+		CollectedAmount int64  `json:"collectedAmount"`
+		EventID         string `json:"eventId"`
 	}
 	_ = request.DecodeJSON(w, r, &body)
 	amount := body.AmountVND
+	if amount <= 0 {
+		amount = body.CollectedAmount
+	}
 	if amount <= 0 {
 		amount = cur.AmountVND
 	}

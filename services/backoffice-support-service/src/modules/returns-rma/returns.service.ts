@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { CreateReturnRequestDto } from './create-return.dto';
 import { DatabaseService } from '../../database/database.service';
@@ -69,9 +70,10 @@ export interface ReturnCaseRecord {
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Injectable()
-export class ReturnsRmaService {
+export class ReturnsRmaService implements OnModuleInit {
   private readonly ceilings = new Map<string, OrderLineCeiling>();
   private readonly returnCases = new Map<string, ReturnCaseRecord>();
+  private hydrated = false;
 
   constructor(
     private readonly db: DatabaseService,
@@ -102,6 +104,202 @@ export class ReturnsRmaService {
     });
   }
 
+  async onModuleInit(): Promise<void> {
+    await this.ensureHydrated();
+  }
+
+  private dbReady(): boolean {
+    if (!this.db) return false;
+    if (typeof (this.db as any).getPool === 'function') {
+      return Boolean((this.db as any).getPool());
+    }
+    return true;
+  }
+
+  async ensureHydrated(): Promise<void> {
+    if (this.hydrated || !this.dbReady()) return;
+    this.hydrated = true;
+
+    const reqRes = await this.db.query(
+      `SELECT rma_id, order_id, customer_id, warehouse_id, reason, status,
+              refundable_amount_vnd, shipping_refund_vnd, is_exchange, linked_order_id, notes,
+              created_at, updated_at
+       FROM support.rma_requests
+       ORDER BY created_at DESC`,
+    );
+    if (!reqRes.rows || reqRes.rows.length === 0) return;
+
+    const rmaIds = reqRes.rows.map((r: any) => String(r.rma_id));
+    const itemRes = await this.db.query(
+      `SELECT rma_id, sku_id, sku_name, quantity, unit_paid_vnd, qc_status
+       FROM support.rma_items
+       WHERE rma_id = ANY($1)`,
+      [rmaIds],
+    );
+    const tlRes = await this.db.query(
+      `SELECT rma_id, status, actor, note, created_at
+       FROM support.rma_timeline
+       WHERE rma_id = ANY($1)
+       ORDER BY created_at ASC, id ASC`,
+      [rmaIds],
+    );
+
+    const itemsByRma = new Map<string, ReturnCaseLine[]>();
+    for (const row of itemRes.rows || []) {
+      const rmaId = String(row.rma_id);
+      const list = itemsByRma.get(rmaId) || [];
+      const qty = Number(row.quantity);
+      const qc = String(row.qc_status || 'PENDING');
+      list.push({
+        skuId: String(row.sku_id),
+        skuName: String(row.sku_name || row.sku_id),
+        quantity: qty,
+        receivedQuantity: qc !== 'PENDING' ? qty : 0,
+        qcPassedQuantity: qc === 'PASS' ? qty : 0,
+        qcFailedQuantity: qc === 'FAIL' ? qty : 0,
+        allocatedUnitPaidVnd: Number(row.unit_paid_vnd),
+      });
+      itemsByRma.set(rmaId, list);
+    }
+
+    const tlByRma = new Map<string, Array<{ at: string; actor: string; note: string }>>();
+    for (const row of tlRes.rows || []) {
+      const rmaId = String(row.rma_id);
+      const list = tlByRma.get(rmaId) || [];
+      list.push({
+        at: new Date(row.created_at).toISOString(),
+        actor: String(row.actor),
+        note: String(row.note || ''),
+      });
+      tlByRma.set(rmaId, list);
+    }
+
+    for (const row of reqRes.rows) {
+      const rmaId = String(row.rma_id);
+      if (this.returnCases.has(rmaId)) continue;
+      const items = itemsByRma.get(rmaId) || [];
+      const refundTotal = Number(row.refundable_amount_vnd);
+      const shippingRefund = Number(row.shipping_refund_vnd);
+      const status = String(row.status) as ReturnCaseRecord['status'];
+      this.returnCases.set(rmaId, {
+        returnId: rmaId,
+        orderId: String(row.order_id),
+        customerId: String(row.customer_id),
+        warehouseId: String(row.warehouse_id || 'WH-HCM-01'),
+        status,
+        reason: String(row.reason),
+        items,
+        refundableAmountVnd: refundTotal,
+        shippingRefundVnd: shippingRefund,
+        refund: {
+          amountVnd: refundTotal,
+          goodsVnd: Math.max(0, refundTotal - shippingRefund),
+          shippingVnd: shippingRefund,
+          status: status === 'REFUNDED' ? 'COMPLETED' : 'PENDING',
+        },
+        isExchange: Boolean(row.is_exchange),
+        ...(row.linked_order_id ? { linkedOrderId: String(row.linked_order_id) } : {}),
+        rejectionNote: String(row.notes || ''),
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+        timeline: tlByRma.get(rmaId) || [],
+      });
+    }
+  }
+
+  private async hydrateCeilingsFromOrderServices(orderId: string, authHeader?: string): Promise<void> {
+    const orderUrl = process.env.ORDER_SERVICE_URL?.replace(/\/$/, '');
+    const fulfillmentUrl = process.env.FULFILLMENT_SERVICE_URL?.replace(/\/$/, '');
+    if (!orderUrl || !fulfillmentUrl) return;
+
+    const headers: Record<string, string> = {};
+    if (authHeader) {
+      headers.Authorization = authHeader;
+    }
+
+    const [orderRes, trackingRes] = await Promise.all([
+      fetch(`${orderUrl}/api/v1/orders/${encodeURIComponent(orderId)}`, { headers }),
+      fetch(`${fulfillmentUrl}/api/v1/orders/${encodeURIComponent(orderId)}/tracking`, { headers }),
+    ]);
+
+    if (!orderRes.ok || !trackingRes.ok) return;
+
+    const orderJson = (await orderRes.json()) as {
+      data?: {
+        shippingFeeVnd?: number;
+        totalPayableVnd?: number;
+        updatedAt?: string;
+        payment?: { capturedAmountVnd?: number };
+        items?: Array<{
+          skuId?: string;
+          skuName?: string;
+          quantity?: number;
+          allocatedUnitPaidVnd?: number;
+        }>;
+      };
+    };
+    const trackingJson = (await trackingRes.json()) as {
+      data?: {
+        deliveredAt?: string;
+        quantities?: Array<{ skuId?: string; delivered?: number }>;
+        parcels?: Array<{ deliveredAt?: string }>;
+      };
+    };
+
+    const orderData = orderJson.data;
+    const trackingData = trackingJson.data;
+    if (!orderData?.items || !trackingData) return;
+
+    const deliveredBySku = new Map<string, number>();
+    for (const q of trackingData.quantities || []) {
+      if (q.skuId) {
+        deliveredBySku.set(q.skuId, Number(q.delivered || 0));
+      }
+    }
+
+    const openQtyBySku = new Map<string, number>();
+    for (const existing of this.returnCases.values()) {
+      if (existing.orderId !== orderId || existing.status === 'REJECTED') continue;
+      for (const it of existing.items) {
+        openQtyBySku.set(it.skuId, (openQtyBySku.get(it.skuId) || 0) + it.quantity);
+      }
+    }
+
+    const parcelDelivered = (trackingData.parcels || [])
+      .map((p) => p.deliveredAt)
+      .filter((d): d is string => Boolean(d))
+      .sort()
+      .pop();
+    const deliveredAt =
+      trackingData.deliveredAt || parcelDelivered || orderData.updatedAt || new Date().toISOString();
+    const shippingFeeVnd = Number(orderData.shippingFeeVnd ?? 0);
+
+    for (const it of orderData.items) {
+      if (!it.skuId) continue;
+      const deliveredQty = deliveredBySku.get(it.skuId) ?? 0;
+      if (deliveredQty <= 0) continue;
+      this.seedCeiling({
+        orderId,
+        skuId: it.skuId,
+        deliveredQty,
+        returnedAcceptedQty: 0,
+        returnOpenQty: openQtyBySku.get(it.skuId) || 0,
+        allocatedUnitPaidVnd: Number(it.allocatedUnitPaidVnd ?? 0),
+        shippingFeeVnd,
+        deliveredAt,
+      });
+    }
+
+    const captured = Number(orderData.payment?.capturedAmountVnd ?? orderData.totalPayableVnd ?? 0);
+    if (captured > 0 && !this.paymentClient.getSummary(orderId)) {
+      this.paymentClient.setSummary(orderId, {
+        capturedAmount: captured,
+        refundedAmount: 0,
+        refundPending: 0,
+      });
+    }
+  }
+
   seedCeiling(ceiling: OrderLineCeiling): void {
     const key = `${ceiling.orderId}|${ceiling.skuId}`;
     this.ceilings.set(key, { ...ceiling });
@@ -121,7 +319,9 @@ export class ReturnsRmaService {
   async openRmaRequest(
     dto: CreateReturnRequestDto,
     customerId = 'cust-default',
+    authHeader?: string,
   ): Promise<ReturnCaseRecord> {
+    await this.ensureHydrated();
     const rmaId = dto.rmaId || `RET-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
     if (this.returnCases.has(rmaId)) {
       return this.returnCases.get(rmaId)!;
@@ -129,6 +329,10 @@ export class ReturnsRmaService {
 
     if (!dto.lines || dto.lines.length === 0) {
       throw new ConflictException('Yêu cầu trả hàng cần ít nhất 1 dòng sản phẩm');
+    }
+
+    if (dto.lines.some((line) => !this.ceilings.has(`${dto.orderId}|${line.skuId}`))) {
+      await this.hydrateCeilingsFromOrderServices(dto.orderId, authHeader);
     }
 
     // 1. Kiểm tra thời hạn 7 ngày (P07)
@@ -188,6 +392,18 @@ export class ReturnsRmaService {
       });
     }
 
+    const orderCeilings = Array.from(this.ceilings.values()).filter(
+      (c) => c.orderId === dto.orderId,
+    );
+    const requestedBySku = new Map(dto.lines.map((l) => [l.skuId, l.quantity]));
+    if (
+      orderCeilings.some(
+        (c) => (requestedBySku.get(c.skuId) || 0) < c.deliveredQty,
+      )
+    ) {
+      isFullOrderReturn = false;
+    }
+
     // 4. Tính toán phí vận chuyển hoàn (P09 vs P11)
     const isSellerError = [
       'WRONG_ITEM',
@@ -238,23 +454,29 @@ export class ReturnsRmaService {
 
     this.returnCases.set(rmaId, record);
 
-    // Lưu vào database Postgres schema support nếu kết nối sẵn sàng
-    try {
-      await this.persistRma(record);
-    } catch {
-      // Tiếp tục hoạt động với in-memory nếu DB chưa chạy trong môi trường test độc lập
+    if (this.dbReady()) {
+      await this.persistRma(record, record.timeline[0]);
     }
 
     return record;
   }
 
-  private async persistRma(record: ReturnCaseRecord): Promise<void> {
+  private async persistRma(
+    record: ReturnCaseRecord,
+    timelineEntry?: { status?: string; actor: string; note: string; at: string },
+  ): Promise<void> {
+    if (!this.dbReady()) return;
     await this.db.query(
       `INSERT INTO support.rma_requests (
         rma_id, order_id, customer_id, warehouse_id, reason, status,
-        refundable_amount_vnd, shipping_refund_vnd, is_exchange, notes, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-      ON CONFLICT (rma_id) DO UPDATE SET status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
+        refundable_amount_vnd, shipping_refund_vnd, is_exchange, linked_order_id, notes, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ON CONFLICT (rma_id) DO UPDATE SET
+        status = EXCLUDED.status,
+        is_exchange = EXCLUDED.is_exchange,
+        linked_order_id = EXCLUDED.linked_order_id,
+        notes = EXCLUDED.notes,
+        updated_at = EXCLUDED.updated_at`,
       [
         record.returnId,
         record.orderId,
@@ -265,6 +487,7 @@ export class ReturnsRmaService {
         record.refundableAmountVnd,
         record.shippingRefundVnd,
         record.isExchange,
+        record.linkedOrderId || null,
         record.rejectionNote || null,
         record.createdAt,
         record.updatedAt,
@@ -272,21 +495,46 @@ export class ReturnsRmaService {
     );
 
     for (const item of record.items) {
+      const qcStatus =
+        item.qcPassedQuantity > 0 ? 'PASS' : item.qcFailedQuantity > 0 ? 'FAIL' : 'PENDING';
       await this.db.query(
         `INSERT INTO support.rma_items (
           rma_id, sku_id, sku_name, quantity, unit_paid_vnd, qc_status
         ) VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (rma_id, sku_id) DO NOTHING`,
+        ON CONFLICT (rma_id, sku_id) DO UPDATE SET qc_status = EXCLUDED.qc_status`,
         [
           record.returnId,
           item.skuId,
           item.skuName,
           item.quantity,
           item.allocatedUnitPaidVnd,
-          'PENDING',
+          qcStatus,
         ],
       );
     }
+
+    if (timelineEntry) {
+      await this.db.query(
+        `INSERT INTO support.rma_timeline (rma_id, status, actor, note, created_at)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          record.returnId,
+          timelineEntry.status || record.status,
+          timelineEntry.actor,
+          timelineEntry.note,
+          timelineEntry.at,
+        ],
+      );
+    }
+  }
+
+  async syncRecord(record: ReturnCaseRecord): Promise<void> {
+    if (!this.dbReady()) return;
+    const latest = record.timeline[record.timeline.length - 1];
+    await this.persistRma(
+      record,
+      latest ? { status: record.status, ...latest } : undefined,
+    );
   }
 
   getReturn(returnId: string): ReturnCaseRecord {
@@ -504,6 +752,8 @@ export class ReturnsRmaService {
         'vi-VN',
       )} đ cho khách hàng (I03/SC08).`,
     });
+
+    await this.syncRecord(record);
 
     return record;
   }

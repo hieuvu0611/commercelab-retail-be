@@ -141,4 +141,73 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
     expect(qcPassed.items[0].qcPassedQuantity).toBe(1);
     expect(qcPassed.items[0].qcFailedQuantity).toBe(0);
   });
+
+  it('hydrates delivered multi-parcel order ceilings dynamically from order and fulfillment services', async () => {
+    const prevOrderUrl = process.env.ORDER_SERVICE_URL;
+    const prevFulfillmentUrl = process.env.FULFILLMENT_SERVICE_URL;
+    const prevFetch = global.fetch;
+    process.env.ORDER_SERVICE_URL = 'http://orders.test:8083';
+    process.env.FULFILLMENT_SERVICE_URL = 'http://fulfillment.test:8085';
+
+    const nowIso = new Date().toISOString();
+    global.fetch = jest.fn(async (url: any) => {
+      const target = String(url);
+      if (target.includes('/api/v1/orders/O-REAL-2P/tracking')) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              orderId: 'O-REAL-2P',
+              status: 'DELIVERED',
+              quantities: [
+                { skuId: 'SKU-CAMPUS-BACKPACK-BLACK-20L', ordered: 3, delivered: 3 },
+                { skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', ordered: 1, delivered: 1 },
+              ],
+              parcels: [
+                { shipmentId: 'SHP-O-REAL-2P-1', deliveredAt: nowIso },
+                { shipmentId: 'SHP-O-REAL-2P-2', deliveredAt: nowIso },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          data: {
+            orderId: 'O-REAL-2P',
+            shippingFeeVnd: 0,
+            totalPayableVnd: 1_163_750,
+            payment: { capturedAmountVnd: 1_163_750 },
+            items: [
+              { skuId: 'SKU-CAMPUS-BACKPACK-BLACK-20L', skuName: 'Campus', quantity: 3, allocatedUnitPaidVnd: 242_060 },
+              { skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', skuName: 'Commuter', quantity: 1, allocatedUnitPaidVnd: 437_570 },
+            ],
+          },
+        }),
+        { status: 200 },
+      );
+    }) as any;
+
+    try {
+      const rma = await service.openRmaRequest(
+        {
+          orderId: 'O-REAL-2P',
+          reason: 'DAMAGED',
+          lines: [{ skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', quantity: 1 }],
+        },
+        'user-lan',
+        'Bearer test-jwt',
+      );
+      expect(rma.status).toBe('REQUESTED');
+      expect(rma.refundableAmountVnd).toBe(437_570);
+      expect(rma.shippingRefundVnd).toBe(0);
+      expect(paymentClient.getSummary('O-REAL-2P')?.capturedAmount).toBe(1_163_750);
+    } finally {
+      global.fetch = prevFetch;
+      if (prevOrderUrl === undefined) delete process.env.ORDER_SERVICE_URL;
+      else process.env.ORDER_SERVICE_URL = prevOrderUrl;
+      if (prevFulfillmentUrl === undefined) delete process.env.FULFILLMENT_SERVICE_URL;
+      else process.env.FULFILLMENT_SERVICE_URL = prevFulfillmentUrl;
+    }
+  });
 });
