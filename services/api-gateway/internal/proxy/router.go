@@ -102,6 +102,8 @@ func (rt *Router) resolveTarget(path string) string {
 		return rt.targets.Fulfillment
 	case strings.HasPrefix(path, "/api/v1/admin/vouchers") || strings.HasPrefix(path, "/api/v1/admin/orders"):
 		return rt.targets.Order
+	case strings.HasPrefix(path, "/api/v1/admin/ledger"):
+		return rt.targets.Ledger
 	case path == "/auth/refresh" || strings.HasPrefix(path, "/api/v1/auth") || strings.HasPrefix(path, "/api/v1/users") || strings.HasPrefix(path, "/api/v1/admin"):
 		return rt.targets.IAM
 	case strings.HasPrefix(path, "/api/v1/products") || strings.HasPrefix(path, "/api/v1/categories") || strings.HasPrefix(path, "/api/v1/quotes") || strings.HasPrefix(path, "/api/v1/carts"):

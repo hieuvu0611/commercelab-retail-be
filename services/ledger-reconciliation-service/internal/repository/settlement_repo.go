@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/domain"
@@ -295,6 +296,7 @@ func (r *SettlementRepository) MatchBatch(
 	ctx context.Context,
 	batchID string,
 	ledgerRepo *LedgerRepository,
+	caseRepo *CaseRepository,
 	actor string,
 ) (domain.BatchMatchSummary, error) {
 	if _, err := r.GetSettlementBatch(ctx, batchID); err != nil {
@@ -327,6 +329,26 @@ func (r *SettlementRepository) MatchBatch(
 		} else {
 			summary.DiscrepancyLines++
 			hasDiscrepancy = true
+
+			// Create or record open discrepancy case
+			if caseRepo != nil {
+				caseID := fmt.Sprintf("case_%s_%d", batchID, line.LineNumber)
+				now := time.Now().UTC()
+				_ = caseRepo.CreateCase(ctx, domain.ReconciliationCase{
+					CaseID:            caseID,
+					BatchID:           batchID,
+					LineNumber:        line.LineNumber,
+					OrderID:           line.OrderID,
+					TransactionRef:    line.TransactionRef,
+					ExpectedPayoutVND: res.ExpectedPayoutVND,
+					ActualPayoutVND:   res.ActualPayoutVND,
+					DiscrepancyVND:    res.DiscrepancyVND,
+					CauseCategory:     "UNCLASSIFIED",
+					Status:            "OPEN",
+					CreatedAt:         now,
+					UpdatedAt:         now,
+				})
+			}
 		}
 
 		summary.Results = append(summary.Results, res)

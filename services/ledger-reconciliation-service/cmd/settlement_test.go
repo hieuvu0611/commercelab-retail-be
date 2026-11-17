@@ -14,7 +14,7 @@ func TestSettlementImportAPI(t *testing.T) {
 	authtest.Configure(t)
 	repo := repository.NewLedgerRepository(nil)
 	settleRepo := repository.NewSettlementRepository(nil)
-	srv := NewServer(repo, settleRepo, nil, false)
+	srv := NewServer(repo, settleRepo, nil, nil, false)
 
 	financeStaff := auth.Identity{UserID: "fin-01", Roles: []string{"FINANCE"}, WarehouseScopes: []string{"ALL"}}
 
