@@ -471,7 +471,7 @@ export class ReturnsRmaService {
     // Ngưỡng phê duyệt hoàn tiền (P05/P10):
     // Nếu hoàn > 500.000đ: Bắt buộc phải có phiếu duyệt Maker-Checker đã APPROVED từ Quản lý
     if (amountVnd > 500_000) {
-      const approval = this.makerChecker.getApprovalByReference(record.returnId);
+      const approval = await this.makerChecker.getApprovalByReference(record.returnId);
       if (!approval || approval.status !== 'APPROVED') {
         throw new ForbiddenException(
           `Hoàn tiền ${amountVnd.toLocaleString(

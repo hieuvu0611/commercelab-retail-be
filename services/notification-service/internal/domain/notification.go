@@ -1,11 +1,13 @@
 package domain
 
 import (
+	"context"
+	"log"
 	"sync"
 	"time"
 )
 
-// NotificationItem represents a notification message stored in MongoDB notify_user_inboxes (with 90-day TTL).
+// NotificationItem represents a notification message stored in the user's inbox.
 type NotificationItem struct {
 	NotificationID string         `json:"notificationId"`
 	EventID        string         `json:"eventId"`
@@ -21,6 +23,7 @@ type NotificationItem struct {
 
 type Dispatcher struct {
 	mu          sync.Mutex
+	store       InboxStore
 	dedup       map[string]bool
 	inboxes     map[string][]NotificationItem
 	subscribers map[string][]chan NotificationItem
@@ -34,38 +37,55 @@ func NewDispatcher() *Dispatcher {
 	}
 }
 
+// NewDispatcherWithStore creates a Dispatcher backed by a persistent InboxStore.
+func NewDispatcherWithStore(store InboxStore) *Dispatcher {
+	d := NewDispatcher()
+	d.store = store
+	return d
+}
+
 // Dispatch saves and broadcasts a notification, strictly enforcing idempotency per (eventId + recipientId + channel).
 func (d *Dispatcher) Dispatch(n NotificationItem) (NotificationItem, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	n = normalizeItem(n)
 
+	if d.store != nil {
+		saved, dup, err := d.store.InsertIdempotent(context.Background(), n)
+		if err != nil {
+			log.Printf("[notification-service] store dispatch failed: %v", err)
+			return n, false
+		}
+		if dup {
+			return saved, true
+		}
+		d.broadcast(saved)
+		return saved, false
+	}
+
+	d.mu.Lock()
 	dedupKey := n.EventID + "|" + n.RecipientID + "|" + n.Channel
 	if d.dedup[dedupKey] {
+		d.mu.Unlock()
 		return n, true // Already dispatched, drop duplicate to avoid spamming
 	}
 	d.dedup[dedupKey] = true
-
-	if n.NotificationID == "" {
-		n.NotificationID = "NOTI-" + time.Now().Format("20060102150405") + "-" + n.EventID
-	}
-	if n.CreatedAt.IsZero() {
-		n.CreatedAt = time.Now().UTC()
-	}
-
 	d.inboxes[n.RecipientID] = append([]NotificationItem{n}, d.inboxes[n.RecipientID]...)
+	d.mu.Unlock()
 
-	// Broadcast to active SSE subscribers for this recipient
+	d.broadcast(n)
+	return n, false
+}
+
+func (d *Dispatcher) broadcast(n NotificationItem) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if subs, ok := d.subscribers[n.RecipientID]; ok {
 		for _, ch := range subs {
 			select {
 			case ch <- n:
 			default:
-				// Skip if buffer is full to prevent blocking
 			}
 		}
 	}
-
-	return n, false
 }
 
 // Subscribe returns a channel receiving real-time notifications for the given recipient, and an unsubscribe cleanup function.
@@ -96,6 +116,14 @@ func (d *Dispatcher) Subscribe(recipientID string) (<-chan NotificationItem, fun
 }
 
 func (d *Dispatcher) ListInbox(recipientID string) []NotificationItem {
+	if d.store != nil {
+		items, err := d.store.ListInbox(context.Background(), recipientID)
+		if err != nil {
+			log.Printf("[notification-service] list inbox failed: %v", err)
+			return []NotificationItem{}
+		}
+		return items
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	items := d.inboxes[recipientID]
@@ -105,6 +133,14 @@ func (d *Dispatcher) ListInbox(recipientID string) []NotificationItem {
 }
 
 func (d *Dispatcher) UnreadCount(recipientID string) int {
+	if d.store != nil {
+		cnt, err := d.store.UnreadCount(context.Background(), recipientID)
+		if err != nil {
+			log.Printf("[notification-service] unread count failed: %v", err)
+			return 0
+		}
+		return cnt
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	count := 0
@@ -117,6 +153,14 @@ func (d *Dispatcher) UnreadCount(recipientID string) int {
 }
 
 func (d *Dispatcher) MarkAsRead(recipientID, notificationID string) bool {
+	if d.store != nil {
+		ok, err := d.store.MarkAsRead(context.Background(), recipientID, notificationID)
+		if err != nil {
+			log.Printf("[notification-service] mark read failed: %v", err)
+			return false
+		}
+		return ok
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	items := d.inboxes[recipientID]
@@ -130,6 +174,14 @@ func (d *Dispatcher) MarkAsRead(recipientID, notificationID string) bool {
 }
 
 func (d *Dispatcher) MarkAllAsRead(recipientID string) int {
+	if d.store != nil {
+		cnt, err := d.store.MarkAllAsRead(context.Background(), recipientID)
+		if err != nil {
+			log.Printf("[notification-service] mark all read failed: %v", err)
+			return 0
+		}
+		return cnt
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	count := 0

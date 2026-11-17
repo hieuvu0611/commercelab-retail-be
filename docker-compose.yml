@@ -368,6 +368,13 @@ services:
     environment:
       <<: *go-env
       LEDGER_RECONCILIATION_PORT: 8086
+      DATABASE_URL_LEDGER: postgres://ledger_svc_user:ledger_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=ledger
+      MIGRATE_ON_START: "true"
+      S3_ENDPOINT: http://object-storage:9000
+      S3_PUBLIC_ENDPOINT: http://localhost:${S3_HOST_PORT:-9000}
+      S3_AUTO_CREATE_BUCKET: "true"
+      AWS_ACCESS_KEY_ID: ${S3_DEV_ACCESS_KEY:-devstorage}
+      AWS_SECRET_ACCESS_KEY: ${S3_DEV_SECRET_KEY:-devstorage-secret}
     depends_on: *infra-healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8086/health"]
@@ -430,9 +437,15 @@ services:
       <<: [*go-env, *jwt-env]
       NOTIFICATION_PORT: 8089
       REDPANDA_BROKERS: redpanda:9092
+      DATABASE_URL_NOTIFICATIONS: postgres://notify_svc_user:notify_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=notifications
+      MIGRATE_ON_START: "true"
     ports:
       - "${NOTIFICATION_SERVICE_HOST_PORT:-8089}:8089"
-    depends_on: *infra-healthy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8089/health"]
       interval: 5s

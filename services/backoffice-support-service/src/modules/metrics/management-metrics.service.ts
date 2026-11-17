@@ -94,7 +94,9 @@ export class ManagementMetricsService {
     let overdueSlaCount = 0;
 
     if (this.exceptionCases) {
-      const openCases = this.exceptionCases.listCases().filter((c) => c.status !== 'RESOLVED_WITH_EVIDENCE');
+      const openCases = (await this.exceptionCases.listCases()).filter(
+        (c) => c.status !== 'RESOLVED_WITH_EVIDENCE',
+      );
       totalOpenCases = openCases.length;
       const nowMs = now.getTime();
 

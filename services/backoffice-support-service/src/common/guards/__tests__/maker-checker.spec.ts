@@ -186,11 +186,11 @@ describe('MakerCheckerPolicyService', () => {
       expect(created.approvalId).toBeDefined();
       expect(created.status).toBe('PENDING');
 
-      const item = service.getApproval(created.approvalId);
+      const item = await service.getApproval(created.approvalId);
       expect(item).toBeDefined();
       expect(item?.referenceId).toBe('ST-001');
 
-      const list = service.listApprovals({ status: 'PENDING', requestType: 'STOCK_ADJUSTMENT' });
+      const list = await service.listApprovals({ status: 'PENDING', requestType: 'STOCK_ADJUSTMENT' });
       expect(list.length).toBe(1);
     });
 
