@@ -488,8 +488,8 @@ services:
     image: clickhouse/clickhouse-server:24.8-alpine
     restart: unless-stopped
     cpus: 0.5
-    mem_limit: 512m
-    memswap_limit: 512m
+    mem_limit: 1024m
+    memswap_limit: 1024m
     environment:
       CLICKHOUSE_DB: commerce_analytics
       CLICKHOUSE_USER: analytics
