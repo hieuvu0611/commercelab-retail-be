@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
@@ -77,6 +78,11 @@ func NewServer(
 func main() {
 	port := config.EnvOrDefault("LEDGER_RECONCILIATION_PORT", "8086")
 	pgURL := config.EnvOrDefault("DATABASE_URL_LEDGER", config.EnvOrDefault("DATABASE_URL", "postgres://ledger_svc_user:ledger_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=ledger"))
+	secrets := config.NewLoader()
+	auth.LoadSecrets(secrets)
+	if err := secrets.Err(); err != nil {
+		log.Fatalf("[ledger-reconciliation-service] %v", err)
+	}
 	s3Client := s3.NewFromEnv()
 
 	ctx := context.Background()
