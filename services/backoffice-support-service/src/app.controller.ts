@@ -279,17 +279,98 @@ export class AppController {
   // EXCEPTION CASES & APPROVALS
   // ==========================================
 
+  @Post('/api/v1/backoffice/exception-cases')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
+  createExceptionCase(
+    @Req() req: any,
+    @Body() body: {
+      referenceId: string;
+      category: any;
+      summary: string;
+      evidenceUrl?: string;
+    },
+  ) {
+    const actor = req.user?.userId || 'system-staff';
+    const item = this.exceptionCases.createCase({
+      ...body,
+      actor,
+    });
+    return new ApiResult(item, 'Exception case created successfully');
+  }
+
   @Get('/api/v1/backoffice/exception-cases')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'ADMIN')
-  listExceptionCases() {
-    const items = this.exceptionCases.listOpenCases();
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
+  listExceptionCases(
+    @Query('status') status?: string,
+    @Query('category') category?: string,
+    @Query('ownerId') ownerId?: string,
+    @Query('overdueOnly') overdueOnly?: string,
+  ) {
+    const items = this.exceptionCases.listCases({
+      status,
+      category,
+      ownerId,
+      overdueOnly: overdueOnly === 'true',
+    });
     return new ApiResult(items, 'Exception cases retrieved successfully', {
       total: items.length,
       page: 1,
       pageCount: 1,
-      limit: 20,
+      limit: items.length || 20,
     });
+  }
+
+  @Get('/api/v1/backoffice/exception-cases/:caseId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
+  getExceptionCaseDetail(@Param('caseId') caseId: string) {
+    const item = this.exceptionCases.getCase(caseId);
+    return new ApiResult(item, 'Exception case retrieved successfully');
+  }
+
+  @Post('/api/v1/backoffice/exception-cases/:caseId/assign')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  assignExceptionCase(
+    @Req() req: any,
+    @Param('caseId') caseId: string,
+    @Body('ownerId') ownerId: string,
+  ) {
+    const actor = req.user?.userId || 'ops-lead';
+    const item = this.exceptionCases.assignCase(caseId, ownerId, actor);
+    return new ApiResult(item, `Exception case assigned to ${ownerId} successfully`);
+  }
+
+  @Post('/api/v1/backoffice/exception-cases/:caseId/timeline')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE_STAFF', 'FINANCE_MGR', 'ADMIN')
+  appendCaseTimeline(
+    @Req() req: any,
+    @Param('caseId') caseId: string,
+    @Body() body: { action: string; evidenceUrl?: string; note?: string },
+  ) {
+    const actor = req.user?.userId || 'staff';
+    const item = this.exceptionCases.appendTimeline(caseId, {
+      ...body,
+      actor,
+    });
+    return new ApiResult(item, 'Timeline entry added to exception case');
+  }
+
+  @Post('/api/v1/backoffice/exception-cases/:caseId/resolve')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  resolveExceptionCase(
+    @Req() req: any,
+    @Param('caseId') caseId: string,
+    @Body('evidence') evidence: string,
+    @Body('note') note?: string,
+  ) {
+    const actor = req.user?.userId || 'ops-lead';
+    const item = this.exceptionCases.resolveCase(caseId, actor, evidence, note);
+    return new ApiResult(item, 'Exception case resolved with evidence successfully');
   }
 
   @Post('/api/v1/backoffice/approvals/validate')
