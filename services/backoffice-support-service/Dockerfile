@@ -4,10 +4,10 @@ RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml tsconfig.json ./
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
 COPY src ./src
-RUN pnpm run build && pnpm prune --prod
+RUN pnpm run build && pnpm prune --prod --ignore-scripts
 
 FROM node:20-alpine
 WORKDIR /app
