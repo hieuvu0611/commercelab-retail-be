@@ -25,7 +25,7 @@ describe('ClickhouseAnalyticsService (SC12 OLAP)', () => {
     const chCalls: string[] = [];
     global.fetch = jest.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes('/api/v1/admin/orders')) {
+      if (url.includes('/api/v1/orders/internal')) {
         return new Response(
           JSON.stringify({
             data: [
@@ -36,7 +36,7 @@ describe('ClickhouseAnalyticsService (SC12 OLAP)', () => {
           { status: 200 },
         );
       }
-      if (url.includes('/api/v1/admin/shipments')) {
+      if (url.includes('/api/v1/shipments/internal')) {
         return new Response(
           JSON.stringify({
             data: [
@@ -47,7 +47,7 @@ describe('ClickhouseAnalyticsService (SC12 OLAP)', () => {
           { status: 200 },
         );
       }
-      if (url.includes('/api/v1/admin/inventory/stock')) {
+      if (url.includes('/api/v1/inventory/internal/stock')) {
         return new Response(
           JSON.stringify({
             data: [{ skuId: 'SKU-1', warehouseId: 'WH-HCM-01', availableQty: 12, reservedQty: 2 }],

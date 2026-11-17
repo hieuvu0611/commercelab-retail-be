@@ -56,17 +56,19 @@ export class AppController {
   @UseGuards(JwtAuthGuard)
   async createReturn(@Req() req: any, @Body() body: CreateReturnRequestDto) {
     const customerId = req.user?.userId || 'cust-default';
-    const result = await this.returnsService.openRmaRequest(body, customerId);
+    const authHeader = req.headers?.authorization as string | undefined;
+    const result = await this.returnsService.openRmaRequest(body, customerId, authHeader);
     return new ApiResult(result, 'Return request created successfully');
   }
 
   @Get('/api/v1/returns')
   @UseGuards(JwtAuthGuard)
-  listReturns(
+  async listReturns(
     @Req() req: any,
     @Query('orderId') orderId?: string,
     @Query('status') status?: string,
   ) {
+    await this.returnsService.ensureHydrated();
     const customerId = req.user?.roles?.includes('ADMIN') ? undefined : req.user?.userId;
     const items = this.returnsService.listReturns({ orderId, status, customerId });
     return new ApiResult(items, 'Returns retrieved successfully', {

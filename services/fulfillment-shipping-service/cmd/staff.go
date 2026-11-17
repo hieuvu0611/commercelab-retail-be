@@ -8,6 +8,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
@@ -80,6 +81,7 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(h))
 	}
 	mux.Handle("GET /api/v1/admin/shipments", staff(listShipments(d)))
+	mux.Handle("GET /api/v1/shipments/internal", internalauth.Require(listShipments(d)))
 	mux.Handle("GET /api/v1/admin/orders/{orderId}/shipments", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR", "CSKH", "SUPPORT_AGENT", "SUPPORT_LEAD", "FINANCE", "FINANCE_MGR")(listOrderShipments(d))))
 	mux.Handle("GET /api/v1/admin/fulfillment-cases", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD")(listCases(d))))
 	mux.Handle("GET /api/v1/admin/shipments/{shipmentId}", staff(withShipment(d, func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
@@ -96,13 +98,18 @@ func listShipments(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFrom(r.Context())
 		q := r.URL.Query()
-		f := shipment.Filter{Status: shipment.Status(q.Get("status")), Warehouses: claims.WarehouseScopes}
+		f := shipment.Filter{Status: shipment.Status(q.Get("status"))}
 		if f.Status != "" && !knownStatuses[f.Status] {
 			badParam(w, r, "status", "status is not a shipment status")
 			return
 		}
-		for _, scope := range claims.WarehouseScopes {
-			f.AllWarehouses = f.AllWarehouses || scope == auth.AllWarehouses
+		if claims == nil {
+			f.AllWarehouses = true
+		} else {
+			f.Warehouses = claims.WarehouseScopes
+			for _, scope := range claims.WarehouseScopes {
+				f.AllWarehouses = f.AllWarehouses || scope == auth.AllWarehouses
+			}
 		}
 		page, limit := 1, defaultPageSize
 		var err error
