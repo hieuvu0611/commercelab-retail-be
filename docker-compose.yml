@@ -368,7 +368,7 @@ services:
       args:
         SERVICE_NAME: ledger-reconciliation-service
     environment:
-      <<: *go-env
+      <<: [*go-env, *jwt-env]
       LEDGER_RECONCILIATION_PORT: 8086
       DATABASE_URL_LEDGER: postgres://ledger_svc_user:ledger_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=ledger
       MIGRATE_ON_START: "true"
