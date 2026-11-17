@@ -12,6 +12,7 @@ import {
 import { ApprovalCandidate, ApprovalType, MakerCheckerPolicyService } from './common/guards/maker-checker.guard';
 import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
+import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
 import { CreateReturnRequestDto } from './modules/returns-rma/create-return.dto';
 import { ApiResult } from './common/http/api-response.interceptor';
 import { DatabaseService } from './database/database.service';
@@ -26,6 +27,7 @@ export class AppController {
     private readonly returnsService: ReturnsRmaService,
     private readonly exceptionCases: ExceptionCasesService,
     private readonly databaseService: DatabaseService,
+    private readonly auditLogs: AuditLogsService,
   ) {}
 
   @Get('/health')
@@ -371,6 +373,35 @@ export class AppController {
     const actor = req.user?.userId || 'ops-lead';
     const item = this.exceptionCases.resolveCase(caseId, actor, evidence, note);
     return new ApiResult(item, 'Exception case resolved with evidence successfully');
+  }
+
+  // ==========================================
+  // AUDIT LOGS QUERY API (P11-T04)
+  // ==========================================
+
+  @Get('/api/v1/backoffice/audit-logs')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async listAuditLogs(
+    @Query('actorId') actorId?: string,
+    @Query('event') event?: string,
+    @Query('source') source?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const items = await this.auditLogs.listAuditLogs({
+      actorId,
+      event,
+      source,
+      from,
+      to,
+    });
+    return new ApiResult(items, 'Audit logs retrieved successfully', {
+      total: items.length,
+      page: 1,
+      pageCount: 1,
+      limit: items.length || 50,
+    });
   }
 
   @Post('/api/v1/backoffice/approvals/validate')

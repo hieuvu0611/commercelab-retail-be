@@ -8,6 +8,7 @@ import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
 import { DatabaseModule } from './database/database.module';
 import { PaymentClient } from './modules/returns-rma/payment.client';
+import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
 
 @Module({
   imports: [DatabaseModule],
@@ -20,6 +21,7 @@ import { PaymentClient } from './modules/returns-rma/payment.client';
     ReturnsRmaService,
     ExceptionCasesService,
     PaymentClient,
+    AuditLogsService,
   ],
 })
 export class AppModule {}
