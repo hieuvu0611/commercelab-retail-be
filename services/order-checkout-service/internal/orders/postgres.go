@@ -23,11 +23,21 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore
 const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), applied_promotions_json, status, payment_method, payment_status,
 	failure_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, refund_pending_vnd, refunded_amount_vnd, version, expires_at, created_at, updated_at`
 
-func scanOrder(row pgx.Row) (Order, error) {
+func orderScanDest(o *Order, promoRaw *[]byte) []any {
+	return []any{
+		&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, promoRaw,
+		&o.Status, &o.PaymentMethod, &o.PaymentStatus, &o.FailureCode,
+		&o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND,
+		&o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND,
+		&o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt,
+	}
+}
+
+func scanOrder(row pgx.Row, extraDest ...any) (Order, error) {
 	var o Order
 	var promoRaw []byte
-	err := row.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &promoRaw, &o.Status, &o.PaymentMethod, &o.PaymentStatus,
-		&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND, &o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
+	dest := append(orderScanDest(&o, &promoRaw), extraDest...)
+	err := row.Scan(dest...)
 	if len(promoRaw) > 0 {
 		_ = json.Unmarshal(promoRaw, &o.AppliedPromotions)
 	}
@@ -226,12 +236,12 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	defer rows.Close()
 	out := []Order{}
 	for rows.Next() {
-		var o Order
-		if err := rows.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentMethod, &o.PaymentStatus,
-			&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND,
-			&o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt, &o.ItemCount); err != nil {
+		var itemCount int64
+		o, err := scanOrder(rows, &itemCount)
+		if err != nil {
 			return nil, 0, dependency.Wrap(err)
 		}
+		o.ItemCount = itemCount
 		out = append(out, o)
 	}
 	return out, total, dependency.Wrap(rows.Err())

@@ -465,19 +465,19 @@ services:
     image: opensearchproject/opensearch:2.17.1
     restart: unless-stopped
     cpus: 0.5
-    mem_limit: 640m
-    memswap_limit: 640m
+    mem_limit: 1024m
+    memswap_limit: 1024m
     environment:
       discovery.type: single-node
       DISABLE_SECURITY_PLUGIN: "true"
-      OPENSEARCH_JAVA_OPTS: "-Xms256m -Xmx256m"
+      OPENSEARCH_JAVA_OPTS: "-Xms384m -Xmx384m"
       bootstrap.memory_lock: "false"
     ports:
       - "${OPENSEARCH_HOST_PORT:-9200}:9200"
     volumes:
       - opensearch_data:/usr/share/opensearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:9200/_cluster/health >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 15
@@ -499,7 +499,7 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- 'http://localhost:8123/ping' | grep -q Ok"]
+      test: ["CMD-SHELL", "wget -qO- 'http://127.0.0.1:8123/ping' | grep -q Ok"]
       interval: 5s
       timeout: 5s
       retries: 15
