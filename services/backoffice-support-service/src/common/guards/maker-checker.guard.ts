@@ -20,8 +20,10 @@ export interface ApprovalRecord {
   quantityDiff: number;
   makerUserId: string;
   checkerUserId?: string;
+  checkerRole?: string;
   status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXECUTED';
   reason: string;
+  decisionNote?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -166,6 +168,8 @@ export class MakerCheckerPolicyService {
     const nowIso = new Date().toISOString();
     record.status = action === 'APPROVE' ? 'APPROVED' : 'REJECTED';
     record.checkerUserId = checkerUserId;
+    record.checkerRole = checkerRole;
+    record.decisionNote = note || '';
     record.updatedAt = nowIso;
     if (note) {
       record.reason = `${record.reason} | Note: ${note}`;
@@ -175,9 +179,9 @@ export class MakerCheckerPolicyService {
       try {
         await this.db.query(
           `UPDATE support.approval_requests
-           SET status = $1, checker_user_id = $2
-           WHERE approval_id = $3`,
-          [record.status, checkerUserId, approvalId],
+           SET status = $1, checker_user_id = $2, decision_note = $3, updated_at = $4
+           WHERE approval_id = $5`,
+          [record.status, checkerUserId, record.decisionNote, record.updatedAt, approvalId],
         );
       } catch {
         // Fallback in-memory
@@ -187,13 +191,20 @@ export class MakerCheckerPolicyService {
     return record;
   }
 
-  listApprovals(filter?: { status?: string; requestType?: string }): ApprovalRecord[] {
+  getApproval(approvalId: string): ApprovalRecord | undefined {
+    return this.approvals.get(approvalId);
+  }
+
+  listApprovals(filter?: { status?: string; requestType?: string; makerUserId?: string }): ApprovalRecord[] {
     let list = Array.from(this.approvals.values());
     if (filter?.status) {
       list = list.filter((a) => a.status === filter.status);
     }
     if (filter?.requestType) {
       list = list.filter((a) => a.requestType === filter.requestType);
+    }
+    if (filter?.makerUserId) {
+      list = list.filter((a) => a.makerUserId === filter.makerUserId);
     }
     return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }

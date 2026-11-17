@@ -2,13 +2,14 @@ import {
   Body,
   Controller,
   Get,
+  NotFoundException,
   Param,
   Post,
   Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApprovalCandidate, MakerCheckerPolicyService } from './common/guards/maker-checker.guard';
+import { ApprovalCandidate, ApprovalType, MakerCheckerPolicyService } from './common/guards/maker-checker.guard';
 import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
 import { CreateReturnRequestDto } from './modules/returns-rma/create-return.dto';
@@ -179,15 +180,48 @@ export class AppController {
     return new ApiResult(record, 'Refund approval request created successfully');
   }
 
+  @Post('/api/v1/backoffice/approvals')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'PROCUREMENT_STAFF', 'PROCUREMENT_MGR', 'ADMIN')
+  async createApproval(
+    @Req() req: any,
+    @Body() body: {
+      requestType: ApprovalType;
+      referenceId: string;
+      amountVnd: number;
+      quantityDiff?: number;
+      reason: string;
+    },
+  ) {
+    const makerUserId = req.user?.userId || 'staff-maker';
+    const record = await this.makerChecker.createApprovalRequest({
+      ...body,
+      makerUserId,
+    });
+    return new ApiResult(record, 'Approval request created successfully');
+  }
+
   @Get('/api/v1/backoffice/approvals')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'ADMIN')
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'PROCUREMENT_MGR', 'ADMIN')
   listApprovals(
     @Query('status') status?: string,
     @Query('requestType') requestType?: any,
+    @Query('makerUserId') makerUserId?: string,
   ) {
-    const list = this.makerChecker.listApprovals({ status, requestType });
+    const list = this.makerChecker.listApprovals({ status, requestType, makerUserId });
     return new ApiResult(list, 'Approvals retrieved successfully');
+  }
+
+  @Get('/api/v1/backoffice/approvals/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'PROCUREMENT_MGR', 'ADMIN')
+  getApprovalDetail(@Param('id') id: string) {
+    const item = this.makerChecker.getApproval(id);
+    if (!item) {
+      throw new NotFoundException(`Approval request ${id} not found`);
+    }
+    return new ApiResult(item, 'Approval detail retrieved successfully');
   }
 
   @Post('/api/v1/backoffice/approvals/:id/decide')
