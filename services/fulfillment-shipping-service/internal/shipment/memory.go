@@ -52,7 +52,32 @@ func (m *MemoryStore) Get(_ context.Context, shipmentID string) (Shipment, error
 }
 
 func (m *MemoryStore) GetByOrder(ctx context.Context, orderID string) (Shipment, error) {
-	return m.Get(ctx, ID(orderID))
+	list, err := m.ListByOrder(ctx, orderID)
+	if err != nil || len(list) == 0 {
+		return Shipment{}, ErrNotFound
+	}
+	return list[0], nil
+}
+
+func (m *MemoryStore) ListByOrder(_ context.Context, orderID string) ([]Shipment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Shipment
+	for _, s := range m.byID {
+		if s.OrderID == orderID {
+			out = append(out, clone(s))
+		}
+	}
+	if len(out) == 0 {
+		return nil, ErrNotFound
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ParcelIndex != out[j].ParcelIndex {
+			return out[i].ParcelIndex < out[j].ParcelIndex
+		}
+		return out[i].ShipmentID < out[j].ShipmentID
+	})
+	return out, nil
 }
 
 func (m *MemoryStore) List(_ context.Context, f Filter) ([]Shipment, int, error) {

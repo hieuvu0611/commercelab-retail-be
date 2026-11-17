@@ -37,6 +37,15 @@ type Item struct {
 	AllocatedUnitPaidVND int64  `json:"allocatedUnitPaidVnd"`
 }
 
+// Parcel is one warehouse's fulfillment allocation of an order (at most 2 parcels per order in Stage 3).
+type Parcel struct {
+	ParcelSeq    int    `json:"parcelSeq"`
+	WarehouseID  string `json:"warehouseId"`
+	Items        []Item `json:"items"`
+	CodAmountVND int64  `json:"codAmountVnd,omitempty"`
+	Status       string `json:"status"`
+}
+
 // Order is a placed order. Status is the saga state; PaymentStatus is tracked separately.
 type Order struct {
 	OrderID          string     `json:"orderId"`
@@ -58,6 +67,7 @@ type Order struct {
 	RefundedVND      int64      `json:"refundedAmountVnd"`
 	ItemCount        int64      `json:"itemCount,omitempty"` // set by Query, which does not load items
 	Items            []Item     `json:"items"`
+	Parcels          []Parcel   `json:"parcels,omitempty"`
 	Version          int64      `json:"version"`
 	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt        time.Time  `json:"createdAt"`

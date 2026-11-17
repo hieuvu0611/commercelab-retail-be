@@ -5,6 +5,7 @@ package shipment
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
@@ -53,6 +54,8 @@ type Shipment struct {
 	OrderID      string     `json:"orderId"`
 	UserID       string     `json:"-"`
 	WarehouseID        string     `json:"warehouseId"`
+	ParcelIndex        int        `json:"parcelIndex,omitempty"`
+	TotalParcels       int        `json:"totalParcels,omitempty"`
 	PaymentMethod      string     `json:"paymentMethod,omitempty"`
 	CodAmountToCollect int64      `json:"codAmountToCollect,omitempty"`
 	Status             Status     `json:"status"`
@@ -91,16 +94,32 @@ func New(orderID, userID, warehouseID string, items []Item, now time.Time) (Ship
 		merged = append(merged, it)
 	}
 	return Shipment{ShipmentID: ID(orderID), OrderID: orderID, UserID: userID, WarehouseID: warehouseID,
+		ParcelIndex: 1, TotalParcels: 1,
 		PaymentMethod: "PREPAID", CodAmountToCollect: 0,
 		Status: StatusPendingPick, Items: merged, Version: 1, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}, nil
 }
 
 // NewWithCOD builds a parcel with payment method and COD collection amount specified.
 func NewWithCOD(orderID, userID, warehouseID, paymentMethod string, codAmount int64, items []Item, now time.Time) (Shipment, error) {
+	return NewParcel(orderID, userID, warehouseID, paymentMethod, codAmount, 1, 1, items, now)
+}
+
+// NewParcel builds one parcel of a single-parcel or multi-parcel order.
+func NewParcel(orderID, userID, warehouseID, paymentMethod string, codAmount int64, parcelIndex, totalParcels int, items []Item, now time.Time) (Shipment, error) {
 	s, err := New(orderID, userID, warehouseID, items, now)
 	if err != nil {
 		return Shipment{}, err
 	}
+	if totalParcels <= 1 {
+		parcelIndex, totalParcels = 1, 1
+	} else {
+		if parcelIndex < 1 {
+			parcelIndex = 1
+		}
+		s.ShipmentID = fmt.Sprintf("SHP-%s-%d", orderID, parcelIndex)
+	}
+	s.ParcelIndex = parcelIndex
+	s.TotalParcels = totalParcels
 	if paymentMethod == "" {
 		paymentMethod = "PREPAID"
 	}
@@ -159,4 +178,9 @@ type Store interface {
 	SaveWith(ctx context.Context, s Shipment, expectedVersion int64, o SaveOptions) error
 	// ListCases returns cases oldest first and the number of matches ignoring paging.
 	ListCases(ctx context.Context, f CaseFilter) ([]Case, int, error)
+}
+
+// MultiParcelStore is an optional extension of Store returning all parcels of an order.
+type MultiParcelStore interface {
+	ListByOrder(ctx context.Context, orderID string) ([]Shipment, error)
 }

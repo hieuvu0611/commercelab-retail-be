@@ -66,7 +66,7 @@ func (c *Client) States(ctx context.Context, skuIDs []string) (map[string]string
 }
 
 func (c *Client) batch(ctx context.Context, skuIDs []string) (map[string]string, error) {
-	endpoint := c.baseURL + "/api/v1/inventory/availability?skuIds=" + url.QueryEscape(strings.Join(skuIDs, ","))
+	endpoint := c.baseURL + "/api/v1/inventory/availability?warehouse=ALL&skuIds=" + url.QueryEscape(strings.Join(skuIDs, ","))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err

@@ -25,9 +25,31 @@ func (s *Service) orderConfirmed(o orders.Order, capturedVND int64) events.Domai
 	for i, it := range o.Items {
 		items[i] = map[string]any{"skuId": it.SkuID, "quantity": it.Quantity}
 	}
-	return s.orderEvent(events.EventOrderConfirmed, o, map[string]any{
+	payload := map[string]any{
 		"totalPayableVnd": o.TotalPayableVND, "capturedAmountVnd": capturedVND, "items": items, "warehouseId": o.WarehouseID,
-	})
+	}
+	if o.PaymentMethod == PaymentMethodCOD {
+		payload["paymentMethod"] = o.PaymentMethod
+		payload["codAmountToCollect"] = o.TotalPayableVND
+	}
+	if len(o.Parcels) > 1 {
+		parcels := make([]map[string]any, len(o.Parcels))
+		for i, p := range o.Parcels {
+			pItems := make([]map[string]any, len(p.Items))
+			for j, it := range p.Items {
+				pItems[j] = map[string]any{"skuId": it.SkuID, "quantity": it.Quantity}
+			}
+			parcels[i] = map[string]any{
+				"parcelSeq":          p.ParcelSeq,
+				"totalParcels":       len(o.Parcels),
+				"warehouseId":        p.WarehouseID,
+				"codAmountToCollect": p.CodAmountVND,
+				"items":              pItems,
+			}
+		}
+		payload["parcels"] = parcels
+	}
+	return s.orderEvent(events.EventOrderConfirmed, o, payload)
 }
 
 func (s *Service) orderFailed(o orders.Order, failureCode, paymentStatus string) events.DomainEvent {

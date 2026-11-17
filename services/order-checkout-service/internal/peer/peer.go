@@ -104,6 +104,46 @@ func (s *Stock) Reserve(ctx context.Context, orderID, warehouseID string, lines 
 	return err
 }
 
+// AvailabilityBreakdown returns per-warehouse available counts from inventory-warehouse-service.
+func (s *Stock) AvailabilityBreakdown(ctx context.Context, skuIDs []string) (map[string]map[string]int64, error) {
+	var body struct {
+		Warehouses map[string]map[string]int64 `json:"warehouses"`
+	}
+	endpoint := s.base + "/api/v1/inventory/availability/breakdown?skuIds=" + url.QueryEscape(strings.Join(skuIDs, ","))
+	_, err := s.client.Do(ctx, http.MethodGet, endpoint, svcclient.Options{Internal: true}, nil, &body)
+	if err != nil {
+		return nil, err
+	}
+	return body.Warehouses, nil
+}
+
+// ReserveAllocations atomically reserves stock across 1 or 2 warehouses for a split order.
+func (s *Stock) ReserveAllocations(ctx context.Context, orderID string, allocations []checkout.WarehouseAllocation) error {
+	type line struct {
+		SkuID    string `json:"skuId"`
+		Quantity int64  `json:"quantity"`
+	}
+	type alloc struct {
+		WarehouseID string `json:"warehouseId"`
+		Lines       []line `json:"lines"`
+	}
+	wire := make([]alloc, len(allocations))
+	for i, a := range allocations {
+		lines := make([]line, len(a.Lines))
+		for j, l := range a.Lines {
+			lines[j] = line{SkuID: l.SkuID, Quantity: l.Quantity}
+		}
+		wire[i] = alloc{WarehouseID: a.WarehouseID, Lines: lines}
+	}
+	body := map[string]any{"orderId": orderID, "allocations": wire}
+	_, err := s.client.Do(ctx, http.MethodPost, s.base+"/api/v1/inventory/reservations",
+		svcclient.Options{Internal: true, IdempotencyKey: "reserve-" + orderID}, body, nil)
+	if hasCode(err, http.StatusConflict, "INSUFFICIENT_STOCK") {
+		return checkout.ErrOutOfStock
+	}
+	return err
+}
+
 // Release gives the reservation back. A reservation that does not exist (409) counts as released.
 func (s *Stock) Release(ctx context.Context, orderID string) error {
 	_, err := s.client.Do(ctx, http.MethodPost, s.base+"/api/v1/inventory/reservations/"+url.PathEscape(orderID)+"/release",

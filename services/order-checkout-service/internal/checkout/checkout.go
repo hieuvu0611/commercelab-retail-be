@@ -98,6 +98,18 @@ type StockLine struct {
 	Quantity int64
 }
 
+// WarehouseAllocation holds the lines assigned to one warehouse for an order.
+type WarehouseAllocation struct {
+	WarehouseID string
+	Lines       []StockLine
+}
+
+// MultiWarehouseStock is an optional extension of Stock for multi-warehouse allocation planning.
+type MultiWarehouseStock interface {
+	AvailabilityBreakdown(ctx context.Context, skuIDs []string) (map[string]map[string]int64, error)
+	ReserveAllocations(ctx context.Context, orderID string, allocations []WarehouseAllocation) error
+}
+
 // Attempt is the payment attempt created for an order.
 type Attempt struct{ AttemptID, Status string }
 
@@ -237,6 +249,23 @@ func (s *Service) Place(ctx context.Context, p Principal, key, quoteID, paymentM
 	if method == PaymentMethodCOD {
 		built.PaymentStatus = PayCODPending
 	}
+	// Plan 1-or-2 warehouse parcel allocation when Stock supports multi-warehouse breakdown.
+	if mw, ok := s.Stock.(MultiWarehouseStock); ok {
+		skuIDs := make([]string, len(built.Items))
+		for i, it := range built.Items {
+			skuIDs[i] = it.SkuID
+		}
+		if breakdown, bdErr := mw.AvailabilityBreakdown(ctx, skuIDs); bdErr == nil && len(breakdown) > 0 {
+			if parcels, fits := PlanParcels(built.Items, built.TotalPayableVND, method == PaymentMethodCOD, breakdown); fits {
+				built.Parcels = parcels
+				if len(parcels) == 1 {
+					built.WarehouseID = parcels[0].WarehouseID
+				} else if len(parcels) > 1 {
+					built.WarehouseID = "MULTI"
+				}
+			}
+		}
+	}
 	stored, replayed, err := s.Orders.Create(ctx, key, hash, built, s.orderCreated(built))
 	if err != nil || replayed {
 		return stored, replayed, err
@@ -306,16 +335,30 @@ func (s *Service) run(ctx context.Context, p Principal, o orders.Order) orders.O
 		}
 	}
 
-	lines := make([]StockLine, len(o.Items))
-	for i, it := range o.Items {
-		lines[i] = StockLine{SkuID: it.SkuID, Quantity: it.Quantity}
+	var reserveErr error
+	if mw, ok := s.Stock.(MultiWarehouseStock); ok && len(o.Parcels) > 1 {
+		allocs := make([]WarehouseAllocation, len(o.Parcels))
+		for i, p := range o.Parcels {
+			pLines := make([]StockLine, len(p.Items))
+			for j, it := range p.Items {
+				pLines[j] = StockLine{SkuID: it.SkuID, Quantity: it.Quantity}
+			}
+			allocs[i] = WarehouseAllocation{WarehouseID: p.WarehouseID, Lines: pLines}
+		}
+		reserveErr = mw.ReserveAllocations(ctx, o.OrderID, allocs)
+	} else {
+		lines := make([]StockLine, len(o.Items))
+		for i, it := range o.Items {
+			lines[i] = StockLine{SkuID: it.SkuID, Quantity: it.Quantity}
+		}
+		reserveErr = s.Stock.Reserve(ctx, o.OrderID, o.WarehouseID, lines)
 	}
-	if err := s.Stock.Reserve(ctx, o.OrderID, o.WarehouseID, lines); err != nil {
-		if !errors.Is(err, ErrOutOfStock) {
+	if reserveErr != nil {
+		if !errors.Is(reserveErr, ErrOutOfStock) {
 			// A timeout does not say whether the stock was taken: release it to be safe (idempotent).
 			s.releaseStock(ctx, o.OrderID)
 		}
-		return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(err))
+		return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(reserveErr))
 	}
 	if o.PaymentMethod == PaymentMethodCOD {
 		if err := s.Stock.Commit(ctx, o.OrderID); err != nil {
