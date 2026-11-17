@@ -64,7 +64,7 @@ func NewServer(
 
 	// Register P10 Ledger & Settlement APIs
 	registerLedgerRoutes(mux, repo)
-	registerSettlementRoutes(mux, settleRepo)
+	registerSettlementRoutes(mux, settleRepo, repo)
 
 	return middleware.Chain(mux)
 }

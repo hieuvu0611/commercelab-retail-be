@@ -14,7 +14,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/repository"
 )
 
-func registerSettlementRoutes(mux *http.ServeMux, settleRepo *repository.SettlementRepository) {
+func registerSettlementRoutes(mux *http.ServeMux, settleRepo *repository.SettlementRepository, ledgerRepo *repository.LedgerRepository) {
 	financeAuth := func(h http.HandlerFunc) http.Handler {
 		return auth.RequireAuth(auth.RequireRole("FINANCE", "FINANCE_MGR", "OPS_MGR", "ADMIN", "ACCESS_ADMIN")(h))
 	}
@@ -153,5 +153,41 @@ func registerSettlementRoutes(mux *http.ServeMux, settleRepo *repository.Settlem
 			return
 		}
 		response.JSON(w, http.StatusOK, "Settlement lines retrieved", lines, nil)
+	}))
+
+	// POST /api/v1/admin/ledger/settlements/batches/{id}/match - Execute matching engine against batch lines
+	mux.Handle("POST /api/v1/admin/ledger/settlements/batches/{id}/match", financeAuth(func(w http.ResponseWriter, r *http.Request) {
+		batchID := r.PathValue("id")
+		claims, _ := auth.ClaimsFrom(r.Context())
+		actor := "SYSTEM"
+		if claims != nil {
+			if claims.UserID != "" {
+				actor = claims.UserID
+			} else if claims.Subject != "" {
+				actor = claims.Subject
+			}
+		}
+
+		summary, err := settleRepo.MatchBatch(r.Context(), batchID, ledgerRepo, actor)
+		if err != nil {
+			if errors.Is(err, repository.ErrBatchNotFound) {
+				response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Settlement batch not found", nil)
+				return
+			}
+			response.Error(w, r, http.StatusInternalServerError, "MATCH_ERROR", err.Error(), nil)
+			return
+		}
+
+		response.JSON(w, http.StatusOK, "Batch reconciliation matched successfully", summary, nil)
+	}))
+
+	// GET /api/v1/admin/ledger/reconciliations/summary - Global reconciliation overview
+	mux.Handle("GET /api/v1/admin/ledger/reconciliations/summary", financeAuth(func(w http.ResponseWriter, r *http.Request) {
+		overview, err := settleRepo.GetReconciliationOverview(r.Context())
+		if err != nil {
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Reconciliation overview retrieved", overview, nil)
 	}))
 }

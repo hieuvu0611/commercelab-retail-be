@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 
@@ -286,4 +287,143 @@ func (r *SettlementRepository) UpdateBatchStatus(ctx context.Context, batchID st
 		return dependency.Wrap(err)
 	}
 	return nil
+}
+
+// MatchBatch processes lines in a settlement batch, evaluates against expected 1% fee,
+// updates line statuses, and records double-entry ledger postings via ledgerRepo.
+func (r *SettlementRepository) MatchBatch(
+	ctx context.Context,
+	batchID string,
+	ledgerRepo *LedgerRepository,
+	actor string,
+) (domain.BatchMatchSummary, error) {
+	if _, err := r.GetSettlementBatch(ctx, batchID); err != nil {
+		return domain.BatchMatchSummary{}, err
+	}
+
+	lines, err := r.ListSettlementLines(ctx, batchID)
+	if err != nil {
+		return domain.BatchMatchSummary{}, err
+	}
+
+	summary := domain.BatchMatchSummary{
+		BatchID:    batchID,
+		TotalLines: len(lines),
+		Results:    make([]domain.MatchResult, 0, len(lines)),
+	}
+
+	hasDiscrepancy := false
+	entriesCreated := 0
+
+	for _, line := range lines {
+		res := domain.EvaluateSettlementLine(line, 1) // 1% simulated gateway fee
+		summary.TotalGrossVND += res.GrossAmountVND
+		summary.TotalFeeVND += res.CalculatedFeeVND
+		summary.TotalNetVND += res.ActualPayoutVND
+		summary.TotalDiscrepancyVND += res.DiscrepancyVND
+
+		if res.Status == "MATCHED" {
+			summary.MatchedLines++
+		} else {
+			summary.DiscrepancyLines++
+			hasDiscrepancy = true
+		}
+
+		summary.Results = append(summary.Results, res)
+
+		// Update line status in database
+		_ = r.UpdateLineMatchStatus(ctx, batchID, line.LineNumber, res.Status)
+
+		// Post double-entry journal entry if ledgerRepo is provided
+		if ledgerRepo != nil {
+			entryID := fmt.Sprintf("je_match_%s_%d", batchID, line.LineNumber)
+			entry, err := domain.NewSettlementMatchedEntry(
+				entryID,
+				line.OrderID,
+				batchID,
+				line.GrossAmountVND,
+				res.CalculatedFeeVND,
+				line.NetAmountVND,
+				res.DiscrepancyVND,
+				actor,
+			)
+			if err == nil {
+				_, postErr := ledgerRepo.RecordJournalEntry(ctx, entry)
+				if postErr == nil {
+					entriesCreated++
+				}
+			}
+		}
+	}
+
+	summary.JournalEntriesCreated = entriesCreated
+
+	batchStatus := "RECONCILED"
+	if hasDiscrepancy {
+		batchStatus = "PARTIALLY_RECONCILED"
+	}
+	summary.BatchStatus = batchStatus
+	_ = r.UpdateBatchStatus(ctx, batchID, batchStatus)
+
+	return summary, nil
+}
+
+// GetReconciliationOverview returns aggregate metrics across all batches and lines
+func (r *SettlementRepository) GetReconciliationOverview(ctx context.Context) (domain.ReconciliationOverview, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		overview := domain.ReconciliationOverview{
+			TotalBatches: len(r.batches),
+		}
+		for _, b := range r.batches {
+			if b.Status == "RECONCILED" {
+				overview.ReconciledBatches++
+			} else {
+				overview.PendingBatches++
+			}
+		}
+		for _, lines := range r.lines {
+			overview.TotalLinesProcessed += len(lines)
+			for _, l := range lines {
+				if l.MatchStatus == "MATCHED" {
+					overview.MatchedLines++
+				} else if l.MatchStatus == "DISCREPANCY_OPEN" {
+					overview.OpenDiscrepancies++
+					// 1% fee expected shortfall
+					fee := (l.GrossAmountVND * 1) / 100
+					expected := l.GrossAmountVND - fee
+					overview.TotalDiscrepancyVND += (expected - l.NetAmountVND)
+				}
+			}
+		}
+		return overview, nil
+	}
+
+	var overview domain.ReconciliationOverview
+	err := r.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(COUNT(*) FILTER (WHERE status = 'RECONCILED'), 0),
+			COALESCE(COUNT(*) FILTER (WHERE status != 'RECONCILED'), 0)
+		FROM settlement_batches
+	`).Scan(&overview.TotalBatches, &overview.ReconciledBatches, &overview.PendingBatches)
+	if err != nil {
+		return overview, dependency.Wrap(err)
+	}
+
+	err = r.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(COUNT(*) FILTER (WHERE match_status = 'MATCHED'), 0),
+			COALESCE(COUNT(*) FILTER (WHERE match_status = 'DISCREPANCY_OPEN'), 0),
+			COALESCE(SUM(CASE WHEN match_status = 'DISCREPANCY_OPEN' THEN (gross_amount_vnd - (gross_amount_vnd / 100) - net_amount_vnd) ELSE 0 END), 0)
+		FROM settlement_lines
+	`).Scan(&overview.TotalLinesProcessed, &overview.MatchedLines, &overview.OpenDiscrepancies, &overview.TotalDiscrepancyVND)
+	if err != nil {
+		return overview, dependency.Wrap(err)
+	}
+
+	return overview, nil
 }
