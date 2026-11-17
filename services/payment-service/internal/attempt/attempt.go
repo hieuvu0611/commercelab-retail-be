@@ -108,8 +108,16 @@ func Apply(a Attempt, o Outcome, amountVND int64, now time.Time) (Attempt, Chang
 	case StatusCODPending:
 		switch o {
 		case OutcomeCaptured, OutcomeCODCollected:
-			a.Status, a.CapturedAmountVND, a.OutcomeAt = StatusCOLLECTED, amountVND, &now
-			return a, Change{CapturedVND: amountVND}, nil
+			nextCap := a.CapturedAmountVND + amountVND
+			if nextCap > a.AmountVND {
+				nextCap = a.AmountVND
+			}
+			delta := nextCap - a.CapturedAmountVND
+			a.CapturedAmountVND = nextCap
+			if nextCap >= a.AmountVND {
+				a.Status, a.OutcomeAt = StatusCOLLECTED, &now
+			}
+			return a, Change{CapturedVND: delta}, nil
 		case OutcomeFailed, OutcomeCODCancelled:
 			a.Status, a.OutcomeAt = StatusCODCancelled, &now
 			return a, Change{}, nil
@@ -117,7 +125,7 @@ func Apply(a Attempt, o Outcome, amountVND int64, now time.Time) (Attempt, Chang
 			return a, Change{}, ErrInvalidOutcome
 		}
 	case StatusCOLLECTED:
-		if (o == OutcomeCaptured || o == OutcomeCODCollected) && (amountVND == a.CapturedAmountVND || amountVND <= 0) {
+		if (o == OutcomeCaptured || o == OutcomeCODCollected) && (amountVND == a.CapturedAmountVND || amountVND <= 0 || a.PaymentMethod == "COD") {
 			return a, Change{Replay: true}, nil
 		}
 		return a, Change{}, ErrFinalOutcome

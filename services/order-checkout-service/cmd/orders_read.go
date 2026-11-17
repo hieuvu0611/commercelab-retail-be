@@ -33,6 +33,7 @@ func registerOrderReadRoutes(mux *http.ServeMux, svc *checkout.Service) {
 type orderSummary struct {
 	OrderID         string     `json:"orderId"`
 	Status          string     `json:"status"`
+	PaymentMethod   string     `json:"paymentMethod,omitempty"`
 	PaymentStatus   string     `json:"paymentStatus"`
 	FailureCode     string     `json:"failureCode,omitempty"`
 	VoucherCode     string     `json:"voucherCode,omitempty"`
@@ -44,7 +45,7 @@ type orderSummary struct {
 }
 
 func summaryOf(o orders.Order) orderSummary {
-	return orderSummary{OrderID: o.OrderID, Status: o.Status, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
+	return orderSummary{OrderID: o.OrderID, Status: o.Status, PaymentMethod: o.PaymentMethod, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
 		VoucherCode: o.VoucherCode, TotalPayableVND: o.TotalPayableVND, ItemCount: o.ItemCount, ExpiresAt: o.ExpiresAt,
 		CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 }

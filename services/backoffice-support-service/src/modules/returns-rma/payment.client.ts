@@ -20,10 +20,43 @@ export class PaymentClient {
   ]);
 
   /**
+   * Nạp số tiền thực thu từ Payment Service khi orderId chưa có trong cache nội bộ.
+   */
+  async hydrateOrderSummary(orderId: string): Promise<void> {
+    if (this.paymentSummaries.has(orderId)) return;
+    const baseUrl = process.env.PAYMENT_SERVICE_URL?.replace(/\/$/, '');
+    const token = process.env.INTERNAL_SERVICE_TOKEN;
+    if (!baseUrl || !token) return;
+    const res = await fetch(
+      `${baseUrl}/api/v1/payments/orders/${encodeURIComponent(orderId)}/attempt`,
+      { headers: { 'X-Internal-Token': token } },
+    );
+    if (!res.ok) return;
+    const json = (await res.json()) as {
+      data?: { capturedAmountVnd?: number; amountVnd?: number; status?: string };
+    };
+    const captured = Number(json.data?.capturedAmountVnd ?? 0);
+    const effective =
+      captured > 0
+        ? captured
+        : json.data?.status === 'COLLECTED' || json.data?.status === 'CAPTURED'
+          ? Number(json.data?.amountVnd ?? 0)
+          : 0;
+    if (effective > 0) {
+      this.paymentSummaries.set(orderId, {
+        capturedAmount: effective,
+        refundedAmount: 0,
+        refundPending: 0,
+      });
+    }
+  }
+
+  /**
    * Giữ chỗ trong trần hoàn tiền trước khi gọi đối tác chi trả (I03, SC08).
    * SC08: 660.000đ thực thu, 270.000đ đã hoàn, 300.000đ đang giữ -> còn 90.000đ; từ chối yêu cầu 100.000đ.
    */
   async reserveRefundCeiling(orderId: string, amountVnd: number): Promise<PaymentSummaryView> {
+    await this.hydrateOrderSummary(orderId);
     const summary = this.paymentSummaries.get(orderId) || {
       capturedAmount: 660_000,
       refundedAmount: 0,

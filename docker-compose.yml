@@ -421,6 +421,7 @@ services:
       CLICKHOUSE_USER: "analytics"
       CLICKHOUSE_PASSWORD: "analytics_secret"
       ORDER_SERVICE_URL: "http://order-checkout-service:8083"
+      PAYMENT_SERVICE_URL: "http://payment-service:8084"
       INVENTORY_SERVICE_URL: "http://inventory-warehouse-service:8082"
       FULFILLMENT_SERVICE_URL: "http://fulfillment-shipping-service:8085"
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-}

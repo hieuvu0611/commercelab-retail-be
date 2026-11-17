@@ -79,7 +79,8 @@ export class AppController {
 
   @Get('/api/v1/returns/:returnId')
   @UseGuards(JwtAuthGuard)
-  getReturnDetail(@Param('returnId') returnId: string) {
+  async getReturnDetail(@Param('returnId') returnId: string) {
+    await this.returnsService.ensureHydrated();
     const item = this.returnsService.getReturn(returnId);
     return new ApiResult(item, 'Return detail retrieved successfully');
   }
@@ -93,13 +94,15 @@ export class AppController {
   ) {
     body.orderId = orderId;
     const customerId = req.user?.userId || 'cust-default';
-    const result = await this.returnsService.openRmaRequest(body, customerId);
+    const authHeader = req.headers?.authorization as string | undefined;
+    const result = await this.returnsService.openRmaRequest(body, customerId, authHeader);
     return new ApiResult(result, 'Return request created successfully');
   }
 
   @Get('/api/v1/orders/:orderId/returns')
   @UseGuards(JwtAuthGuard)
-  listOrderReturns(@Param('orderId') orderId: string) {
+  async listOrderReturns(@Param('orderId') orderId: string) {
+    await this.returnsService.ensureHydrated();
     const items = this.returnsService.listReturns({ orderId });
     return new ApiResult(items, 'Order returns retrieved successfully');
   }
@@ -111,11 +114,12 @@ export class AppController {
   @Get('/api/v1/backoffice/returns')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
-  listBackofficeReturns(
+  async listBackofficeReturns(
     @Query('status') status?: string,
     @Query('orderId') orderId?: string,
     @Query('warehouseId') warehouseId?: string,
   ) {
+    await this.returnsService.ensureHydrated();
     const items = this.returnsService.listReturns({ status, orderId, warehouseId });
     return new ApiResult(items, 'Backoffice returns retrieved successfully', {
       total: items.length,
@@ -128,7 +132,8 @@ export class AppController {
   @Get('/api/v1/backoffice/returns/:rmaId')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
-  getBackofficeReturnDetail(@Param('rmaId') rmaId: string) {
+  async getBackofficeReturnDetail(@Param('rmaId') rmaId: string) {
+    await this.returnsService.ensureHydrated();
     const item = this.returnsService.getReturn(rmaId);
     return new ApiResult(item, 'Backoffice return detail retrieved successfully');
   }
@@ -136,31 +141,37 @@ export class AppController {
   @Post('/api/v1/backoffice/returns/:rmaId/approve')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
-  approveBackofficeReturn(@Req() req: any, @Param('rmaId') rmaId: string) {
+  async approveBackofficeReturn(@Req() req: any, @Param('rmaId') rmaId: string) {
+    await this.returnsService.ensureHydrated();
     const actor = req.user?.userId || 'support-agent';
     const item = this.returnsService.approveReturn(rmaId, actor);
+    await this.returnsService.syncRecord(item);
     return new ApiResult(item, 'Return request approved successfully');
   }
 
   @Post('/api/v1/backoffice/returns/:rmaId/receive')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN')
-  receiveReturnParcel(@Req() req: any, @Param('rmaId') rmaId: string) {
+  async receiveReturnParcel(@Req() req: any, @Param('rmaId') rmaId: string) {
+    await this.returnsService.ensureHydrated();
     const actor = req.user?.userId || 'warehouse-staff';
     const item = this.returnsService.receiveRma(rmaId, actor);
+    await this.returnsService.syncRecord(item);
     return new ApiResult(item, 'Return parcel received by warehouse (SC07)');
   }
 
   @Post('/api/v1/backoffice/returns/:rmaId/qc')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN')
-  submitQcInspection(
+  async submitQcInspection(
     @Req() req: any,
     @Param('rmaId') rmaId: string,
     @Body('results') results: Array<{ skuId: string; passedQuantity: number; failedQuantity: number }>,
   ) {
+    await this.returnsService.ensureHydrated();
     const actor = req.user?.userId || 'qc-inspector';
     const item = this.returnsService.submitQcResult(rmaId, results || [], actor);
+    await this.returnsService.syncRecord(item);
     return new ApiResult(item, 'QC inspection recorded successfully (SC07)');
   }
 
@@ -168,6 +179,7 @@ export class AppController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('SUPPORT_LEAD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
   async disburseReturnRefund(@Req() req: any, @Param('rmaId') rmaId: string) {
+    await this.returnsService.ensureHydrated();
     const actor = req.user?.userId || 'finance-officer';
     const item = await this.returnsService.disburseRefund(rmaId, actor);
     return new ApiResult(item, 'Refund disbursed successfully through payment simulator (I03/SC08)');
@@ -254,13 +266,15 @@ export class AppController {
   @Post('/api/v1/backoffice/returns/:rmaId/reject')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
-  rejectBackofficeReturn(
+  async rejectBackofficeReturn(
     @Req() req: any,
     @Param('rmaId') rmaId: string,
     @Body('note') note: string,
   ) {
+    await this.returnsService.ensureHydrated();
     const actor = req.user?.userId || 'support-agent';
     const item = this.returnsService.rejectReturn(rmaId, note || 'Ineligible return request', actor);
+    await this.returnsService.syncRecord(item);
     return new ApiResult(item, 'Return request rejected and ceiling released');
   }
 
