@@ -62,7 +62,7 @@ func TestPlaceOrderOnPostgresSC04AndSC10(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			o, _, err := svc.Place(ctx, a, "key-"+run, "Q-1")
+			o, _, err := svc.Place(ctx, a, "key-"+run, "Q-1", "")
 			if err != nil {
 				t.Errorf("Place: %v", err)
 				return
@@ -82,7 +82,7 @@ func TestPlaceOrderOnPostgresSC04AndSC10(t *testing.T) {
 
 	// SC10: the only voucher use is held, so another customer's order is closed with VOUCHER_EXHAUSTED.
 	quotes.quote.UserID = userB
-	b, _, err := svc.Place(ctx, Principal{UserID: userB, Bearer: "tok"}, "key-b-"+run, "Q-2")
+	b, _, err := svc.Place(ctx, Principal{UserID: userB, Bearer: "tok"}, "key-b-"+run, "Q-2", "")
 	if err != nil || b.Status != string(saga.StateFailedClosed) || b.FailureCode != voucher.ReasonExhausted {
 		t.Fatalf("second customer = %+v, %v", b, err)
 	}

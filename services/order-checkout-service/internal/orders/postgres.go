@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -19,13 +20,27 @@ type PostgresStore struct {
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), status, payment_status,
+const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), applied_promotions_json, status, payment_method, payment_status,
 	failure_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, refund_pending_vnd, refunded_amount_vnd, version, expires_at, created_at, updated_at`
 
-func scanOrder(row pgx.Row) (Order, error) {
+func orderScanDest(o *Order, promoRaw *[]byte) []any {
+	return []any{
+		&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, promoRaw,
+		&o.Status, &o.PaymentMethod, &o.PaymentStatus, &o.FailureCode,
+		&o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND,
+		&o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND,
+		&o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt,
+	}
+}
+
+func scanOrder(row pgx.Row, extraDest ...any) (Order, error) {
 	var o Order
-	err := row.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentStatus,
-		&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND, &o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt)
+	var promoRaw []byte
+	dest := append(orderScanDest(&o, &promoRaw), extraDest...)
+	err := row.Scan(dest...)
+	if len(promoRaw) > 0 {
+		_ = json.Unmarshal(promoRaw, &o.AppliedPromotions)
+	}
 	return o, err
 }
 
@@ -56,7 +71,25 @@ func loadOrder(ctx context.Context, q queryer, orderID string) (Order, error) {
 		}
 		o.Items = append(o.Items, it)
 	}
-	return o, dependency.Wrap(rows.Err())
+	if err := rows.Err(); err != nil {
+		return Order{}, dependency.Wrap(err)
+	}
+	pRows, err := q.Query(ctx, `SELECT parcel_seq, warehouse_id, items_json, cod_amount_vnd, status
+		FROM orders.order_parcels WHERE order_id = $1 ORDER BY parcel_seq`, orderID)
+	if err != nil {
+		return Order{}, dependency.Wrap(err)
+	}
+	defer pRows.Close()
+	for pRows.Next() {
+		var p Parcel
+		var rawItems []byte
+		if err := pRows.Scan(&p.ParcelSeq, &p.WarehouseID, &rawItems, &p.CodAmountVND, &p.Status); err != nil {
+			return Order{}, dependency.Wrap(err)
+		}
+		_ = json.Unmarshal(rawItems, &p.Items)
+		o.Parcels = append(o.Parcels, p)
+	}
+	return o, dependency.Wrap(pRows.Err())
 }
 
 // replay returns the order stored for a claimed key after checking that the stored hash matches.
@@ -98,23 +131,56 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, e
 		return existing, true, nil
 	}
 
-	status, payment := o.Status, o.PaymentStatus
+	status, payment, method := o.Status, o.PaymentStatus, o.PaymentMethod
 	if status == "" {
 		status = StatusPending
 	}
 	if payment == "" {
 		payment = PaymentUnpaid
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO orders.orders (order_id, user_id, quote_id, address_id, warehouse_id, voucher_code, status, payment_status,
+	if method == "" {
+		method = "PREPAID"
+	}
+	if method == "COD" {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('cod:' || $1))`, o.UserID); err != nil {
+			return Order{}, false, dependency.Wrap(err)
+		}
+		var activeCOD int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders
+			WHERE user_id = $1 AND payment_method = 'COD' AND payment_status = 'COD_PENDING'
+			AND status NOT IN ('DELIVERED', 'CANCELLED', 'FAILED_CLOSED')`, o.UserID).Scan(&activeCOD); err != nil {
+			return Order{}, false, dependency.Wrap(err)
+		}
+		if activeCOD >= MaxActiveCODOrders {
+			return Order{}, false, ErrCODVelocityLimit
+		}
+	}
+	promoJSON, _ := json.Marshal(o.AppliedPromotions)
+	if len(o.AppliedPromotions) == 0 {
+		promoJSON = []byte("[]")
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO orders.orders (order_id, user_id, quote_id, address_id, warehouse_id, voucher_code, applied_promotions_json, status, payment_method, payment_status,
 			subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, expires_at)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10, $11, $12, $13)`,
-		o.OrderID, o.UserID, o.QuoteID, o.AddressID, o.WarehouseID, o.VoucherCode, status, payment,
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15)`,
+		o.OrderID, o.UserID, o.QuoteID, o.AddressID, o.WarehouseID, o.VoucherCode, string(promoJSON), status, method, payment,
 		o.SubtotalVND, o.DiscountVND, o.ShippingFeeVND, o.TotalPayableVND, o.ExpiresAt); err != nil {
 		return Order{}, false, dependency.Wrap(err)
 	}
 	for _, it := range o.Items {
 		if _, err := tx.Exec(ctx, `INSERT INTO orders.order_items (order_id, sku_id, sku_name, quantity, unit_price_vnd, line_discount_vnd, allocated_unit_paid_vnd)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)`, o.OrderID, it.SkuID, it.SkuName, it.Quantity, it.UnitPriceVND, it.LineDiscountVND, it.AllocatedUnitPaidVND); err != nil {
+			return Order{}, false, dependency.Wrap(err)
+		}
+	}
+	for _, p := range o.Parcels {
+		itemsJSON, _ := json.Marshal(p.Items)
+		pStatus := p.Status
+		if pStatus == "" {
+			pStatus = status
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO orders.order_parcels (order_id, parcel_seq, warehouse_id, items_json, cod_amount_vnd, status)
+			VALUES ($1, $2, $3, $4::jsonb, $5, $6)`,
+			o.OrderID, p.ParcelSeq, p.WarehouseID, string(itemsJSON), p.CodAmountVND, pStatus); err != nil {
 			return Order{}, false, dependency.Wrap(err)
 		}
 	}
@@ -170,9 +236,9 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	}
 	const where = `WHERE ($1 = '' OR user_id = $1) AND (cardinality($2::text[]) = 0 OR status = ANY($2)) AND ($3 = '' OR failure_code = $3)
 		AND ($4::timestamptz IS NULL OR updated_at <= $4) AND ($5::timestamptz IS NULL OR updated_at >= $5)
-		AND (cardinality($6::text[]) = 0 OR warehouse_id = ANY($6))`
+		AND (cardinality($6::text[]) = 0 OR warehouse_id = ANY($6) OR EXISTS (SELECT 1 FROM orders.order_parcels op WHERE op.order_id = o.order_id AND op.warehouse_id = ANY($6)))`
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders `+where, f.UserID, statuses, f.FailureCode, before, after, warehouses).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders o `+where, f.UserID, statuses, f.FailureCode, before, after, warehouses).Scan(&total); err != nil {
 		return nil, 0, dependency.Wrap(err)
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+orderColumns+`, (SELECT COALESCE(SUM(quantity), 0) FROM orders.order_items i WHERE i.order_id = o.order_id)
@@ -184,12 +250,12 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	defer rows.Close()
 	out := []Order{}
 	for rows.Next() {
-		var o Order
-		if err := rows.Scan(&o.OrderID, &o.UserID, &o.QuoteID, &o.AddressID, &o.WarehouseID, &o.VoucherCode, &o.Status, &o.PaymentStatus,
-			&o.FailureCode, &o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND, &o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND,
-			&o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt, &o.ItemCount); err != nil {
+		var itemCount int64
+		o, err := scanOrder(rows, &itemCount)
+		if err != nil {
 			return nil, 0, dependency.Wrap(err)
 		}
+		o.ItemCount = itemCount
 		out = append(out, o)
 	}
 	return out, total, dependency.Wrap(rows.Err())
@@ -205,6 +271,17 @@ func (s *PostgresStore) RecordCapture(ctx context.Context, orderID string, captu
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *PostgresStore) CountActiveCODOrders(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders
+		WHERE user_id = $1 AND payment_method = 'COD' AND payment_status = 'COD_PENDING'
+		AND status NOT IN ('DELIVERED', 'CANCELLED', 'FAILED_CLOSED')`, userID).Scan(&count)
+	if err != nil {
+		return 0, dependency.Wrap(err)
+	}
+	return count, nil
 }
 
 func (s *PostgresStore) RecordRefund(ctx context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error {
@@ -247,4 +324,35 @@ func (s *PostgresStore) Transition(ctx context.Context, orderID, from, to, payme
 		return Order{}, err
 	}
 	return moved, dependency.Wrap(tx.Commit(ctx))
+}
+
+// MarkParcelDelivered marks one warehouse's parcel DELIVERED and returns true when all parcels of orderID are delivered.
+func (s *PostgresStore) MarkParcelDelivered(ctx context.Context, orderID, warehouseID string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE orders.order_parcels
+		SET status = 'DELIVERED', updated_at = NOW()
+		WHERE order_id = $1 AND ($2 = '' OR warehouse_id = $2)
+	`, orderID, warehouseID); err != nil {
+		return false, dependency.Wrap(err)
+	}
+	var total, pending int
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE status <> 'DELIVERED')
+		FROM orders.order_parcels WHERE order_id = $1
+	`, orderID).Scan(&total, &pending); err != nil {
+		return false, dependency.Wrap(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, dependency.Wrap(err)
+	}
+	if total <= 1 {
+		return true, nil
+	}
+	return pending == 0, nil
 }

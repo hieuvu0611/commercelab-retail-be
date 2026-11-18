@@ -1,8 +1,10 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { configureHttpFoundation } from './common/http/http-foundation';
+import { validateAuthSecrets } from './common/guards/jwt-auth.guard';
 
 async function bootstrap() {
+  validateAuthSecrets();
   const app = await NestFactory.create(AppModule);
   configureHttpFoundation(app);
   app.enableCors();

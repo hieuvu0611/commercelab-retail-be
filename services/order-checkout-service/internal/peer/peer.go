@@ -14,6 +14,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 )
 
@@ -35,16 +36,17 @@ func NewQuotes(catalogURL string, c *svcclient.Client) *Quotes { return &Quotes{
 type quoteView struct {
 	IsStale bool `json:"isStale"`
 	Quote   struct {
-		QuoteID         string    `json:"quoteId"`
-		UserID          string    `json:"userId"`
-		AddressID       string    `json:"addressId"`
-		VoucherCode     string    `json:"voucherCode"`
-		SubtotalVND     int64     `json:"subtotalVnd"`
-		DiscountVND     int64     `json:"discountVnd"`
-		ShippingFeeVND  int64     `json:"shippingFeeVnd"`
-		TotalPayableVND int64     `json:"totalPayableVnd"`
-		ExpiresAt       time.Time `json:"expiresAt"`
-		Lines           []struct {
+		QuoteID          string                    `json:"quoteId"`
+		UserID           string                    `json:"userId"`
+		AddressID        string                    `json:"addressId"`
+		VoucherCode      string                    `json:"voucherCode"`
+		SubtotalVND      int64                     `json:"subtotalVnd"`
+		DiscountVND      int64                     `json:"discountVnd"`
+		ShippingFeeVND   int64                     `json:"shippingFeeVnd"`
+		TotalPayableVND  int64                     `json:"totalPayableVnd"`
+		ExpiresAt        time.Time                 `json:"expiresAt"`
+		AppliedCampaigns []orders.AppliedPromotion `json:"appliedCampaigns"`
+		Lines            []struct {
 			SkuID                string `json:"skuId"`
 			SkuName              string `json:"skuName"`
 			Quantity             int64  `json:"quantity"`
@@ -69,7 +71,8 @@ func (q *Quotes) Get(ctx context.Context, bearer, quoteID string) (checkout.Quot
 	out := checkout.Quote{
 		ID: src.QuoteID, UserID: src.UserID, AddressID: src.AddressID, VoucherCode: src.VoucherCode,
 		SubtotalVND: src.SubtotalVND, DiscountVND: src.DiscountVND, ShippingFeeVND: src.ShippingFeeVND, TotalPayableVND: src.TotalPayableVND,
-		ExpiresAt: src.ExpiresAt, Stale: view.IsStale,
+		AppliedPromotions: src.AppliedCampaigns,
+		ExpiresAt:         src.ExpiresAt, Stale: view.IsStale,
 	}
 	for _, l := range src.Lines {
 		out.Lines = append(out.Lines, checkout.QuoteLine{SkuID: l.SkuID, SkuName: l.SkuName, Quantity: l.Quantity, UnitPriceVND: l.UnitPriceVND,
@@ -96,6 +99,46 @@ func (s *Stock) Reserve(ctx context.Context, orderID, warehouseID string, lines 
 		wire[i] = line{SkuID: l.SkuID, Quantity: l.Quantity}
 	}
 	body := map[string]any{"orderId": orderID, "warehouseId": warehouseID, "lines": wire}
+	_, err := s.client.Do(ctx, http.MethodPost, s.base+"/api/v1/inventory/reservations",
+		svcclient.Options{Internal: true, IdempotencyKey: "reserve-" + orderID}, body, nil)
+	if hasCode(err, http.StatusConflict, "INSUFFICIENT_STOCK") {
+		return checkout.ErrOutOfStock
+	}
+	return err
+}
+
+// AvailabilityBreakdown returns per-warehouse available counts from inventory-warehouse-service.
+func (s *Stock) AvailabilityBreakdown(ctx context.Context, skuIDs []string) (map[string]map[string]int64, error) {
+	var body struct {
+		Warehouses map[string]map[string]int64 `json:"warehouses"`
+	}
+	endpoint := s.base + "/api/v1/inventory/availability/breakdown?skuIds=" + url.QueryEscape(strings.Join(skuIDs, ","))
+	_, err := s.client.Do(ctx, http.MethodGet, endpoint, svcclient.Options{Internal: true}, nil, &body)
+	if err != nil {
+		return nil, err
+	}
+	return body.Warehouses, nil
+}
+
+// ReserveAllocations atomically reserves stock across 1 or 2 warehouses for a split order.
+func (s *Stock) ReserveAllocations(ctx context.Context, orderID string, allocations []checkout.WarehouseAllocation) error {
+	type line struct {
+		SkuID    string `json:"skuId"`
+		Quantity int64  `json:"quantity"`
+	}
+	type alloc struct {
+		WarehouseID string `json:"warehouseId"`
+		Lines       []line `json:"lines"`
+	}
+	wire := make([]alloc, len(allocations))
+	for i, a := range allocations {
+		lines := make([]line, len(a.Lines))
+		for j, l := range a.Lines {
+			lines[j] = line{SkuID: l.SkuID, Quantity: l.Quantity}
+		}
+		wire[i] = alloc{WarehouseID: a.WarehouseID, Lines: lines}
+	}
+	body := map[string]any{"orderId": orderID, "allocations": wire}
 	_, err := s.client.Do(ctx, http.MethodPost, s.base+"/api/v1/inventory/reservations",
 		svcclient.Options{Internal: true, IdempotencyKey: "reserve-" + orderID}, body, nil)
 	if hasCode(err, http.StatusConflict, "INSUFFICIENT_STOCK") {
@@ -131,7 +174,21 @@ func (p *Payments) CreateAttempt(ctx context.Context, orderID, userID string, am
 	}
 	_, err := p.client.Do(ctx, http.MethodPost, p.base+"/api/v1/payments/attempts",
 		svcclient.Options{Internal: true, IdempotencyKey: "pay-" + orderID},
-		map[string]any{"orderId": orderID, "userId": userID, "amountVnd": amountVND}, &out)
+		map[string]any{"orderId": orderID, "userId": userID, "amountVnd": amountVND, "paymentMethod": "PREPAID"}, &out)
+	if err != nil {
+		return checkout.Attempt{}, err
+	}
+	return checkout.Attempt{AttemptID: out.AttemptID, Status: out.Status}, nil
+}
+
+func (p *Payments) CreateCODAttempt(ctx context.Context, orderID, userID string, amountVND int64) (checkout.Attempt, error) {
+	var out struct {
+		AttemptID string `json:"attemptId"`
+		Status    string `json:"status"`
+	}
+	_, err := p.client.Do(ctx, http.MethodPost, p.base+"/api/v1/payments/attempts",
+		svcclient.Options{Internal: true, IdempotencyKey: "pay-" + orderID},
+		map[string]any{"orderId": orderID, "userId": userID, "amountVnd": amountVND, "paymentMethod": "COD"}, &out)
 	if err != nil {
 		return checkout.Attempt{}, err
 	}
@@ -281,7 +338,7 @@ func (f *Fulfillment) StopShipment(ctx context.Context, r checkout.StopRequest) 
 	}
 	_, err := f.client.Do(ctx, http.MethodPost, f.base+"/api/v1/shipments/internal/orders/"+url.PathEscape(r.OrderID)+"/stop",
 		svcclient.Options{Internal: true, IdempotencyKey: "stop-" + r.OrderID},
-		map[string]any{"userId": r.UserID, "warehouseId": r.WarehouseID, "items": items}, &out)
+		map[string]any{"userId": r.UserID, "warehouseId": r.WarehouseID, "items": items, "parcels": r.Parcels, "paymentMethod": r.PaymentMethod}, &out)
 	if err != nil {
 		return "", err
 	}

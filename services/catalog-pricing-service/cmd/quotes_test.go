@@ -316,3 +316,38 @@ func TestQuoteReportsStaleWhenPriceOrOrderabilityChanged(t *testing.T) {
 		t.Fatalf("unpublished SKU: stale=%v ids=%v", stale, ids)
 	}
 }
+
+type fakePromoVouchers struct {
+	fakeVouchers
+	captured []peer.PromoEvalLine
+}
+
+func (f *fakePromoVouchers) EvaluatePromotions(_ context.Context, _ string, _ []string, lines []peer.PromoEvalLine) (peer.PromoEvaluation, error) {
+	f.captured = append([]peer.PromoEvalLine(nil), lines...)
+	return peer.PromoEvaluation{
+		TotalDiscountVND: 30000,
+		Applied:          []peer.AppliedPromo{{CampaignID: "CAMP-BALO", Code: "BALO10", Name: "Backpack Promo", DiscountVND: 30000}},
+	}, nil
+}
+
+func TestQuotePopulatesCategoryIDOnPromotionEvaluation(t *testing.T) {
+	authtest.Configure(t)
+	repo := repository.NewCatalogPricingRepository(nil, nil)
+	carts := cart.NewMemoryStore()
+	if err := carts.SetMany(context.Background(), "lan", map[string]int64{skuBackpack: 1}); err != nil {
+		t.Fatal(err)
+	}
+	vouchers := &fakePromoVouchers{fakeVouchers: fakeVouchers{byCode: map[string]peer.Eligibility{}}}
+	srv := NewServerWithDeps(repo, false, false, Deps{
+		Carts:     carts,
+		Vouchers:  vouchers,
+		Addresses: &fakeAddresses{owned: map[string][]string{"lan": {"addr-lan"}}},
+	})
+	rec := cartDo(srv, http.MethodPost, "/api/v1/quotes", cartToken(t, "lan"), `{"addressId":"addr-lan","campaignIds":["CAMP-BALO"]}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create quote with category promo = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(vouchers.captured) != 1 || vouchers.captured[0].CategoryID != "CAT-BALO" {
+		t.Fatalf("expected CategoryID CAT-BALO on PromoEvalLine, got %+v", vouchers.captured)
+	}
+}

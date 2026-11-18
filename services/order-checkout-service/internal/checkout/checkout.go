@@ -10,11 +10,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/ids"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/promotion"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/saga"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
@@ -32,6 +34,18 @@ const (
 	FailureUnknownExpired        = "PAYMENT_UNKNOWN_EXPIRED"
 	FailureStockLost             = "STOCK_RESERVATION_LOST"
 	FailurePlacementInterrupted  = "PLACEMENT_INTERRUPTED"
+	FailureCODCeilingExceeded    = "COD_CEILING_EXCEEDED"
+	FailureCODVelocityLimit      = "COD_VELOCITY_LIMIT_EXCEEDED"
+
+	PaymentMethodPrepaid = "PREPAID"
+	PaymentMethodCOD     = "COD"
+
+	CODMaxTotalVND     = 2_000_000 // 2,000,000 VND order ceiling
+	CODMaxActiveOrders = 2         // At most 2 active delivering COD orders
+
+	PayCODPending   = saga.PayCODPending
+	PayCODCollected = saga.PayCODCollected
+	PayCODCancelled = saga.PayCODCancelled
 )
 
 // PayRefundPending is the payment status of an order that is closed while the customer's money is held: it is
@@ -57,6 +71,10 @@ var (
 	ErrReservationLost = errors.New("stock reservation is not available")
 	// ErrOutOfStock: the warehouse cannot cover the whole order (SC03).
 	ErrOutOfStock = errors.New("insufficient stock")
+	// ErrCODCeilingExceeded: COD exceeds the 2,000,000 VND ceiling limit.
+	ErrCODCeilingExceeded = errors.New("order total exceeds COD ceiling limit of 2,000,000 VND")
+	// ErrCODVelocityLimit: Customer already has >= 2 active COD orders in transit.
+	ErrCODVelocityLimit = orders.ErrCODVelocityLimit
 )
 
 // QuoteLine is one priced line of an accepted quote (whole VND).
@@ -70,6 +88,7 @@ type Quote struct {
 	ID, UserID, AddressID, VoucherCode                        string
 	SubtotalVND, DiscountVND, ShippingFeeVND, TotalPayableVND int64
 	Lines                                                     []QuoteLine
+	AppliedPromotions                                         []orders.AppliedPromotion
 	ExpiresAt                                                 time.Time
 	// Stale: the catalog says a price changed or a SKU is no longer orderable since the quote was made.
 	Stale bool
@@ -79,6 +98,18 @@ type Quote struct {
 type StockLine struct {
 	SkuID    string
 	Quantity int64
+}
+
+// WarehouseAllocation holds the lines assigned to one warehouse for an order.
+type WarehouseAllocation struct {
+	WarehouseID string
+	Lines       []StockLine
+}
+
+// MultiWarehouseStock is an optional extension of Stock for multi-warehouse allocation planning.
+type MultiWarehouseStock interface {
+	AvailabilityBreakdown(ctx context.Context, skuIDs []string) (map[string]map[string]int64, error)
+	ReserveAllocations(ctx context.Context, orderID string, allocations []WarehouseAllocation) error
 }
 
 // Attempt is the payment attempt created for an order.
@@ -113,6 +144,7 @@ type PaymentState struct {
 // Payments creates the single payment attempt of an order.
 type Payments interface {
 	CreateAttempt(ctx context.Context, orderID, userID string, amountVND int64) (Attempt, error)
+	CreateCODAttempt(ctx context.Context, orderID, userID string, amountVND int64) (Attempt, error)
 	// AttemptState reads where the order's payment stands; found=false when the payment service has no attempt.
 	AttemptState(ctx context.Context, orderID string) (state PaymentState, found bool, err error)
 	// CloseAttempt tells the payment service the order is closed: money that arrives later is refunded, and
@@ -141,7 +173,8 @@ type Deps struct {
 	Stock       Stock
 	Payments    Payments
 	Vouchers    voucher.Reserver
-	Carts       Carts // optional
+	Promotions  promotion.Store // optional B08 promotion store
+	Carts       Carts           // optional
 	Addresses   Addresses
 	Snapshots   snapshot.Store
 	Fulfillment Fulfillment // asked to stop the parcel of a paid order that is cancelled (B05)
@@ -177,12 +210,16 @@ func randomOrderID() string {
 	return "O-" + hex.EncodeToString(b[:])
 }
 
-// Place records and runs the order for (caller, key, quoteID). It returns replayed=true when the key already
+// Place records and runs the order for (caller, key, quoteID, paymentMethod). It returns replayed=true when the key already
 // produced an order (the stored order is returned and nothing runs again, even if the quote has expired since).
 // A step that fails closes the order: the returned order then has Status FAILED_CLOSED and a FailureCode, and
 // the error is nil. Errors are for calls that created no order (bad quote, conflict, store outage).
-func (s *Service) Place(ctx context.Context, p Principal, key, quoteID string) (orders.Order, bool, error) {
-	hash := orders.HashIntent(p.UserID, quoteID)
+func (s *Service) Place(ctx context.Context, p Principal, key, quoteID, paymentMethod string) (orders.Order, bool, error) {
+	method := strings.ToUpper(strings.TrimSpace(paymentMethod))
+	if method == "" {
+		method = PaymentMethodPrepaid
+	}
+	hash := orders.HashIntent(p.UserID, quoteID+"|"+method)
 	if existing, found, err := s.Orders.Lookup(ctx, p.UserID, key, hash); err != nil || found {
 		return existing, found, err
 	}
@@ -193,12 +230,45 @@ func (s *Service) Place(ctx context.Context, p Principal, key, quoteID string) (
 	if err := s.checkQuote(quote, p.UserID); err != nil {
 		return orders.Order{}, false, err
 	}
+	if method == PaymentMethodCOD {
+		if quote.TotalPayableVND > CODMaxTotalVND {
+			return orders.Order{}, false, ErrCODCeilingExceeded
+		}
+		activeCODCount, err := s.Orders.CountActiveCODOrders(ctx, p.UserID)
+		if err != nil {
+			return orders.Order{}, false, err
+		}
+		if activeCODCount >= CODMaxActiveOrders {
+			return orders.Order{}, false, ErrCODVelocityLimit
+		}
+	}
 	address, err := s.Addresses.Get(ctx, p.Bearer, quote.AddressID)
 	if err != nil {
 		return orders.Order{}, false, err
 	}
 	expires := s.now().Add(ReservationTTL)
 	built := s.buildOrder(quote, expires)
+	built.PaymentMethod = method
+	if method == PaymentMethodCOD {
+		built.PaymentStatus = PayCODPending
+	}
+	// Plan 1-or-2 warehouse parcel allocation when Stock supports multi-warehouse breakdown.
+	if mw, ok := s.Stock.(MultiWarehouseStock); ok {
+		skuIDs := make([]string, len(built.Items))
+		for i, it := range built.Items {
+			skuIDs[i] = it.SkuID
+		}
+		if breakdown, bdErr := mw.AvailabilityBreakdown(ctx, skuIDs); bdErr == nil && len(breakdown) > 0 {
+			if parcels, fits := PlanParcels(built.Items, built.TotalPayableVND, method == PaymentMethodCOD, breakdown); fits {
+				built.Parcels = parcels
+				if len(parcels) == 1 {
+					built.WarehouseID = parcels[0].WarehouseID
+				} else if len(parcels) > 1 {
+					built.WarehouseID = "MULTI"
+				}
+			}
+		}
+	}
 	stored, replayed, err := s.Orders.Create(ctx, key, hash, built, s.orderCreated(built))
 	if err != nil || replayed {
 		return stored, replayed, err
@@ -254,7 +324,8 @@ func (s *Service) buildOrder(q Quote, expires time.Time) orders.Order {
 	}
 	return orders.Order{
 		OrderID: s.newID(), UserID: q.UserID, QuoteID: q.ID, AddressID: q.AddressID, WarehouseID: s.WarehouseID, VoucherCode: q.VoucherCode,
-		Status: orders.StatusPending, PaymentStatus: orders.PaymentUnpaid,
+		AppliedPromotions: append([]orders.AppliedPromotion(nil), q.AppliedPromotions...),
+		Status:            orders.StatusPending, PaymentStatus: orders.PaymentUnpaid,
 		SubtotalVND: q.SubtotalVND, DiscountVND: q.DiscountVND, ShippingFeeVND: q.ShippingFeeVND, TotalPayableVND: q.TotalPayableVND,
 		Items: items, ExpiresAt: &expires,
 	}
@@ -267,18 +338,74 @@ func (s *Service) run(ctx context.Context, p Principal, o orders.Order) orders.O
 			return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(err))
 		}
 	}
-
-	lines := make([]StockLine, len(o.Items))
-	for i, it := range o.Items {
-		lines[i] = StockLine{SkuID: it.SkuID, Quantity: it.Quantity}
+	if s.Promotions != nil && len(o.AppliedPromotions) > 0 {
+		for _, ap := range o.AppliedPromotions {
+			if err := s.Promotions.Reserve(ctx, ap.CampaignID, p.UserID, o.OrderID, ap.DiscountVND, s.now()); err != nil {
+				return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(err))
+			}
+		}
 	}
-	if err := s.Stock.Reserve(ctx, o.OrderID, o.WarehouseID, lines); err != nil {
-		if !errors.Is(err, ErrOutOfStock) {
+
+	var reserveErr error
+	if mw, ok := s.Stock.(MultiWarehouseStock); ok && len(o.Parcels) > 1 {
+		allocs := make([]WarehouseAllocation, len(o.Parcels))
+		for i, p := range o.Parcels {
+			pLines := make([]StockLine, len(p.Items))
+			for j, it := range p.Items {
+				pLines[j] = StockLine{SkuID: it.SkuID, Quantity: it.Quantity}
+			}
+			allocs[i] = WarehouseAllocation{WarehouseID: p.WarehouseID, Lines: pLines}
+		}
+		reserveErr = mw.ReserveAllocations(ctx, o.OrderID, allocs)
+	} else {
+		lines := make([]StockLine, len(o.Items))
+		for i, it := range o.Items {
+			lines[i] = StockLine{SkuID: it.SkuID, Quantity: it.Quantity}
+		}
+		reserveErr = s.Stock.Reserve(ctx, o.OrderID, o.WarehouseID, lines)
+	}
+	if reserveErr != nil {
+		if !errors.Is(reserveErr, ErrOutOfStock) {
 			// A timeout does not say whether the stock was taken: release it to be safe (idempotent).
 			s.releaseStock(ctx, o.OrderID)
 		}
-		return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(err))
+		return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, failureOf(reserveErr))
 	}
+	if o.PaymentMethod == PaymentMethodCOD {
+		if err := s.Stock.Commit(ctx, o.OrderID); err != nil {
+			s.releaseStock(ctx, o.OrderID)
+			s.releaseVoucher(ctx, o)
+			return s.close(ctx, o, saga.StatePending, saga.ReserveFailed{}, FailureDependencyUnavailable)
+		}
+		if o.VoucherCode != "" {
+			_ = s.Vouchers.Consume(ctx, o.VoucherCode, o.OrderID)
+		}
+		if s.Promotions != nil && len(o.AppliedPromotions) > 0 {
+			_ = s.Promotions.ConsumeOrder(ctx, o.OrderID)
+		}
+		confirmed, err := s.Orders.Transition(ctx, o.OrderID, string(saga.StatePending), string(saga.StateConfirmed), PayCODPending, "", s.orderConfirmed(o, 0))
+		if err != nil {
+			return s.undoAfterStoreFailure(ctx, o)
+		}
+		if _, err := s.Payments.CreateCODAttempt(ctx, confirmed.OrderID, p.UserID, confirmed.TotalPayableVND); err != nil {
+			log.Printf("[order] COD payment attempt creation failed for order %s, rolling back confirmation: %v", confirmed.OrderID, err)
+			if relErr := s.Stock.ReleaseCommitted(ctx, confirmed.OrderID); relErr != nil {
+				log.Printf("[order] rollback release committed stock failed for %s: %v", confirmed.OrderID, relErr)
+			}
+			s.releaseVoucher(ctx, confirmed)
+			if closed, tErr := s.Orders.Transition(ctx, confirmed.OrderID, string(saga.StateConfirmed), string(saga.StateFailedClosed), saga.PayFailed, FailureDependencyUnavailable,
+				s.orderFailed(confirmed, FailureDependencyUnavailable, saga.PayFailed)); tErr == nil {
+				return closed
+			}
+			confirmed.Status = string(saga.StateFailedClosed)
+			confirmed.PaymentStatus = saga.PayFailed
+			confirmed.FailureCode = FailureDependencyUnavailable
+			return confirmed
+		}
+		s.clearCart(ctx, confirmed)
+		return confirmed
+	}
+
 	reserved, err := s.transition(ctx, o, saga.StatePending, saga.Reserved{}, "")
 	if err != nil {
 		return s.undoAfterStoreFailure(ctx, o)
@@ -296,6 +423,8 @@ func failureOf(err error) string {
 	switch {
 	case errors.As(err, &refusal):
 		return refusal.Reason
+	case errors.Is(err, promotion.ErrQuotaExhausted), errors.Is(err, promotion.ErrBudgetExceeded), errors.Is(err, promotion.ErrCustomerLimitHit):
+		return "PROMOTION_EXHAUSTED"
 	case errors.Is(err, ErrOutOfStock):
 		return FailureOutOfStock
 	}
@@ -365,11 +494,15 @@ func (s *Service) releaseStock(ctx context.Context, orderID string) {
 }
 
 func (s *Service) releaseVoucher(ctx context.Context, o orders.Order) {
-	if o.VoucherCode == "" {
-		return
+	if o.VoucherCode != "" {
+		if err := s.Vouchers.Release(ctx, o.VoucherCode, o.OrderID); err != nil {
+			log.Printf("[order] voucher release failed for order %s: %v", o.OrderID, redact(err))
+		}
 	}
-	if err := s.Vouchers.Release(ctx, o.VoucherCode, o.OrderID); err != nil {
-		log.Printf("[order] voucher release failed for order %s: %v", o.OrderID, redact(err))
+	if s.Promotions != nil && len(o.AppliedPromotions) > 0 {
+		if err := s.Promotions.ReleaseOrder(ctx, o.OrderID); err != nil {
+			log.Printf("[order] promotion release failed for order %s: %v", o.OrderID, redact(err))
+		}
 	}
 }
 

@@ -1,12 +1,13 @@
 # Multi-stage Dockerfile cho NestJS Backoffice Support Service (tối ưu <= 250MB RAM & <= 0.25 CPU)
 FROM node:20-alpine AS builder
+RUN corepack enable && corepack prepare pnpm@latest --activate
 WORKDIR /app
 
-COPY package.json tsconfig.json ./
-RUN npm install --no-audit --no-fund
+COPY package.json pnpm-lock.yaml tsconfig.json ./
+RUN pnpm install --frozen-lockfile --ignore-scripts
 
 COPY src ./src
-RUN npm run build && npm prune --omit=dev
+RUN pnpm run build && pnpm prune --prod --ignore-scripts
 
 FROM node:20-alpine
 WORKDIR /app

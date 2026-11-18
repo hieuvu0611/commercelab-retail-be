@@ -52,7 +52,32 @@ func (m *MemoryStore) Get(_ context.Context, shipmentID string) (Shipment, error
 }
 
 func (m *MemoryStore) GetByOrder(ctx context.Context, orderID string) (Shipment, error) {
-	return m.Get(ctx, ID(orderID))
+	list, err := m.ListByOrder(ctx, orderID)
+	if err != nil || len(list) == 0 {
+		return Shipment{}, ErrNotFound
+	}
+	return list[0], nil
+}
+
+func (m *MemoryStore) ListByOrder(_ context.Context, orderID string) ([]Shipment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Shipment
+	for _, s := range m.byID {
+		if s.OrderID == orderID {
+			out = append(out, clone(s))
+		}
+	}
+	if len(out) == 0 {
+		return nil, ErrNotFound
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ParcelIndex != out[j].ParcelIndex {
+			return out[i].ParcelIndex < out[j].ParcelIndex
+		}
+		return out[i].ShipmentID < out[j].ShipmentID
+	})
+	return out, nil
 }
 
 func (m *MemoryStore) List(_ context.Context, f Filter) ([]Shipment, int, error) {
@@ -114,6 +139,26 @@ func (m *MemoryStore) SaveWith(_ context.Context, s Shipment, expectedVersion in
 		if _, exists := m.cases[o.Case.CaseID]; !exists {
 			m.cases[o.Case.CaseID] = *o.Case
 		}
+	}
+	return nil
+}
+
+func (m *MemoryStore) SaveStopUpdates(_ context.Context, updates []StopUpdate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, update := range updates {
+		current, ok := m.byID[update.Shipment.ShipmentID]
+		if !ok {
+			return ErrNotFound
+		}
+		if current.Version != update.ExpectedVersion {
+			return ErrStaleVersion
+		}
+	}
+	for _, update := range updates {
+		id := update.Shipment.ShipmentID
+		m.byID[id] = clone(update.Shipment)
+		m.events[id] = append(m.events[id], update.Events...)
 	}
 	return nil
 }

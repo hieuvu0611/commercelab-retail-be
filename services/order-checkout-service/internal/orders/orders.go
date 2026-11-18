@@ -25,7 +25,12 @@ var (
 	ErrNotFound = errors.New("order not found")
 	// ErrStaleState means the order was not in the state the caller expected, so nothing changed.
 	ErrStaleState = errors.New("order is not in the expected state")
+	// ErrCODVelocityLimit means the customer already has >= MaxActiveCODOrders active COD orders.
+	ErrCODVelocityLimit = errors.New("customer has reached maximum active COD orders limit (2)")
 )
+
+// MaxActiveCODOrders caps concurrent active/pending COD orders per customer.
+const MaxActiveCODOrders = 2
 
 // Item is one order line, frozen at the price the customer accepted (all amounts are whole VND).
 type Item struct {
@@ -37,15 +42,34 @@ type Item struct {
 	AllocatedUnitPaidVND int64  `json:"allocatedUnitPaidVnd"`
 }
 
+// Parcel is one warehouse's fulfillment allocation of an order (at most 2 parcels per order in Stage 3).
+type Parcel struct {
+	ParcelSeq    int    `json:"parcelSeq"`
+	WarehouseID  string `json:"warehouseId"`
+	Items        []Item `json:"items"`
+	CodAmountVND int64  `json:"codAmountVnd,omitempty"`
+	Status       string `json:"status"`
+}
+
+// AppliedPromotion freezes a B08 promotion campaign discount applied to an order.
+type AppliedPromotion struct {
+	CampaignID  string `json:"campaignId"`
+	Code        string `json:"code"`
+	Name        string `json:"name"`
+	DiscountVND int64  `json:"discountVnd"`
+}
+
 // Order is a placed order. Status is the saga state; PaymentStatus is tracked separately.
 type Order struct {
-	OrderID          string     `json:"orderId"`
-	UserID           string     `json:"-"`
-	QuoteID          string     `json:"quoteId"`
-	AddressID        string     `json:"addressId"`
-	WarehouseID      string     `json:"warehouseId,omitempty"`
-	VoucherCode      string     `json:"voucherCode,omitempty"`
+	OrderID           string             `json:"orderId"`
+	UserID            string             `json:"-"`
+	QuoteID           string             `json:"quoteId"`
+	AddressID         string             `json:"addressId"`
+	WarehouseID       string             `json:"warehouseId,omitempty"`
+	VoucherCode       string             `json:"voucherCode,omitempty"`
+	AppliedPromotions []AppliedPromotion `json:"appliedPromotions,omitempty"`
 	Status           string     `json:"status"`
+	PaymentMethod    string     `json:"paymentMethod,omitempty"`
 	PaymentStatus    string     `json:"paymentStatus"`
 	FailureCode      string     `json:"failureCode,omitempty"`
 	SubtotalVND      int64      `json:"subtotalVnd"`
@@ -57,6 +81,7 @@ type Order struct {
 	RefundedVND      int64      `json:"refundedAmountVnd"`
 	ItemCount        int64      `json:"itemCount,omitempty"` // set by Query, which does not load items
 	Items            []Item     `json:"items"`
+	Parcels          []Parcel   `json:"parcels,omitempty"`
 	Version          int64      `json:"version"`
 	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt        time.Time  `json:"createdAt"`
@@ -108,6 +133,8 @@ type Store interface {
 	// RecordCapture stores how much money the payment captured and how much of it is owed back (absolute values,
 	// so repeating it changes nothing); ErrNotFound when the order does not exist.
 	RecordCapture(ctx context.Context, orderID string, capturedVND, refundPendingVND int64) error
+	// CountActiveCODOrders counts active delivering/pending COD orders for a user (velocity control).
+	CountActiveCODOrders(ctx context.Context, userID string) (int, error)
 	// RecordRefund stores how much was paid back and how much is still owed, with the resulting payment status
 	// (absolute values, so repeating it changes nothing); ErrNotFound when the order does not exist.
 	RecordRefund(ctx context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error

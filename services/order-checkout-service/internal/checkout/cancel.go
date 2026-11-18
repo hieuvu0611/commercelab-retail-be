@@ -39,6 +39,8 @@ const (
 type StopRequest struct {
 	OrderID, UserID, WarehouseID string
 	Lines                        []StockLine
+	Parcels                      []orders.Parcel
+	PaymentMethod                string
 }
 
 // Fulfillment arbitrates a cancellation against the warehouse. StopShipment is idempotent.
@@ -160,7 +162,7 @@ func (s *Service) cancelPaid(ctx context.Context, o orders.Order) (orders.Order,
 	for i, it := range o.Items {
 		lines[i] = StockLine{SkuID: it.SkuID, Quantity: it.Quantity}
 	}
-	result, err := s.Fulfillment.StopShipment(ctx, StopRequest{OrderID: o.OrderID, UserID: o.UserID, WarehouseID: o.WarehouseID, Lines: lines})
+	result, err := s.Fulfillment.StopShipment(ctx, StopRequest{OrderID: o.OrderID, UserID: o.UserID, WarehouseID: o.WarehouseID, Lines: lines, Parcels: o.Parcels, PaymentMethod: o.PaymentMethod})
 	if err != nil {
 		return o, err
 	}
@@ -189,6 +191,9 @@ func (s *Service) cancelPaid(ctx context.Context, o orders.Order) (orders.Order,
 	}
 	if err := s.Payments.CloseAttemptForCancel(ctx, ids.PaymentAttemptID(o.OrderID)); err != nil {
 		return o, err
+	}
+	if o.PaymentMethod == PaymentMethodCOD && o.CapturedVND == 0 {
+		return s.storeCancelled(ctx, o, PayCODCancelled, 0)
 	}
 	owed := o.CapturedVND
 	if owed == 0 {
@@ -219,7 +224,7 @@ func (s *Service) awaitStop(ctx context.Context, o orders.Order) (orders.Order, 
 	if o.Status == string(saga.StateCancelRequested) {
 		return o, nil
 	}
-	res, err := saga.Next(saga.State(o.Status), saga.CancelRequested{})
+	res, err := saga.Next(saga.State(o.Status), saga.CancelRequested{PaymentStatus: o.PaymentStatus})
 	if err != nil {
 		return o, err
 	}
@@ -228,7 +233,7 @@ func (s *Service) awaitStop(ctx context.Context, o orders.Order) (orders.Order, 
 
 // rejectCancel puts a waiting order back into fulfillment because the parcel was handed over first (SC06 B).
 func (s *Service) rejectCancel(ctx context.Context, o orders.Order) (orders.Order, error) {
-	res, err := saga.Next(saga.StateCancelRequested, saga.CancelRejected{})
+	res, err := saga.Next(saga.StateCancelRequested, saga.CancelRejected{PaymentStatus: o.PaymentStatus})
 	if err != nil {
 		return o, err
 	}

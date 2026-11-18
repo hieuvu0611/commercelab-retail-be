@@ -38,7 +38,7 @@ func releaseHeldStock(ctx context.Context, tx pgx.Tx, rec *ReservationRecord, ac
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE reservations SET status = 'RELEASED', version = version + 1 WHERE order_id = $1`, rec.OrderID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE reservations SET status = 'RELEASED', version = version + 1 WHERE reservation_id = $1`, rec.ReservationID); err != nil {
 		return dependency.Wrap(err)
 	}
 	rec.Status = "RELEASED"
@@ -53,23 +53,39 @@ func (r *InventoryRepository) PlaceExceptionHold(ctx context.Context, orderID st
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		rec, ok := r.reservations[orderID]
-		if !ok {
+		recs, ok := r.reservations[orderID]
+		if !ok || len(recs) == 0 {
 			return nil, ErrReservationNotFound
 		}
-		if rec.Status == statusException {
-			cp := *rec
+		allHeld := true
+		for _, rec := range recs {
+			if rec.Status != statusException {
+				allHeld = false
+				break
+			}
+		}
+		if allHeld {
+			cp := *recs[0]
 			return &cp, nil
 		}
-		if rec.Status != statusActive {
-			return nil, domain.ErrInvalidReservationState
+		for _, rec := range recs {
+			if rec.Status == statusException {
+				continue
+			}
+			if rec.Status != statusActive {
+				return nil, domain.ErrInvalidReservationState
+			}
+			if !now.Before(rec.ExpiresAt) {
+				return nil, ErrReservationExpired
+			}
 		}
-		if !now.Before(rec.ExpiresAt) {
-			return nil, ErrReservationExpired
+		for _, rec := range recs {
+			if rec.Status == statusActive {
+				rec.Status = statusException
+				rec.ExpiresAt = rec.ExpiresAt.Add(ExceptionHoldTTL - ReservationTTL)
+			}
 		}
-		rec.Status = statusException
-		rec.ExpiresAt = rec.ExpiresAt.Add(ExceptionHoldTTL - ReservationTTL)
-		cp := *rec
+		cp := *recs[0]
 		return &cp, nil
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -77,51 +93,62 @@ func (r *InventoryRepository) PlaceExceptionHold(ctx context.Context, orderID st
 		return nil, dependency.Wrap(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var rec ReservationRecord
-	var rawLines []byte
-	err = tx.QueryRow(ctx, `
-		SELECT reservation_id, order_id, warehouse_id, status, lines_json, expires_at
-		FROM reservations WHERE order_id = $1 FOR UPDATE
-	`, orderID).Scan(&rec.ReservationID, &rec.OrderID, &rec.WarehouseID, &rec.Status, &rawLines, &rec.ExpiresAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+
+	recs, err := loadReservationsTx(ctx, tx, orderID, "")
+	if err != nil {
+		return nil, err
+	}
+	if len(recs) == 0 {
 		return nil, ErrReservationNotFound
 	}
-	if err != nil {
-		return nil, dependency.Wrap(err)
+	allHeld := true
+	for _, rec := range recs {
+		if rec.Status != statusException {
+			allHeld = false
+			break
+		}
 	}
-	_ = json.Unmarshal(rawLines, &rec.Lines)
-	if rec.Status == statusException {
-		return &rec, nil
+	if allHeld {
+		return &recs[0], nil
 	}
-	if rec.Status != statusActive {
-		return nil, domain.ErrInvalidReservationState
+	for _, rec := range recs {
+		if rec.Status == statusException {
+			continue
+		}
+		if rec.Status != statusActive {
+			return nil, domain.ErrInvalidReservationState
+		}
+		if !now.Before(rec.ExpiresAt) {
+			return nil, ErrReservationExpired
+		}
 	}
-	if !now.Before(rec.ExpiresAt) {
-		return nil, ErrReservationExpired
-	}
-	rec.ExpiresAt = rec.ExpiresAt.Add(ExceptionHoldTTL - ReservationTTL)
-	if _, err := tx.Exec(ctx, `
-		UPDATE reservations SET status = 'EXCEPTION_HOLD_30M', expires_at = $2, version = version + 1 WHERE order_id = $1
-	`, orderID, rec.ExpiresAt); err != nil {
-		return nil, dependency.Wrap(err)
+	for i := range recs {
+		rec := &recs[i]
+		if rec.Status == statusActive {
+			rec.ExpiresAt = rec.ExpiresAt.Add(ExceptionHoldTTL - ReservationTTL)
+			if _, err := tx.Exec(ctx, `
+				UPDATE reservations SET status = 'EXCEPTION_HOLD_30M', expires_at = $2, version = version + 1 WHERE reservation_id = $1
+			`, rec.ReservationID, rec.ExpiresAt); err != nil {
+				return nil, dependency.Wrap(err)
+			}
+			rec.Status = statusException
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, dependency.Wrap(err)
 	}
-	rec.Status = statusException
-	return &rec, nil
+	return &recs[0], nil
 }
 
 // ExpireDueReservations releases every ACTIVE_10M reservation whose expires_at has passed and returns how many it
 // released. Exception holds are never touched: their controlled release is an explicit call (SC05).
-// Each reservation is its own transaction and rows another worker holds are skipped, so several instances can run.
 func (r *InventoryRepository) ExpireDueReservations(ctx context.Context) (int, error) {
 	now := r.now().UTC()
 	if r.pool == nil {
 		return r.expireInMemory(now), nil
 	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT order_id FROM reservations WHERE status = 'ACTIVE_10M' AND expires_at <= $1
+		SELECT reservation_id FROM reservations WHERE status = 'ACTIVE_10M' AND expires_at <= $1
 		ORDER BY expires_at LIMIT $2
 	`, now, sweepBatchSize)
 	if err != nil {
@@ -141,8 +168,8 @@ func (r *InventoryRepository) ExpireDueReservations(ctx context.Context) (int, e
 		return 0, dependency.Wrap(err)
 	}
 	released := 0
-	for _, orderID := range due {
-		ok, err := r.expireOne(ctx, orderID, now)
+	for _, resID := range due {
+		ok, err := r.expireOne(ctx, resID, now)
 		if err != nil {
 			return released, err
 		}
@@ -153,7 +180,7 @@ func (r *InventoryRepository) ExpireDueReservations(ctx context.Context) (int, e
 	return released, nil
 }
 
-func (r *InventoryRepository) expireOne(ctx context.Context, orderID string, now time.Time) (bool, error) {
+func (r *InventoryRepository) expireOne(ctx context.Context, reservationID string, now time.Time) (bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return false, dependency.Wrap(err)
@@ -164,11 +191,11 @@ func (r *InventoryRepository) expireOne(ctx context.Context, orderID string, now
 	err = tx.QueryRow(ctx, `
 		SELECT reservation_id, order_id, warehouse_id, status, lines_json, expires_at
 		FROM reservations
-		WHERE order_id = $1 AND status = 'ACTIVE_10M' AND expires_at <= $2
+		WHERE reservation_id = $1 AND status = 'ACTIVE_10M' AND expires_at <= $2
 		FOR UPDATE SKIP LOCKED
-	`, orderID, now).Scan(&rec.ReservationID, &rec.OrderID, &rec.WarehouseID, &rec.Status, &rawLines, &rec.ExpiresAt)
+	`, reservationID, now).Scan(&rec.ReservationID, &rec.OrderID, &rec.WarehouseID, &rec.Status, &rawLines, &rec.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil // paid, held, released or locked by someone else in the meantime
+		return false, nil
 	}
 	if err != nil {
 		return false, dependency.Wrap(err)
@@ -187,20 +214,22 @@ func (r *InventoryRepository) expireInMemory(now time.Time) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	released := 0
-	for orderID, rec := range r.reservations {
-		if rec.Status != statusActive || now.Before(rec.ExpiresAt) {
-			continue
+	for orderID, recs := range r.reservations {
+		for _, rec := range recs {
+			if rec.Status != statusActive || now.Before(rec.ExpiresAt) {
+				continue
+			}
+			if err := r.engine.ReleaseReservation(rec.WarehouseID, rec.Lines); err != nil {
+				continue
+			}
+			for _, line := range rec.Lines {
+				m := lineMovement(domain.MovementRelease, rec.WarehouseID, orderID, line, "reservation expired")
+				m.ActorID = ExpirySweepActor
+				r.appendMovement(m)
+			}
+			rec.Status = "RELEASED"
+			released++
 		}
-		if err := r.engine.ReleaseReservation(rec.WarehouseID, rec.Lines); err != nil {
-			continue
-		}
-		for _, line := range rec.Lines {
-			m := lineMovement(domain.MovementRelease, rec.WarehouseID, orderID, line, "reservation expired")
-			m.ActorID = ExpirySweepActor
-			r.appendMovement(m)
-		}
-		rec.Status = "RELEASED"
-		released++
 	}
 	return released
 }

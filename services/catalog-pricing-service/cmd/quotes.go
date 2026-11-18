@@ -27,6 +27,11 @@ type VoucherChecker interface {
 	Eligibility(ctx context.Context, bearer, code string) (peer.Eligibility, error)
 }
 
+// PromotionEvaluator optionally evaluates B08 campaigns alongside single vouchers.
+type PromotionEvaluator interface {
+	EvaluatePromotions(ctx context.Context, bearer string, campaignIDs []string, lines []peer.PromoEvalLine) (peer.PromoEvaluation, error)
+}
+
 // AddressChecker asks the IAM service whether an address is in the token owner's address book.
 type AddressChecker interface {
 	Exists(ctx context.Context, bearer, addressID string) (bool, error)
@@ -37,17 +42,30 @@ type quoteStore interface {
 	GetQuoteByID(ctx context.Context, quoteID string) (*domain.Quote, error)
 }
 
+type productLookup interface {
+	GetProduct(ctx context.Context, id string) (domain.ProductView, error)
+}
+
+type productCategoryLookup interface {
+	GetProductCategoryID(ctx context.Context, productID string) (string, error)
+}
+
 type quoteAPI struct {
 	store     quoteStore
 	cart      *cart.Service
 	pricer    cart.Pricer
 	vouchers  VoucherChecker
 	addresses AddressChecker
+	products  productLookup
 	now       func() time.Time
 }
 
-func registerQuoteRoutes(mux *http.ServeMux, store quoteStore, carts *cart.Service, pricer cart.Pricer, vouchers VoucherChecker, addresses AddressChecker) {
-	api := &quoteAPI{store: store, cart: carts, pricer: pricer, vouchers: vouchers, addresses: addresses, now: func() time.Time { return time.Now().UTC() }}
+func registerQuoteRoutes(mux *http.ServeMux, store quoteStore, carts *cart.Service, pricer cart.Pricer, vouchers VoucherChecker, addresses AddressChecker, products ...productLookup) {
+	var pl productLookup
+	if len(products) > 0 {
+		pl = products[0]
+	}
+	api := &quoteAPI{store: store, cart: carts, pricer: pricer, vouchers: vouchers, addresses: addresses, products: pl, now: func() time.Time { return time.Now().UTC() }}
 	mux.Handle("POST /api/v1/quotes", auth.RequireAuth(http.HandlerFunc(api.create)))
 	mux.Handle("GET /api/v1/quotes/{quoteId}", auth.RequireAuth(http.HandlerFunc(api.get)))
 }
@@ -56,8 +74,9 @@ func registerQuoteRoutes(mux *http.ServeMux, store quoteStore, carts *cart.Servi
 // carries only the delivery address and an optional voucher code, and any other field is rejected.
 func (a *quoteAPI) create(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		AddressID   string `json:"addressId"`
-		VoucherCode string `json:"voucherCode"`
+		AddressID   string   `json:"addressId"`
+		VoucherCode string   `json:"voucherCode"`
+		CampaignIDs []string `json:"campaignIds"`
 	}
 	if !request.DecodeJSON(w, r, &body) {
 		return
@@ -88,8 +107,30 @@ func (a *quoteAPI) create(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var promoDiscount int64
+	var appliedCampaigns []domain.AppliedCampaign
+	if eval, ok := a.vouchers.(PromotionEvaluator); ok {
+		evalLines := make([]peer.PromoEvalLine, len(lines))
+		for i, l := range lines {
+			catID := a.categoryForSku(r.Context(), l.SkuID)
+			evalLines[i] = peer.PromoEvalLine{SkuID: l.SkuID, CategoryID: catID, Quantity: l.Quantity, UnitPriceVND: l.UnitPriceVND}
+		}
+		if res, err := eval.EvaluatePromotions(r.Context(), bearer, body.CampaignIDs, evalLines); err != nil {
+			if len(body.CampaignIDs) > 0 {
+				writeQuoteError(w, r, err)
+				return
+			}
+		} else {
+			promoDiscount = res.TotalDiscountVND
+			for _, ap := range res.Applied {
+				appliedCampaigns = append(appliedCampaigns, domain.AppliedCampaign{
+					CampaignID: ap.CampaignID, Code: ap.Code, Name: ap.Name, DiscountVND: ap.DiscountVND,
+				})
+			}
+		}
+	}
 
-	quote, err := domain.CalculateQuote(newQuoteID(), claims.UserID, code, discountPct, lines, a.now())
+	quote, err := domain.CalculateQuoteWithPromotions(newQuoteID(), claims.UserID, code, discountPct, promoDiscount, appliedCampaigns, lines, a.now())
 	if err != nil {
 		log.Printf("[catalog] quote calculation failed: %v", err)
 		response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error", nil)
@@ -215,6 +256,24 @@ func (a *quoteAPI) staleSkus(ctx context.Context, q *domain.Quote) ([]string, er
 		}
 	}
 	return stale, nil
+}
+
+func (a *quoteAPI) categoryForSku(ctx context.Context, skuID string) string {
+	sp, err := a.pricer.GetSkuPrice(ctx, skuID)
+	if err != nil || sp.ProductID == "" {
+		return ""
+	}
+	if a.products != nil {
+		if pv, err := a.products.GetProduct(ctx, sp.ProductID); err == nil && pv.PrimaryCategoryID != "" {
+			return pv.PrimaryCategoryID
+		}
+	}
+	if cl, ok := a.store.(productCategoryLookup); ok {
+		if catID, err := cl.GetProductCategoryID(ctx, sp.ProductID); err == nil && catID != "" {
+			return catID
+		}
+	}
+	return ""
 }
 
 func newQuoteID() string {

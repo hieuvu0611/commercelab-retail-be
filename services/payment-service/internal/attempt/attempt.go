@@ -15,6 +15,9 @@ const (
 	StatusFailed       = "FAILED"
 	StatusExpired30m   = "EXPIRED_30M"
 	StatusCapturedLate = "CAPTURED_LATE"
+	StatusCODPending   = "COD_PENDING"
+	StatusCOLLECTED    = "COLLECTED"
+	StatusCODCancelled = "COD_CANCELLED"
 )
 
 // Reasons of a refund obligation: why money is owed back.
@@ -32,9 +35,11 @@ const UnknownWindow = 30 * time.Minute
 type Outcome string
 
 const (
-	OutcomeCaptured Outcome = "CAPTURED"
-	OutcomeFailed   Outcome = "FAILED"
-	OutcomeUnknown  Outcome = "UNKNOWN"
+	OutcomeCaptured     Outcome = "CAPTURED"
+	OutcomeFailed       Outcome = "FAILED"
+	OutcomeUnknown      Outcome = "UNKNOWN"
+	OutcomeCODCollected Outcome = "COLLECTED"
+	OutcomeCODCancelled Outcome = "COD_CANCELLED"
 )
 
 var (
@@ -52,6 +57,8 @@ var (
 	ErrRefundCeiling = errors.New("a refund cannot exceed the captured amount")
 	// ErrIdempotencyConflict: the key was used for different content.
 	ErrIdempotencyConflict = errors.New("idempotency key was already used with different content")
+	// ErrCODAlreadyCollected: COD cash was already collected; cancellation cannot void payment and must use RMA/refund.
+	ErrCODAlreadyCollected = errors.New("COD payment was already collected")
 )
 
 // Attempt is the single payment attempt of an order (all amounts whole VND).
@@ -60,6 +67,7 @@ type Attempt struct {
 	OrderID           string     `json:"orderId"`
 	UserID            string     `json:"-"`
 	IdempotencyKey    string     `json:"-"`
+	PaymentMethod     string     `json:"paymentMethod,omitempty"`
 	AmountVND         int64      `json:"amountVnd"`
 	CapturedAmountVND int64      `json:"capturedAmountVnd"`
 	Status            string     `json:"status"`
@@ -85,16 +93,52 @@ type Change struct {
 // a capture after the window is CAPTURED_LATE and creates a refund obligation, not a confirmation.
 func Apply(a Attempt, o Outcome, amountVND int64, now time.Time) (Attempt, Change, error) {
 	switch o {
-	case OutcomeCaptured:
+	case OutcomeCaptured, OutcomeCODCollected:
 		if amountVND <= 0 {
-			return a, Change{}, ErrInvalidOutcome
+			if a.PaymentMethod == "COD" || a.Status == StatusCODPending {
+				amountVND = a.AmountVND
+			} else {
+				return a, Change{}, ErrInvalidOutcome
+			}
 		}
-	case OutcomeFailed, OutcomeUnknown:
+	case OutcomeFailed, OutcomeUnknown, OutcomeCODCancelled:
 	default:
 		return a, Change{}, ErrInvalidOutcome
 	}
 
 	switch a.Status {
+	case StatusCODPending:
+		switch o {
+		case OutcomeCaptured, OutcomeCODCollected:
+			nextCap := a.CapturedAmountVND + amountVND
+			if nextCap > a.AmountVND {
+				nextCap = a.AmountVND
+			}
+			delta := nextCap - a.CapturedAmountVND
+			a.CapturedAmountVND = nextCap
+			if nextCap >= a.AmountVND {
+				a.Status, a.OutcomeAt = StatusCOLLECTED, &now
+			}
+			return a, Change{CapturedVND: delta}, nil
+		case OutcomeFailed, OutcomeCODCancelled:
+			if a.CapturedAmountVND > 0 {
+				return a, Change{}, ErrCODAlreadyCollected
+			}
+			a.Status, a.OutcomeAt = StatusCODCancelled, &now
+			return a, Change{}, nil
+		default:
+			return a, Change{}, ErrInvalidOutcome
+		}
+	case StatusCOLLECTED:
+		if (o == OutcomeCaptured || o == OutcomeCODCollected) && (amountVND == a.CapturedAmountVND || amountVND <= 0 || a.PaymentMethod == "COD") {
+			return a, Change{Replay: true}, nil
+		}
+		return a, Change{}, ErrFinalOutcome
+	case StatusCODCancelled:
+		if o == OutcomeFailed || o == OutcomeCODCancelled {
+			return a, Change{Replay: true}, nil
+		}
+		return a, Change{}, ErrFinalOutcome
 	case StatusProcessing:
 		return fromProcessing(a, o, amountVND, now)
 	case StatusUnknown:
@@ -167,10 +211,18 @@ func CloseFor(a Attempt, now time.Time, reason string) (Attempt, Change, error) 
 	case StatusProcessing, StatusUnknown:
 		a.Status, a.OutcomeAt = StatusExpired30m, &now
 		return a, Change{}, nil
+	case StatusCODPending:
+		if a.CapturedAmountVND > 0 {
+			return a, Change{}, ErrCODAlreadyCollected
+		}
+		a.Status, a.OutcomeAt = StatusCODCancelled, &now
+		return a, Change{}, nil
 	case StatusCaptured:
 		a.Status = StatusCapturedLate
 		return a, Change{LateRefundVND: a.CapturedAmountVND, RefundReason: reason}, nil
-	case StatusCapturedLate, StatusFailed, StatusExpired30m:
+	case StatusCOLLECTED:
+		return a, Change{}, ErrCODAlreadyCollected
+	case StatusCapturedLate, StatusFailed, StatusExpired30m, StatusCODCancelled:
 		return a, Change{Replay: true}, nil
 	}
 	return a, Change{}, ErrInvalidOutcome

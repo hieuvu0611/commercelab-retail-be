@@ -74,16 +74,35 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	}))))
 
 	mux.HandleFunc("GET /api/v1/inventory/availability", availabilityHandler(repo, options.lowStockThreshold))
+	mux.Handle("GET /api/v1/inventory/availability/breakdown", internalauth.Require(availabilityBreakdownHandler(repo)))
 
-	// P03, SC02, SC03: Giữ tồn kho nguyên tử 10 phút cho toàn bộ đơn
+	// P03, SC02, SC03: Atomic 10-minute stock reservation across 1 or 2 warehouses
 	mux.Handle("POST /api/v1/inventory/reservations", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			OrderID     string               `json:"orderId"`
-			WarehouseID string               `json:"warehouseId"`
-			Lines       []domain.ReserveLine `json:"lines"`
+			OrderID     string                       `json:"orderId"`
+			WarehouseID string                       `json:"warehouseId"`
+			Lines       []domain.ReserveLine         `json:"lines"`
+			Allocations []domain.WarehouseAllocation `json:"allocations"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrderID == "" {
 			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "Dữ liệu giữ tồn không hợp lệ", nil)
+			return
+		}
+		if len(req.Allocations) > 0 {
+			recs, err := repo.ReserveAllocations(r.Context(), req.OrderID, req.Allocations)
+			if dependency.IsUnavailable(err) {
+				dependency.WriteUnavailable(w, r, err)
+				return
+			}
+			if errors.Is(err, repository.ErrWarehouseRequired) || errors.Is(err, domain.ErrInvalidLines) {
+				response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", err.Error(), nil)
+				return
+			}
+			if err != nil {
+				response.Error(w, r, http.StatusConflict, "INSUFFICIENT_STOCK", err.Error(), nil)
+				return
+			}
+			response.JSON(w, http.StatusCreated, "Giữ hàng 10 phút thành công (P03)", recs, nil)
 			return
 		}
 		rec, err := repo.ReserveForOrder(r.Context(), req.OrderID, req.WarehouseID, req.Lines)
@@ -179,7 +198,19 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "orderId is required for handover", nil)
 			return
 		}
-		reservation, err := repo.GetReservation(r.Context(), req.OrderID)
+		reservation, err := repo.GetReservationForWarehouse(r.Context(), req.OrderID, req.WarehouseID)
+		if errors.Is(err, repository.ErrReservationNotFound) && req.WarehouseID != "" {
+			if other, otherErr := repo.GetReservation(r.Context(), req.OrderID); otherErr == nil && other != nil {
+				response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
+				return
+			}
+		}
+		if errors.Is(err, repository.ErrReservationNotFound) && req.WarehouseID != "" {
+			if other, otherErr := repo.GetReservation(r.Context(), req.OrderID); otherErr == nil && other != nil {
+				response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
+				return
+			}
+		}
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -197,7 +228,7 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
 			return
 		}
-		rec, err := repo.HandoverOrderShipment(r.Context(), req.OrderID)
+		rec, err := repo.HandoverOrderShipmentForWarehouse(r.Context(), req.OrderID, reservation.WarehouseID)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -222,7 +253,19 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "orderId is required to stop a shipment", nil)
 			return
 		}
-		reservation, err := repo.GetReservation(r.Context(), req.OrderID)
+		reservation, err := repo.GetReservationForWarehouse(r.Context(), req.OrderID, req.WarehouseID)
+		if errors.Is(err, repository.ErrReservationNotFound) && req.WarehouseID != "" {
+			if other, otherErr := repo.GetReservation(r.Context(), req.OrderID); otherErr == nil && other != nil {
+				response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
+				return
+			}
+		}
+		if errors.Is(err, repository.ErrReservationNotFound) && req.WarehouseID != "" {
+			if other, otherErr := repo.GetReservation(r.Context(), req.OrderID); otherErr == nil && other != nil {
+				response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
+				return
+			}
+		}
 		switch {
 		case dependency.IsUnavailable(err):
 			dependency.WriteUnavailable(w, r, err)
@@ -243,7 +286,7 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
 			return
 		}
-		rec, err := repo.ReleaseCommittedReservation(r.Context(), req.OrderID, claims.UserID)
+		rec, err := repo.ReleaseCommittedForWarehouse(r.Context(), req.OrderID, reservation.WarehouseID, claims.UserID)
 		switch {
 		case dependency.IsUnavailable(err):
 			dependency.WriteUnavailable(w, r, err)
@@ -256,7 +299,75 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	mux.Handle("POST /api/v1/inventory/shipments/stop",
 		auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(http.HandlerFunc(stop))))
 
+	// SC07: Kho nhận hàng trả -> OnHand +qty, Unsellable +qty, Available giữ nguyên
+	mux.Handle("POST /api/v1/inventory/returns/receive", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			WarehouseID string `json:"warehouseId"`
+			SkuID       string `json:"skuId"`
+			Quantity    int64  `json:"quantity"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SkuID == "" || req.Quantity <= 0 {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and positive quantity are required", nil)
+			return
+		}
+		st, err := repo.ReceiveReturnedItem(r.Context(), req.WarehouseID, req.SkuID, req.Quantity, r.Header.Get("Idempotency-Key"))
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusConflict, "RECEIVE_RETURN_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "Kho nhận hàng trả: OnHand +qty, Unsellable +qty (SC07)", stockView(st), nil)
+	})))
+
+	// SC07: Thẩm định QC đạt -> Unsellable -qty, Available +qty
+	mux.Handle("POST /api/v1/inventory/returns/qc-pass", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			WarehouseID string `json:"warehouseId"`
+			SkuID       string `json:"skuId"`
+			Quantity    int64  `json:"quantity"`
+		}
+		key := r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SkuID == "" || req.Quantity < 0 || (req.Quantity == 0 && key == "") {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and a valid QC pass quantity are required", nil)
+			return
+		}
+		st, err := repo.ApproveReturnQC(r.Context(), req.WarehouseID, req.SkuID, req.Quantity, key)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if err != nil {
+			response.Error(w, r, http.StatusConflict, "QC_PASS_FAILED", err.Error(), nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "QC đạt: Chuyển Unsellable sang Available (SC07)", stockView(st), nil)
+	})))
+
+	// SC07: Thẩm định QC hỏng -> giữ nguyên trong Unsellable để cách ly/tiêu hủy
+	mux.Handle("POST /api/v1/inventory/returns/qc-fail", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			WarehouseID string `json:"warehouseId"`
+			SkuID       string `json:"skuId"`
+			Quantity    int64  `json:"quantity"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SkuID == "" || req.Quantity <= 0 {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and positive quantity are required", nil)
+			return
+		}
+		st, ok, err := repo.GetStock(r.Context(), req.WarehouseID, req.SkuID)
+		if err != nil || !ok {
+			response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", "Không tìm thấy tồn kho cho SKU "+req.SkuID, nil)
+			return
+		}
+		response.JSON(w, http.StatusOK, "QC không đạt: Hàng giữ trong Unsellable cách ly (SC07)", stockView(st), nil)
+	})))
+
 	registerAdminRoutes(mux, repo)
+	registerProcurementRoutes(mux, repo)
+	registerTransferRoutes(mux, repo)
 
 	return middleware.Chain(mux)
 }

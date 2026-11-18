@@ -1,9 +1,49 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
-import { ApprovalCandidate, MakerCheckerPolicyService } from './common/guards/maker-checker.guard';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  NotFoundException,
+  Param,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { ApprovalCandidate, ApprovalType, MakerCheckerPolicyService } from './common/guards/maker-checker.guard';
 import { ReturnsRmaService } from './modules/returns-rma/returns.service';
 import { ExceptionCasesService } from './modules/exception-cases/exception-cases.service';
-import { CreateReturnDto } from './modules/returns-rma/create-return.dto';
+import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
+import { ManagementMetricsService } from './modules/metrics/management-metrics.service';
+import { ClickhouseAnalyticsService } from './modules/analytics/clickhouse-analytics.service';
+import { CreateOrderReturnRequestDto, CreateReturnRequestDto } from './modules/returns-rma/create-return.dto';
 import { ApiResult } from './common/http/api-response.interceptor';
+import { DatabaseService } from './database/database.service';
+import { AuthenticatedUser, JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { RolesGuard } from './common/guards/roles.guard';
+import { Roles } from './common/guards/roles.decorator';
+import { canAccessWarehouse, WarehouseScopeGuard } from './common/guards/warehouse.guard';
+
+const BACKOFFICE_STAFF_ROLES = new Set([
+  'CSKH',
+  'CSKH_LEAD',
+  'SUPPORT_AGENT',
+  'SUPPORT_STAFF',
+  'SUPPORT_LEAD',
+  'WAREHOUSE_STAFF',
+  'WAREHOUSE_MGR',
+  'DELIVERY_COORD',
+  'FINANCE',
+  'FINANCE_STAFF',
+  'FINANCE_MGR',
+  'PROCUREMENT',
+  'PROCUREMENT_STAFF',
+  'PROCUREMENT_MGR',
+  'OPS_MGR',
+  'OPS_DIRECTOR',
+  'ACCESS_ADMIN',
+  'ADMIN',
+]);
 
 @Controller()
 export class AppController {
@@ -11,22 +51,128 @@ export class AppController {
     private readonly makerChecker: MakerCheckerPolicyService,
     private readonly returnsService: ReturnsRmaService,
     private readonly exceptionCases: ExceptionCasesService,
+    private readonly databaseService: DatabaseService,
+    private readonly auditLogs: AuditLogsService,
+    private readonly metricsService: ManagementMetricsService,
+    private readonly clickhouseAnalytics: ClickhouseAnalyticsService,
   ) {}
 
   @Get('/health')
-  health() {
-    return new ApiResult({
-      service: 'backoffice-support-service',
-      runtime: 'NestJS',
-      postgresSchema: 'support',
-      mongoCollections: ['support_exception_cases', 'support_rma_dossiers'],
-    }, 'backoffice-support-service healthy');
+  async health() {
+    const dbOk = await this.databaseService.ping();
+    return new ApiResult(
+      {
+        service: 'backoffice-support-service',
+        runtime: 'NestJS',
+        postgresSchema: 'support',
+        postgresConnected: dbOk,
+      },
+      'backoffice-support-service healthy',
+    );
   }
 
-  @Get('/api/v1/backoffice/exception-cases')
-  listExceptionCases() {
-    const items = this.exceptionCases.listOpenCases();
-    return new ApiResult(items, 'Exception cases retrieved successfully', {
+  // ==========================================
+  // CUSTOMER & GENERAL RETURNS API (/api/v1/returns)
+  // ==========================================
+
+  @Post('/api/v1/returns')
+  @UseGuards(JwtAuthGuard)
+  async createReturn(@Req() req: any, @Body() body: CreateReturnRequestDto) {
+    const customerId = req.user?.userId || 'cust-default';
+    const authHeader = req.headers?.authorization as string | undefined;
+    const result = await this.returnsService.openRmaRequest(body, customerId, authHeader);
+    return new ApiResult(result, 'Return request created successfully');
+  }
+
+  @Get('/api/v1/returns')
+  @UseGuards(JwtAuthGuard)
+  async listReturns(
+    @Req() req: any,
+    @Query('orderId') orderId?: string,
+    @Query('status') status?: string,
+  ) {
+    await this.returnsService.ensureHydrated();
+    const customerId = req.user?.roles?.includes('ADMIN') ? undefined : req.user?.userId;
+    const items = this.returnsService.listReturns({ orderId, status, customerId });
+    return new ApiResult(items, 'Returns retrieved successfully', {
+      total: items.length,
+      page: 1,
+      pageCount: 1,
+      limit: items.length || 20,
+    });
+  }
+
+  private isBackofficeStaff(user?: AuthenticatedUser): boolean {
+    if (!user) return false;
+    if (user.isInternal) return true;
+    return (user.roles || []).some((role) => BACKOFFICE_STAFF_ROLES.has(role));
+  }
+
+  @Get('/api/v1/returns/:returnId')
+  @UseGuards(JwtAuthGuard)
+  async getReturnDetail(@Req() req: any, @Param('returnId') returnId: string) {
+    await this.returnsService.ensureHydrated();
+    const item = this.returnsService.getReturn(returnId);
+    const user = req.user as AuthenticatedUser | undefined;
+    if (!this.isBackofficeStaff(user) && item.customerId !== user?.userId) {
+      throw new ForbiddenException('You do not have permission to view this return request');
+    }
+    return new ApiResult(item, 'Return detail retrieved successfully');
+  }
+
+  @Post('/api/v1/orders/:orderId/returns')
+  @UseGuards(JwtAuthGuard)
+  async createOrderReturn(
+    @Req() req: any,
+    @Param('orderId') orderId: string,
+    @Body() body: CreateOrderReturnRequestDto,
+  ) {
+    const customerId = req.user?.userId || 'cust-default';
+    const authHeader = req.headers?.authorization as string | undefined;
+    const result = await this.returnsService.openRmaRequest({ ...body, orderId }, customerId, authHeader);
+    return new ApiResult(result, 'Return request created successfully');
+  }
+
+  @Get('/api/v1/orders/:orderId/returns')
+  @UseGuards(JwtAuthGuard)
+  async listOrderReturns(@Req() req: any, @Param('orderId') orderId: string) {
+    await this.returnsService.ensureHydrated();
+    const user = req.user as AuthenticatedUser | undefined;
+    const allForOrder = this.returnsService.listReturns({ orderId });
+    if (!this.isBackofficeStaff(user)) {
+      if (allForOrder.some((r) => r.customerId !== user?.userId)) {
+        throw new ForbiddenException('You do not have permission to view returns for this order');
+      }
+      return new ApiResult(
+        allForOrder.filter((r) => r.customerId === user?.userId),
+        'Order returns retrieved successfully',
+      );
+    }
+    return new ApiResult(allForOrder, 'Order returns retrieved successfully');
+  }
+
+  // ==========================================
+  // BACKOFFICE & STAFF RETURNS API (/api/v1/backoffice/returns)
+  // ==========================================
+
+  @Get('/api/v1/backoffice/returns')
+  @UseGuards(JwtAuthGuard, RolesGuard, WarehouseScopeGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async listBackofficeReturns(
+    @Req() req: any,
+    @Query('status') status?: string,
+    @Query('orderId') orderId?: string,
+    @Query('warehouseId') warehouseId?: string,
+  ) {
+    await this.returnsService.ensureHydrated();
+    const user = req.user as AuthenticatedUser | undefined;
+    if (warehouseId && !canAccessWarehouse(user, warehouseId)) {
+      throw new ForbiddenException(`Warehouse scope does not grant access to ${warehouseId}`);
+    }
+    const items = this.returnsService
+      .listReturns({ status, orderId, warehouseId })
+      .filter((r) => canAccessWarehouse(user, r.warehouseId));
+    return new ApiResult(items, 'Backoffice returns retrieved successfully', {
       total: items.length,
       page: 1,
       pageCount: 1,
@@ -34,27 +180,354 @@ export class AppController {
     });
   }
 
-  @Post('/api/v1/backoffice/returns')
-  createReturnRequest(
-    @Body()
-    body: CreateReturnDto,
+  @Get('/api/v1/backoffice/returns/:rmaId')
+  @UseGuards(JwtAuthGuard, RolesGuard, WarehouseScopeGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async getBackofficeReturnDetail(@Req() req: any, @Param('rmaId') rmaId: string) {
+    await this.returnsService.ensureHydrated();
+    const item = this.returnsService.getReturn(rmaId);
+    const user = req.user as AuthenticatedUser | undefined;
+    if (!canAccessWarehouse(user, item.warehouseId)) {
+      throw new ForbiddenException(`Warehouse scope does not grant access to ${item.warehouseId}`);
+    }
+    return new ApiResult(item, 'Backoffice return detail retrieved successfully');
+  }
+
+  @Post('/api/v1/backoffice/returns/:rmaId/approve')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
+  async approveBackofficeReturn(@Req() req: any, @Param('rmaId') rmaId: string) {
+    await this.returnsService.ensureHydrated();
+    const actor = req.user?.userId || 'support-agent';
+    const item = this.returnsService.approveReturn(rmaId, actor);
+    await this.returnsService.syncRecord(item);
+    return new ApiResult(item, 'Return request approved successfully');
+  }
+
+  @Post('/api/v1/backoffice/returns/:rmaId/receive')
+  @UseGuards(JwtAuthGuard, RolesGuard, WarehouseScopeGuard)
+  @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN')
+  async receiveReturnParcel(@Req() req: any, @Param('rmaId') rmaId: string) {
+    await this.returnsService.ensureHydrated();
+    const existing = this.returnsService.getReturn(rmaId);
+    if (!canAccessWarehouse(req.user, existing.warehouseId)) {
+      throw new ForbiddenException(`Warehouse scope does not grant access to ${existing.warehouseId}`);
+    }
+    const actor = req.user?.userId || 'warehouse-staff';
+    const item = await this.returnsService.receiveRma(rmaId, actor);
+    return new ApiResult(item, 'Return parcel received by warehouse (SC07)');
+  }
+
+  @Post('/api/v1/backoffice/returns/:rmaId/qc')
+  @UseGuards(JwtAuthGuard, RolesGuard, WarehouseScopeGuard)
+  @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN')
+  async submitQcInspection(
+    @Req() req: any,
+    @Param('rmaId') rmaId: string,
+    @Body('results') results: Array<{ skuId: string; passedQuantity: number; failedQuantity: number }>,
   ) {
-    const dossier = this.returnsService.openRmaRequest(
-      body.rmaId || `RMA-${Date.now()}`,
-      body.orderId,
-      body.skuId,
-      body.quantity,
-      body.reason,
+    await this.returnsService.ensureHydrated();
+    const existing = this.returnsService.getReturn(rmaId);
+    if (!canAccessWarehouse(req.user, existing.warehouseId)) {
+      throw new ForbiddenException(`Warehouse scope does not grant access to ${existing.warehouseId}`);
+    }
+    const actor = req.user?.userId || 'qc-inspector';
+    const item = await this.returnsService.submitQcResult(rmaId, results || [], actor);
+    return new ApiResult(item, 'QC inspection recorded successfully (SC07)');
+  }
+
+  @Post('/api/v1/backoffice/returns/:rmaId/refund')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async disburseReturnRefund(@Req() req: any, @Param('rmaId') rmaId: string) {
+    await this.returnsService.ensureHydrated();
+    const actor = req.user?.userId || 'finance-officer';
+    const item = await this.returnsService.disburseRefund(rmaId, actor);
+    return new ApiResult(item, 'Refund disbursed successfully through payment simulator (I03/SC08)');
+  }
+
+  @Post('/api/v1/backoffice/returns/:rmaId/request-approval')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
+  async requestRefundApproval(
+    @Req() req: any,
+    @Param('rmaId') rmaId: string,
+    @Body('reason') reason?: string,
+  ) {
+    const makerUserId = req.user?.userId || 'support-agent';
+    const record = await this.returnsService.requestRefundApproval(rmaId, makerUserId, reason);
+    return new ApiResult(record, 'Refund approval request created successfully');
+  }
+
+  @Post('/api/v1/backoffice/approvals')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'PROCUREMENT', 'PROCUREMENT_STAFF', 'PROCUREMENT_MGR', 'OPS_MGR', 'ADMIN')
+  async createApproval(
+    @Req() req: any,
+    @Body() body: {
+      requestType: ApprovalType;
+      referenceId: string;
+      amountVnd: number;
+      quantityDiff?: number;
+      reason: string;
+    },
+  ) {
+    const makerUserId = req.user?.userId || 'staff-maker';
+    const record = await this.makerChecker.createApprovalRequest({
+      ...body,
+      makerUserId,
+    });
+    return new ApiResult(record, 'Approval request created successfully');
+  }
+
+  @Get('/api/v1/backoffice/approvals')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'PROCUREMENT', 'PROCUREMENT_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async listApprovals(
+    @Query('status') status?: string,
+    @Query('requestType') requestType?: any,
+    @Query('makerUserId') makerUserId?: string,
+  ) {
+    const list = await this.makerChecker.listApprovals({ status, requestType, makerUserId });
+    return new ApiResult(list, 'Approvals retrieved successfully');
+  }
+
+  @Get('/api/v1/backoffice/approvals/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'PROCUREMENT', 'PROCUREMENT_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async getApprovalDetail(@Param('id') id: string) {
+    const item = await this.makerChecker.getApproval(id);
+    if (!item) {
+      throw new NotFoundException(`Approval request ${id} not found`);
+    }
+    return new ApiResult(item, 'Approval detail retrieved successfully');
+  }
+
+  @Post('/api/v1/backoffice/approvals/:id/decide')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'PROCUREMENT_MGR', 'OPS_MGR', 'ADMIN')
+  async decideApproval(
+    @Req() req: any,
+    @Param('id') id: string,
+    @Body('action') action: 'APPROVE' | 'REJECT',
+    @Body('note') note?: string,
+  ) {
+    const checkerUserId = req.user?.userId || '';
+    const checkerRoles: string[] = Array.isArray(req.user?.roles) ? req.user.roles : [];
+    const result = await this.makerChecker.decideApproval(
+      id,
+      checkerUserId,
+      checkerRoles,
+      action,
+      note,
     );
-    return new ApiResult(dossier, 'Return request created successfully');
+    return new ApiResult(result, `Approval ${action.toLowerCase()}d successfully`);
+  }
+
+  @Post('/api/v1/backoffice/returns/:rmaId/reject')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
+  async rejectBackofficeReturn(
+    @Req() req: any,
+    @Param('rmaId') rmaId: string,
+    @Body('note') note: string,
+  ) {
+    await this.returnsService.ensureHydrated();
+    const actor = req.user?.userId || 'support-agent';
+    const item = this.returnsService.rejectReturn(rmaId, note || 'Ineligible return request', actor);
+    await this.returnsService.syncRecord(item);
+    return new ApiResult(item, 'Return request rejected and ceiling released');
+  }
+
+  @Post('/api/v1/backoffice/returns/:rmaId/exchange')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'OPS_MGR', 'ADMIN')
+  async createExchangeOrder(
+    @Req() req: any,
+    @Param('rmaId') rmaId: string,
+    @Body('replacementSkuId') replacementSkuId?: string,
+  ) {
+    await this.returnsService.ensureHydrated();
+    const actor = req.user?.userId || 'support-agent';
+    const item = await this.returnsService.createLinkedExchangeOrder(
+      rmaId,
+      replacementSkuId,
+      actor,
+    );
+    return new ApiResult(item, 'Exchange order linked successfully (B06)');
+  }
+
+  // ==========================================
+  // EXCEPTION CASES & APPROVALS
+  // ==========================================
+
+  @Post('/api/v1/backoffice/exception-cases')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'DELIVERY_COORD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async createExceptionCase(
+    @Req() req: any,
+    @Body() body: {
+      referenceId: string;
+      category: any;
+      summary: string;
+      evidenceUrl?: string;
+    },
+  ) {
+    const actor = req.user?.userId || 'system-staff';
+    const item = await this.exceptionCases.createCase({
+      ...body,
+      actor,
+    });
+    return new ApiResult(item, 'Exception case created successfully');
+  }
+
+  @Get('/api/v1/backoffice/exception-cases')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'DELIVERY_COORD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async listExceptionCases(
+    @Query('status') status?: string,
+    @Query('category') category?: string,
+    @Query('ownerId') ownerId?: string,
+    @Query('overdueOnly') overdueOnly?: string,
+  ) {
+    const items = await this.exceptionCases.listCases({
+      status,
+      category,
+      ownerId,
+      overdueOnly: overdueOnly === 'true',
+    });
+    return new ApiResult(items, 'Exception cases retrieved successfully', {
+      total: items.length,
+      page: 1,
+      pageCount: 1,
+      limit: items.length || 20,
+    });
+  }
+
+  @Get('/api/v1/backoffice/exception-cases/:caseId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'DELIVERY_COORD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async getExceptionCaseDetail(@Param('caseId') caseId: string) {
+    const item = await this.exceptionCases.getCase(caseId);
+    return new ApiResult(item, 'Exception case retrieved successfully');
+  }
+
+  @Post('/api/v1/backoffice/exception-cases/:caseId/assign')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async assignExceptionCase(
+    @Req() req: any,
+    @Param('caseId') caseId: string,
+    @Body('ownerId') ownerId: string,
+  ) {
+    const actor = req.user?.userId || 'ops-lead';
+    const item = await this.exceptionCases.assignCase(caseId, ownerId, actor);
+    return new ApiResult(item, `Exception case assigned to ${ownerId} successfully`);
+  }
+
+  @Post('/api/v1/backoffice/exception-cases/:caseId/timeline')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'DELIVERY_COORD', 'FINANCE', 'FINANCE_STAFF', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async appendCaseTimeline(
+    @Req() req: any,
+    @Param('caseId') caseId: string,
+    @Body() body: { action: string; evidenceUrl?: string; note?: string },
+  ) {
+    const actor = req.user?.userId || 'staff';
+    const item = await this.exceptionCases.appendTimeline(caseId, {
+      ...body,
+      actor,
+    });
+    return new ApiResult(item, 'Timeline entry added to exception case');
+  }
+
+  @Post('/api/v1/backoffice/exception-cases/:caseId/resolve')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async resolveExceptionCase(
+    @Req() req: any,
+    @Param('caseId') caseId: string,
+    @Body('evidence') evidence: string,
+    @Body('note') note?: string,
+  ) {
+    const actor = req.user?.userId || 'ops-lead';
+    const item = await this.exceptionCases.resolveCase(caseId, actor, evidence, note);
+    return new ApiResult(item, 'Exception case resolved with evidence successfully');
+  }
+
+  // ==========================================
+  // AUDIT LOGS QUERY API (P11-T04)
+  // ==========================================
+
+  @Get('/api/v1/backoffice/audit-logs')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  async listAuditLogs(
+    @Query('actorId') actorId?: string,
+    @Query('event') event?: string,
+    @Query('source') source?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const items = await this.auditLogs.listAuditLogs({
+      actorId,
+      event,
+      source,
+      from,
+      to,
+    });
+    return new ApiResult(items, 'Audit logs retrieved successfully', {
+      total: items.length,
+      page: 1,
+      pageCount: 1,
+      limit: items.length || 50,
+    });
+  }
+
+  // ==========================================
+  // MANAGEMENT METRICS API (P11-T05, SC12)
+  // ==========================================
+
+  @Get('/api/v1/backoffice/metrics')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'PRODUCT_STAFF', 'MARKETING', 'PROCUREMENT', 'DELIVERY_COORD', 'WAREHOUSE_STAFF', 'ADMIN')
+  async getManagementMetrics(@Query('period') period?: string) {
+    const data = await this.metricsService.getMetrics(period || 'TODAY');
+    return new ApiResult(data, 'Management metrics retrieved successfully');
+  }
+
+  // ==========================================
+  // CLICKHOUSE OLAP ANALYTICS API (Module 4, SC12)
+  // ==========================================
+
+  @Get('/api/v1/backoffice/analytics/olap')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'MARKETING', 'ADMIN')
+  async getOlapAnalytics(@Query('period') period?: string) {
+    const data = await this.clickhouseAnalytics.getOlapDashboard(period || '30D');
+    return new ApiResult(data, 'ClickHouse OLAP analytics retrieved successfully');
+  }
+
+  @Post('/api/v1/backoffice/analytics/sync')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
+  async syncOlapAnalytics(@Req() req: any) {
+    const authHeader = req.headers?.authorization;
+    const data = await this.clickhouseAnalytics.syncFromSources(authHeader);
+    return new ApiResult(data, 'ClickHouse OLAP snapshot synchronized successfully');
   }
 
   @Post('/api/v1/backoffice/approvals/validate')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'ADMIN')
   validateApproval(@Body() body: ApprovalCandidate) {
     this.makerChecker.validateApproval(body);
-    return new ApiResult({
-      approved: true,
-      ...body,
-    }, 'Approval is valid');
+    return new ApiResult(
+      {
+        approved: true,
+        ...body,
+      },
+      'Approval is valid',
+    );
   }
 }

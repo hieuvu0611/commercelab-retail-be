@@ -57,7 +57,8 @@ func placeOrder(svc *checkout.Service) http.HandlerFunc {
 			return
 		}
 		var body struct {
-			QuoteID string `json:"quoteId"`
+			QuoteID       string `json:"quoteId"`
+			PaymentMethod string `json:"paymentMethod"`
 		}
 		if !request.DecodeJSON(w, r, &body) {
 			return
@@ -70,7 +71,7 @@ func placeOrder(svc *checkout.Service) http.HandlerFunc {
 		claims, _ := auth.ClaimsFrom(r.Context())
 		bearer := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
 
-		order, replayed, err := svc.Place(r.Context(), checkout.Principal{UserID: claims.UserID, Bearer: bearer}, key, quoteID)
+		order, replayed, err := svc.Place(r.Context(), checkout.Principal{UserID: claims.UserID, Bearer: bearer}, key, quoteID, body.PaymentMethod)
 		if err != nil {
 			writePlaceError(w, r, err)
 			return
@@ -80,6 +81,9 @@ func placeOrder(svc *checkout.Service) http.HandlerFunc {
 			return
 		}
 		status, message := http.StatusCreated, "Order placed. Complete the payment before the reservation expires."
+		if order.PaymentMethod == checkout.PaymentMethodCOD {
+			status, message = http.StatusCreated, "Order placed successfully with Cash on Delivery (COD)."
+		}
 		if replayed {
 			status, message = http.StatusOK, "Order already placed with this Idempotency-Key"
 		}
@@ -101,6 +105,10 @@ func writePlaceError(w http.ResponseWriter, r *http.Request, err error) {
 		response.Error(w, r, http.StatusConflict, "QUOTE_CHANGED", "A price or item changed since the quote; review the order again to get a new one", nil)
 	case errors.Is(err, checkout.ErrQuoteInvalid):
 		response.Error(w, r, http.StatusConflict, "QUOTE_INVALID", "The quote cannot be ordered; review the order again to get a new one", nil)
+	case errors.Is(err, checkout.ErrCODCeilingExceeded):
+		response.Error(w, r, http.StatusUnprocessableEntity, "COD_CEILING_EXCEEDED", "Cash on Delivery (COD) is only available for orders up to 2,000,000 VND", nil)
+	case errors.Is(err, checkout.ErrCODVelocityLimit):
+		response.Error(w, r, http.StatusConflict, "COD_VELOCITY_LIMIT_EXCEEDED", "You have reached the limit of 2 active COD orders currently in delivery", nil)
 	case dependency.IsUnavailable(err):
 		dependency.WriteUnavailable(w, r, err)
 	default:

@@ -165,9 +165,22 @@ func changeOptions(next shipment.Shipment, d Deps) shipment.SaveOptions {
 	switch next.Status {
 	case shipment.StatusDelivered:
 		o.Events = append(o.Events, deliveredEvent(next, d))
+		if next.PaymentMethod == "COD" {
+			o.Events = append(o.Events, outbox.NewEvent(events.EventPaymentCODCollected, aggregateShipment, next.ShipmentID, d.now(), map[string]any{
+				"orderId": next.OrderID, "shipmentId": next.ShipmentID, "amountVnd": next.CodAmountToCollect, "totalParcels": max(1, next.TotalParcels),
+			}))
+		}
 	case shipment.StatusDeliveryFailed:
 		c := shipment.NewCase(next, shipment.CaseDeliveryFailed, "", 0, next.FailureReason, d.now())
 		o.Case, o.Events = &c, append(o.Events, caseOpenedEvent(c, d))
+		if next.PaymentMethod == "COD" {
+			o.Events = append(o.Events, outbox.NewEvent(events.EventPaymentCODCancelled, aggregateShipment, next.ShipmentID, d.now(), map[string]any{
+				"orderId":      next.OrderID,
+				"shipmentId":   next.ShipmentID,
+				"reason":       next.FailureReason,
+				"totalParcels": max(1, next.TotalParcels),
+			}))
+		}
 	case shipment.StatusPartiallyDelivered:
 		var missing, total int64
 		for _, it := range next.Items {
@@ -194,6 +207,7 @@ func deliveredEvent(s shipment.Shipment, d Deps) events.DomainEvent {
 	return outbox.NewEvent(events.EventShipmentDelivered, aggregateShipment, s.ShipmentID, d.now(), map[string]any{
 		"shipmentId": s.ShipmentID, "orderId": s.OrderID, "warehouseId": s.WarehouseID, "items": items,
 		"deliveredAt": s.DeliveredAt, "returnWindowEndsAt": s.ReturnWindowEndsAt,
+		"paymentMethod": s.PaymentMethod, "codAmountToCollect": s.CodAmountToCollect,
 	})
 }
 

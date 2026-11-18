@@ -4,10 +4,12 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
@@ -32,11 +34,16 @@ type shipmentView struct {
 	ShipmentID         string     `json:"shipmentId"`
 	OrderID            string     `json:"orderId"`
 	WarehouseID        string     `json:"warehouseId"`
+	ParcelIndex        int        `json:"parcelIndex,omitempty"`
+	TotalParcels       int        `json:"totalParcels,omitempty"`
+	PaymentMethod      string     `json:"paymentMethod,omitempty"`
+	CodAmountToCollect int64      `json:"codAmountToCollect,omitempty"`
 	Status             string     `json:"status"`
 	Version            int64      `json:"version"`
 	Items              []itemView `json:"items"`
 	HandedOverAt       *time.Time `json:"handedOverAt,omitempty"`
-	StopRequestedAt    *time.Time `json:"stopRequestedAt,omitempty"`
+	StopRequestedAt    *time.Time `json:"stopRequestedAt"`
+	StopConfirmedAt    *time.Time `json:"stopConfirmedAt,omitempty"`
 	DeliveredAt        *time.Time `json:"deliveredAt,omitempty"`
 	ReturnWindowEndsAt *time.Time `json:"returnWindowEndsAt,omitempty"`
 	FailureReason      string     `json:"failureReason,omitempty"`
@@ -45,8 +52,10 @@ type shipmentView struct {
 }
 
 func viewOf(s shipment.Shipment) shipmentView {
-	v := shipmentView{ShipmentID: s.ShipmentID, OrderID: s.OrderID, WarehouseID: s.WarehouseID, Status: string(s.Status),
-		Version: s.Version, HandedOverAt: s.HandedOverAt, StopRequestedAt: s.StopRequestedAt, DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt, FailureReason: s.FailureReason, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+	v := shipmentView{ShipmentID: s.ShipmentID, OrderID: s.OrderID, WarehouseID: s.WarehouseID,
+		ParcelIndex: s.ParcelIndex, TotalParcels: s.TotalParcels,
+		PaymentMethod: s.PaymentMethod, CodAmountToCollect: s.CodAmountToCollect, Status: string(s.Status),
+		Version: s.Version, HandedOverAt: s.HandedOverAt, StopRequestedAt: s.StopRequestedAt, StopConfirmedAt: s.StopConfirmedAt, DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt, FailureReason: s.FailureReason, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
 	for i, it := range s.Items {
 		v.Items[i] = itemView{SkuID: it.SkuID, Quantity: it.Quantity, PickedQuantity: it.PickedQuantity, DeliveredQuantity: it.DeliveredQuantity}
 	}
@@ -74,6 +83,9 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(h))
 	}
 	mux.Handle("GET /api/v1/admin/shipments", staff(listShipments(d)))
+	mux.Handle("GET /api/v1/shipments/internal", internalauth.Require(listShipments(d)))
+	mux.Handle("GET /api/v1/shipments/internal/orders/{orderId}", internalauth.Require(listOrderShipments(d)))
+	mux.Handle("GET /api/v1/admin/orders/{orderId}/shipments", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR", "CSKH", "SUPPORT_AGENT", "SUPPORT_LEAD", "FINANCE", "FINANCE_MGR")(listOrderShipments(d))))
 	mux.Handle("GET /api/v1/admin/fulfillment-cases", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD")(listCases(d))))
 	mux.Handle("GET /api/v1/admin/shipments/{shipmentId}", staff(withShipment(d, func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
 		response.JSON(w, http.StatusOK, "Shipment", viewOf(s), nil)
@@ -83,19 +95,29 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/report-shortage", staff(withShipment(d, reportShortage(d))))
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/handover", staff(withShipment(d, handoverParcel(d))))
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/confirm-stop", staff(withShipment(d, confirmStop(d))))
+	deliverStaff := func(h http.HandlerFunc) http.Handler {
+		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR")(h))
+	}
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/deliver", deliverStaff(withShipment(d, markDeliveredStaff(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/delivery-failed", deliverStaff(withShipment(d, markDeliveryFailedStaff(d))))
 }
 
 func listShipments(d Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		claims, _ := auth.ClaimsFrom(r.Context())
 		q := r.URL.Query()
-		f := shipment.Filter{Status: shipment.Status(q.Get("status")), Warehouses: claims.WarehouseScopes}
+		f := shipment.Filter{Status: shipment.Status(q.Get("status"))}
 		if f.Status != "" && !knownStatuses[f.Status] {
 			badParam(w, r, "status", "status is not a shipment status")
 			return
 		}
-		for _, scope := range claims.WarehouseScopes {
-			f.AllWarehouses = f.AllWarehouses || scope == auth.AllWarehouses
+		if claims == nil {
+			f.AllWarehouses = true
+		} else {
+			f.Warehouses = claims.WarehouseScopes
+			for _, scope := range claims.WarehouseScopes {
+				f.AllWarehouses = f.AllWarehouses || scope == auth.AllWarehouses
+			}
 		}
 		page, limit := 1, defaultPageSize
 		var err error
@@ -123,6 +145,39 @@ func listShipments(d Deps) http.HandlerFunc {
 		}
 		response.JSON(w, http.StatusOK, "Shipments", views,
 			&response.Metadata{Total: int64(total), Page: page, PageCount: (total + limit - 1) / limit, Limit: limit})
+	}
+}
+
+func listOrderShipments(d Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		orderID := r.PathValue("orderId")
+		var list []shipment.Shipment
+		var err error
+		if mp, ok := d.Shipments.(shipment.MultiParcelStore); ok {
+			list, err = mp.ListByOrder(r.Context(), orderID)
+		} else {
+			var s shipment.Shipment
+			s, err = d.Shipments.GetByOrder(r.Context(), orderID)
+			if err == nil {
+				list = []shipment.Shipment{s}
+			}
+		}
+		if errors.Is(err, shipment.ErrNotFound) {
+			response.JSON(w, http.StatusOK, "Order shipments", []shipmentView{}, nil)
+			return
+		}
+		if err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		claims, _ := auth.ClaimsFrom(r.Context())
+		views := make([]shipmentView, 0, len(list))
+		for _, s := range list {
+			if claims == nil || auth.CanAccessWarehouse(claims, s.WarehouseID) {
+				views = append(views, viewOf(s))
+			}
+		}
+		response.JSON(w, http.StatusOK, "Order shipments", views, nil)
 	}
 }
 
@@ -262,5 +317,78 @@ func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 		response.Error(w, r, http.StatusNotFound, "SHIPMENT_NOT_FOUND", "Shipment not found", nil)
 	default:
 		response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be processed", nil)
+	}
+}
+
+func markDeliveredStaff(d Deps) func(http.ResponseWriter, *http.Request, shipment.Shipment) {
+	return func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
+		var req struct {
+			Version *int64 `json:"version"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		if s.Status == shipment.StatusDelivered {
+			response.JSON(w, http.StatusOK, "Shipment delivered", viewOf(s), nil)
+			return
+		}
+		if !versionGuard(w, r, s, req.Version) {
+			return
+		}
+		next, err := s.MarkDelivered(d.now())
+		if errors.Is(err, shipment.ErrNotDispatched) {
+			response.Error(w, r, http.StatusConflict, "SHIPMENT_NOT_DISPATCHED", "The shipment must be handed over before delivery", nil)
+			return
+		}
+		if err != nil {
+			writeStepError(w, r, err)
+			return
+		}
+		opts := changeOptions(next, d)
+		if err := d.Shipments.SaveWith(r.Context(), next, s.Version, opts); err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		d.record(r, next, timeline.TypeDelivered, "")
+		response.JSON(w, http.StatusOK, "Shipment delivered", viewOf(next), nil)
+	}
+}
+
+func markDeliveryFailedStaff(d Deps) func(http.ResponseWriter, *http.Request, shipment.Shipment) {
+	return func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
+		var req struct {
+			Version *int64 `json:"version"`
+			Reason  string `json:"reason"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		if s.Status == shipment.StatusDeliveryFailed || s.Status == shipment.StatusReturnToSender {
+			response.JSON(w, http.StatusOK, "Shipment delivery failure already recorded", viewOf(s), nil)
+			return
+		}
+		if !versionGuard(w, r, s, req.Version) {
+			return
+		}
+		reason := strings.TrimSpace(req.Reason)
+		if reason == "" {
+			reason = "Carrier delivery failed"
+		}
+		next, err := s.MarkDeliveryFailed(reason, d.now())
+		if errors.Is(err, shipment.ErrNotDispatched) {
+			response.Error(w, r, http.StatusConflict, "SHIPMENT_NOT_DISPATCHED", "The shipment must be handed over before marking delivery failed", nil)
+			return
+		}
+		if err != nil {
+			writeStepError(w, r, err)
+			return
+		}
+		opts := changeOptions(next, d)
+		if err := d.Shipments.SaveWith(r.Context(), next, s.Version, opts); err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		d.record(r, next, timeline.TypeDeliveryFailed, next.FailureReason)
+		response.JSON(w, http.StatusOK, "Shipment marked as delivery failed", viewOf(next), nil)
 	}
 }

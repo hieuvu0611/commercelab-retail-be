@@ -18,6 +18,11 @@ type CancelSettler interface {
 	SettleCancel(ctx context.Context, orderID string) error
 }
 
+// ParcelTracker is an optional extension of orders.Store for tracking split-parcel delivery completion.
+type ParcelTracker interface {
+	MarkParcelDelivered(ctx context.Context, orderID, warehouseID string) (allDelivered bool, err error)
+}
+
 // Handler handles shipment events. Cancels is optional: without it stop and handover events are ignored.
 type Handler struct {
 	Orders  orders.Store
@@ -31,11 +36,52 @@ func (h *Handler) Handle(ctx context.Context, e events.DomainEvent) error {
 	case events.EventShipmentCreated:
 		return h.move(ctx, e, saga.StateConfirmed, saga.StateInFulfillment)
 	case events.EventShipmentDelivered:
-		return h.move(ctx, e, saga.StateInFulfillment, saga.StateDelivered)
+		return h.handleDelivered(ctx, e)
 	case events.EventShipmentStopped, events.EventShipmentHandedOver:
 		return h.settle(ctx, e)
 	}
 	return nil
+}
+
+func (h *Handler) handleDelivered(ctx context.Context, e events.DomainEvent) error {
+	orderID, _ := e.Payload["orderId"].(string)
+	wh, _ := e.Payload["warehouseId"].(string)
+	if tracker, ok := h.Orders.(ParcelTracker); ok {
+		allDelivered, err := tracker.MarkParcelDelivered(ctx, orderID, wh)
+		if errors.Is(err, orders.ErrNotFound) {
+			log.Printf("[order] %s names unknown order %q; skipped", e.EventType, orderID)
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !allDelivered {
+			return h.move(ctx, e, saga.StateInFulfillment, saga.StatePartiallyDelivered)
+		}
+	}
+	return h.moveDelivered(ctx, e)
+}
+
+func (h *Handler) moveDelivered(ctx context.Context, e events.DomainEvent) error {
+	orderID, _ := e.Payload["orderId"].(string)
+	o, err := h.Orders.Get(ctx, orderID)
+	if errors.Is(err, orders.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if o.Status == string(saga.StateDelivered) {
+		return nil
+	}
+	if o.Status != string(saga.StateInFulfillment) && o.Status != string(saga.StatePartiallyDelivered) {
+		return nil
+	}
+	_, err = h.Orders.Transition(ctx, orderID, o.Status, string(saga.StateDelivered), o.PaymentStatus, o.FailureCode)
+	if errors.Is(err, orders.ErrStaleState) {
+		return h.moveDelivered(ctx, e)
+	}
+	return err
 }
 
 // settle lets a stopped or handed over parcel decide a cancellation that waits for the warehouse.

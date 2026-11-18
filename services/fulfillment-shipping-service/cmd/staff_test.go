@@ -183,3 +183,45 @@ func TestScanErrorsUseStableCodes(t *testing.T) {
 		t.Fatalf("scan after pack: %d %s", rec.Code, errCode(t, rec))
 	}
 }
+
+func TestListOrderShipmentsRespectsWarehouseScopeAndStaffDeliverActions(t *testing.T) {
+	authtest.Configure(t)
+	store := shipment.NewMemoryStore()
+	for idx, wh := range []string{"WH-HCM-01", "WH-HN-01"} {
+		s, err := shipment.NewParcel("O-SPLIT", "user-1", wh, "COD", 250000, idx+1, 2,
+			[]shipment.Item{{SkuID: "SKU-A", Quantity: 1}}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Progress both parcels to HANDED_OVER
+		s, _ = s.Scan("SKU-A", 1, time.Now())
+		s, _ = s.Pack(time.Now())
+		s, _ = s.Handover(time.Now())
+		if _, _, err := store.Create(context.Background(), s, "evt-split-"+wh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := &env{srv: NewServer(Deps{Shipments: store, Timeline: timeline.NewMemory()}), store: store, tl: timeline.NewMemory()}
+
+	// HCM staff only sees HCM parcel on listOrderShipments
+	hcmParcels := decode[[]shipmentView](t, e.call(t, "GET", "/api/v1/admin/orders/O-SPLIT/shipments", "", &hcmStaff))
+	if len(hcmParcels) != 1 || hcmParcels[0].WarehouseID != "WH-HCM-01" {
+		t.Fatalf("expected only WH-HCM-01 parcel, got %+v", hcmParcels)
+	}
+
+	// All-warehouse manager sees both parcels
+	allParcels := decode[[]shipmentView](t, e.call(t, "GET", "/api/v1/admin/orders/O-SPLIT/shipments", "", &allManager))
+	if len(allParcels) != 2 {
+		t.Fatalf("expected 2 parcels for ALL scope, got %+v", allParcels)
+	}
+
+	// Staff marks parcel 1 delivered and parcel 2 failed
+	d1 := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-1/deliver", `{}`, &hcmStaff)
+	if v := decode[shipmentView](t, d1); d1.Code != 200 || v.Status != "DELIVERED" {
+		t.Fatalf("deliver parcel 1 = %d %+v", d1.Code, v)
+	}
+	f2 := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-2/delivery-failed", `{"reason":"Recipient unreachable"}`, &hnStaff)
+	if v := decode[shipmentView](t, f2); f2.Code != 200 || v.Status != "DELIVERY_FAILED" {
+		t.Fatalf("fail parcel 2 = %d %+v", f2.Code, v)
+	}
+}

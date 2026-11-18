@@ -13,7 +13,7 @@ func validReason(reason string) (string, bool) {
 // ReportShortage records that quantity units of skuID cannot be found on the shelf. The parcel is blocked: it
 // can no longer be packed or handed over, so dispatch is never reported for it.
 func (s Shipment) ReportShortage(skuID string, quantity int64, reason string, now time.Time) (Shipment, error) {
-	if s.Status != StatusPendingPick && s.Status != StatusPicking {
+	if s.StopConfirmedAt != nil || (s.Status != StatusPendingPick && s.Status != StatusPicking) {
 		return Shipment{}, ErrNotPickable
 	}
 	reason, ok := validReason(reason)

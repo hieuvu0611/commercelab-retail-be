@@ -34,24 +34,37 @@ type QuoteLineAllocation struct {
 	AllocatedUnitPaidVND int64  `json:"allocatedUnitPaidVnd"` // SC07: Giá thực trả mỗi chiếc (VD: 270.000đ)
 }
 
+type AppliedCampaign struct {
+	CampaignID  string `json:"campaignId"`
+	Code        string `json:"code"`
+	Name        string `json:"name"`
+	DiscountVND int64  `json:"discountVnd"`
+}
+
 type Quote struct {
 	QuoteID string `json:"quoteId"`
 	// Version fingerprints the priced content (lines, prices, voucher, totals); it changes when any of them does.
-	Version         string                `json:"version"`
-	UserID          string                `json:"userId"`
-	AddressID       string                `json:"addressId,omitempty"`
-	VoucherCode     string                `json:"voucherCode,omitempty"`
-	DiscountPct     int64                 `json:"discountPct"`
-	SubtotalVND     int64                 `json:"subtotalVnd"`
-	DiscountVND     int64                 `json:"discountVnd"`
-	ShippingFeeVND  int64                 `json:"shippingFeeVnd"`
-	TotalPayableVND int64                 `json:"totalPayableVnd"`
-	Lines           []QuoteLineAllocation `json:"lines"`
-	ExpiresAt       time.Time             `json:"expiresAt"`
+	Version          string                `json:"version"`
+	UserID           string                `json:"userId"`
+	AddressID        string                `json:"addressId,omitempty"`
+	VoucherCode      string                `json:"voucherCode,omitempty"`
+	DiscountPct      int64                 `json:"discountPct"`
+	SubtotalVND      int64                 `json:"subtotalVnd"`
+	DiscountVND      int64                 `json:"discountVnd"`
+	ShippingFeeVND   int64                 `json:"shippingFeeVnd"`
+	TotalPayableVND  int64                 `json:"totalPayableVnd"`
+	AppliedCampaigns []AppliedCampaign     `json:"appliedCampaigns,omitempty"`
+	Lines            []QuoteLineAllocation `json:"lines"`
+	ExpiresAt        time.Time             `json:"expiresAt"`
 }
 
 // CalculateQuote thực thi P02, P08, SC01, SC07 và quy tắc làm tròn nguyên đồng SC10
 func CalculateQuote(quoteID, userID, voucherCode string, discountPct int64, inputs []QuoteLineInput, now time.Time) (*Quote, error) {
+	return CalculateQuoteWithPromotions(quoteID, userID, voucherCode, discountPct, 0, nil, inputs, now)
+}
+
+// CalculateQuoteWithPromotions applies both voucher percent and B08 campaign fixed/capped VND discounts atomically using SC10 whole-VND distribution.
+func CalculateQuoteWithPromotions(quoteID, userID, voucherCode string, discountPct int64, extraCampaignDiscountVND int64, campaigns []AppliedCampaign, inputs []QuoteLineInput, now time.Time) (*Quote, error) {
 	if len(inputs) == 0 {
 		return nil, errors.New("giỏ hàng trống")
 	}
@@ -70,7 +83,13 @@ func CalculateQuote(quoteID, userID, voucherCode string, discountPct int64, inpu
 		subtotal += in.Quantity * in.UnitPriceVND
 	}
 
-	totalDiscount := (subtotal * discountPct) / 100
+	totalDiscount := (subtotal*discountPct)/100 + extraCampaignDiscountVND
+	if totalDiscount > subtotal {
+		totalDiscount = subtotal
+	}
+	if totalDiscount < 0 {
+		totalDiscount = 0
+	}
 	var allocatedSum int64
 	lines := make([]QuoteLineAllocation, len(sorted))
 
@@ -127,16 +146,17 @@ func CalculateQuote(quoteID, userID, voucherCode string, discountPct int64, inpu
 	}
 
 	q := &Quote{
-		QuoteID:         quoteID,
-		UserID:          userID,
-		VoucherCode:     voucherCode,
-		DiscountPct:     discountPct,
-		SubtotalVND:     subtotal,
-		DiscountVND:     totalDiscount,
-		ShippingFeeVND:  shippingFee,
-		TotalPayableVND: netMerchandise + shippingFee,
-		Lines:           lines,
-		ExpiresAt:       now.UTC().Add(QuoteTTL),
+		QuoteID:          quoteID,
+		UserID:           userID,
+		VoucherCode:      voucherCode,
+		DiscountPct:      discountPct,
+		SubtotalVND:      subtotal,
+		DiscountVND:      totalDiscount,
+		ShippingFeeVND:   shippingFee,
+		TotalPayableVND:  netMerchandise + shippingFee,
+		AppliedCampaigns: campaigns,
+		Lines:            lines,
+		ExpiresAt:        now.UTC().Add(QuoteTTL),
 	}
 	q.Version = quoteVersion(q)
 	return q, nil

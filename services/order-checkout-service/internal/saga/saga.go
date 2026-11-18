@@ -23,6 +23,8 @@ const (
 	StateConfirmed State = "CONFIRMED"
 	// StateInFulfillment: the warehouse has a shipment for the confirmed order (set from a fulfillment event).
 	StateInFulfillment State = "IN_FULFILLMENT"
+	// StatePartiallyDelivered: at least one parcel of a split order was delivered while another is in transit (B04).
+	StatePartiallyDelivered State = "PARTIALLY_DELIVERED"
 	// StateDelivered: the carrier delivered the parcel (set from a fulfillment event).
 	StateDelivered State = "DELIVERED"
 	// StateFailedClosed: the order is closed and everything it held was released.
@@ -45,6 +47,9 @@ const (
 	// PayRefunded and PayPartiallyRefunded: the owed money was paid back, completely or in part.
 	PayRefunded          = "REFUNDED"
 	PayPartiallyRefunded = "PARTIALLY_REFUNDED"
+	PayCODPending        = "COD_PENDING"
+	PayCODCollected      = "COLLECTED"
+	PayCODCancelled      = "COD_CANCELLED"
 )
 
 // Effect is a side effect the caller performs after storing the new state.
@@ -85,9 +90,9 @@ type (
 	// has not handed the parcel over.
 	CustomerCancelled struct{}
 	// CancelRequested: a paid order is cancelled while the warehouse picks or packs it (SC06): wait for the stop.
-	CancelRequested struct{}
+	CancelRequested struct{ PaymentStatus string }
 	// CancelRejected: the parcel was handed over before the warehouse stopped it (SC06 branch B).
-	CancelRejected struct{}
+	CancelRejected struct{ PaymentStatus string }
 )
 
 func (Reserved) sagaEvent()          {}
@@ -127,24 +132,24 @@ func Next(s State, e Event) (Result, error) {
 		}
 	case StateReserved, StateUnknownHold:
 		return fromHeld(s, e)
-	case StateConfirmed, StateInFulfillment, StateDelivered, StateCancelRequested:
-		switch e.(type) {
+	case StateConfirmed, StateInFulfillment, StatePartiallyDelivered, StateDelivered, StateCancelRequested:
+		switch ev := e.(type) {
 		case PaymentCaptured:
 			return result(s, PayCaptured) // a repeated capture notice changes nothing, however far the order got
 		case CustomerCancelled:
-			if s != StateDelivered {
+			if s == StateConfirmed || s == StateInFulfillment || s == StateCancelRequested {
 				return paidCancellation()
 			}
 		case CancelRequested:
 			if s == StateConfirmed || s == StateInFulfillment {
-				return result(StateCancelRequested, PayCaptured)
+				return result(StateCancelRequested, ev.PaymentStatus)
 			}
 			if s == StateCancelRequested {
-				return result(s, PayCaptured) // a repeated request waits for the same stop
+				return result(s, ev.PaymentStatus) // a repeated request waits for the same stop
 			}
 		case CancelRejected:
 			if s == StateCancelRequested {
-				return result(StateInFulfillment, PayCaptured)
+				return result(StateInFulfillment, ev.PaymentStatus)
 			}
 		}
 	case StateCancelled:
@@ -203,5 +208,5 @@ func fromHeld(s State, e Event) (Result, error) {
 // IsPaid reports whether the order was confirmed (stock committed, voucher consumed), including the states
 // after confirmation that fulfillment events set.
 func (s State) IsPaid() bool {
-	return s == StateConfirmed || s == StateInFulfillment || s == StateDelivered
+	return s == StateConfirmed || s == StateInFulfillment || s == StatePartiallyDelivered || s == StateDelivered
 }

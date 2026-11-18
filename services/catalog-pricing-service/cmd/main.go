@@ -20,6 +20,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/inventory"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/peer"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/search"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/storage"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/migrations"
 )
@@ -43,6 +44,8 @@ type Deps struct {
 	Pricer cart.Pricer
 	// Availability supplies stock states for the storefront; nil reports every availability as unknown.
 	Availability domain.AvailabilityLookup
+	// SearchClient optionally connects OpenSearch for catalog search & facets.
+	SearchClient *search.Client
 }
 
 func NewServer(repo *repository.CatalogPricingRepository, pgConnected, mongoConnected bool) http.Handler {
@@ -58,12 +61,15 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	if deps.Products == nil {
 		deps.Products = domain.NewProductService(memoryProducts, deps.Categories).WithPricing(repo, repo)
 	}
+	var storefrontReads domain.StorefrontStore = memoryProducts
+	if mongoStore := repo.MongoStore(); mongoStore != nil {
+		storefrontReads = repository.NewMongoStorefrontStore(mongoStore)
+	}
 	if deps.Storefront == nil {
-		var reads domain.StorefrontStore = memoryProducts
-		if mongoStore := repo.MongoStore(); mongoStore != nil {
-			reads = repository.NewMongoStorefrontStore(mongoStore)
-		}
-		deps.Storefront = domain.NewStorefrontService(reads, deps.Categories, repo).WithAvailability(deps.Availability)
+		deps.Storefront = domain.NewStorefrontService(storefrontReads, deps.Categories, repo).WithAvailability(deps.Availability)
+	}
+	if deps.SearchClient != nil {
+		deps.Storefront.WithSearchEngine(&openSearchAdapter{client: deps.SearchClient})
 	}
 	registerCategoryRoutes(mux, deps.Categories, deps.Cache)
 	if deps.Images == nil {
@@ -71,6 +77,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	}
 	registerProductAdminRoutes(mux, deps.Products, deps.Images)
 	registerStorefrontRoutes(mux, deps.Storefront, deps.Images)
+	registerSearchAdminRoutes(mux, storefrontReads, repo, deps.SearchClient)
 	if deps.Prices == nil {
 		deps.Prices = domain.NewPriceService(deps.Products, repo)
 	}
@@ -94,7 +101,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 		}, nil)
 	})
 
-	registerQuoteRoutes(mux, repo, cartSvc, deps.Pricer, deps.Vouchers, deps.Addresses)
+	registerQuoteRoutes(mux, repo, cartSvc, deps.Pricer, deps.Vouchers, deps.Addresses, deps.Products)
 
 	return middleware.Chain(mux)
 }
@@ -166,6 +173,7 @@ func main() {
 	deps.Vouchers = peer.NewVouchers(config.EnvOrDefault("ORDER_SERVICE_URL", "http://localhost:8083"), nil)
 	deps.Addresses = peer.NewAddresses(config.EnvOrDefault("IAM_SERVICE_URL", "http://localhost:8087"), nil)
 	deps.Availability = inventory.NewClient(config.EnvOrDefault("INVENTORY_SERVICE_URL", "http://localhost:8082"), nil)
+	deps.SearchClient = search.NewClient(config.EnvOrDefault("OPENSEARCH_URL", ""), nil)
 	if deps.Products != nil {
 		deps.Products.WithPricing(repo, repo)
 		deps.Prices = domain.NewPriceService(deps.Products, repo)

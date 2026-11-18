@@ -43,3 +43,11 @@ func TestHandoverStampsTheTimeAndIsRepeatable(t *testing.T) {
 		t.Fatalf("repeat = %+v, %v", again, err)
 	}
 }
+
+func TestHandoverRejectsPackedParcelWithConfirmedStop(t *testing.T) {
+	p := packedParcel(t)
+	p.StopConfirmedAt = &now
+	if _, err := p.Handover(now); !errors.Is(err, ErrHandoverNotAllowed) {
+		t.Fatalf("confirmed stop: err = %v", err)
+	}
+}

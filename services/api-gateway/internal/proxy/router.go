@@ -94,14 +94,16 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (rt *Router) resolveTarget(path string) string {
 	switch {
-	case strings.HasPrefix(path, "/api/v1/admin/categories") || strings.HasPrefix(path, "/api/v1/admin/products") || strings.HasPrefix(path, "/api/v1/admin/skus") || strings.HasPrefix(path, "/api/v1/admin/prices"):
+	case strings.HasPrefix(path, "/api/v1/admin/categories") || strings.HasPrefix(path, "/api/v1/admin/products") || strings.HasPrefix(path, "/api/v1/admin/skus") || strings.HasPrefix(path, "/api/v1/admin/prices") || strings.HasPrefix(path, "/api/v1/admin/search"):
 		return rt.targets.Catalog
-	case strings.HasPrefix(path, "/api/v1/admin/inventory"):
+	case strings.HasPrefix(path, "/api/v1/admin/inventory") || strings.HasPrefix(path, "/api/v1/admin/procurement"):
 		return rt.targets.Inventory
-	case strings.HasPrefix(path, "/api/v1/admin/shipments") || strings.HasPrefix(path, "/api/v1/admin/fulfillment-cases"):
+	case strings.HasPrefix(path, "/api/v1/admin/shipments") || strings.HasPrefix(path, "/api/v1/admin/fulfillment-cases") || (strings.HasPrefix(path, "/api/v1/admin/orders/") && strings.HasSuffix(path, "/shipments")):
 		return rt.targets.Fulfillment
-	case strings.HasPrefix(path, "/api/v1/admin/vouchers") || strings.HasPrefix(path, "/api/v1/admin/orders"):
+	case strings.HasPrefix(path, "/api/v1/admin/vouchers") || strings.HasPrefix(path, "/api/v1/admin/promotions") || strings.HasPrefix(path, "/api/v1/admin/orders"):
 		return rt.targets.Order
+	case strings.HasPrefix(path, "/api/v1/admin/ledger"):
+		return rt.targets.Ledger
 	case path == "/auth/refresh" || strings.HasPrefix(path, "/api/v1/auth") || strings.HasPrefix(path, "/api/v1/users") || strings.HasPrefix(path, "/api/v1/admin"):
 		return rt.targets.IAM
 	case strings.HasPrefix(path, "/api/v1/products") || strings.HasPrefix(path, "/api/v1/categories") || strings.HasPrefix(path, "/api/v1/quotes") || strings.HasPrefix(path, "/api/v1/carts"):
@@ -110,7 +112,9 @@ func (rt *Router) resolveTarget(path string) string {
 		return rt.targets.Inventory
 	case strings.HasPrefix(path, "/api/v1/orders/") && strings.HasSuffix(path, "/tracking"):
 		return rt.targets.Fulfillment // the customer's tracking of one order is a fulfillment read
-	case strings.HasPrefix(path, "/api/v1/orders") || strings.HasPrefix(path, "/api/v1/vouchers"):
+	case strings.HasPrefix(path, "/api/v1/returns") || (strings.HasPrefix(path, "/api/v1/orders/") && strings.Contains(path, "/returns")):
+		return rt.targets.Backoffice
+	case strings.HasPrefix(path, "/api/v1/orders") || strings.HasPrefix(path, "/api/v1/vouchers") || strings.HasPrefix(path, "/api/v1/promotions"):
 		return rt.targets.Order
 	case strings.HasPrefix(path, "/api/v1/payments"):
 		return rt.targets.Payment

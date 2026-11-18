@@ -3,10 +3,12 @@ package main
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
@@ -27,6 +29,7 @@ func registerOrderAdminRoutes(mux *http.ServeMux, svc *checkout.Service) {
 		return auth.RequireAuth(auth.RequireRole(roleSupportAgent, roleSupportLead, roleOpsMgr, roleWarehouseMgr)(h))
 	}
 	mux.Handle("GET /api/v1/admin/orders", staff(listStaffOrders(svc)))
+	mux.Handle("GET /api/v1/orders/internal", internalauth.Require(listStaffOrders(svc)))
 	mux.Handle("GET /api/v1/admin/orders/{orderId}", staff(getStaffOrder(svc)))
 }
 
@@ -66,9 +69,11 @@ type staffOrderRow struct {
 	OrderID         string    `json:"orderId"`
 	CustomerID      string    `json:"customerId"`
 	Status          string    `json:"status"`
+	PaymentMethod   string    `json:"paymentMethod,omitempty"`
 	PaymentStatus   string    `json:"paymentStatus"`
 	FailureCode     string    `json:"failureCode,omitempty"`
 	WarehouseID     string    `json:"warehouseId"`
+	DiscountVND     int64     `json:"discountVnd"`
 	TotalPayableVND int64     `json:"totalPayableVnd"`
 	ItemCount       int64     `json:"itemCount"`
 	CreatedAt       time.Time `json:"createdAt"`
@@ -79,7 +84,7 @@ type staffOrderRow struct {
 // warehouseScope is the warehouses a caller may read orders of: nil means all. A warehouse manager without any
 // other staff role is limited to their token scopes (an empty scope list sees nothing).
 func warehouseScope(c *auth.Claims) (ids []string, limited bool) {
-	if !c.HasRole(roleWarehouseMgr) || c.HasRole(roleSupportAgent) || c.HasRole(roleSupportLead) || c.HasRole(roleOpsMgr) {
+	if c == nil || !c.HasRole(roleWarehouseMgr) || c.HasRole(roleSupportAgent) || c.HasRole(roleSupportLead) || c.HasRole(roleOpsMgr) {
 		return nil, false
 	}
 	for _, s := range c.WarehouseScopes {
@@ -120,8 +125,8 @@ func listStaffOrders(svc *checkout.Service) http.HandlerFunc {
 		}
 		rows := make([]staffOrderRow, len(list))
 		for i, o := range list {
-			rows[i] = staffOrderRow{OrderID: o.OrderID, CustomerID: o.UserID, Status: o.Status, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
-				WarehouseID: o.WarehouseID, TotalPayableVND: o.TotalPayableVND, ItemCount: o.ItemCount, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
+			rows[i] = staffOrderRow{OrderID: o.OrderID, CustomerID: o.UserID, Status: o.Status, PaymentMethod: o.PaymentMethod, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
+				WarehouseID: o.WarehouseID, DiscountVND: o.DiscountVND, TotalPayableVND: o.TotalPayableVND, ItemCount: o.ItemCount, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 			if snap, found, err := svc.Snapshots.Get(r.Context(), o.OrderID); err == nil && found {
 				rows[i].staffContact = contactOf(snap.ShippingAddress)
 			}
@@ -135,7 +140,6 @@ type staffOrderDetail struct {
 	QuoteID          string          `json:"quoteId"`
 	VoucherCode      string          `json:"voucherCode,omitempty"`
 	SubtotalVND      int64           `json:"subtotalVnd"`
-	DiscountVND      int64           `json:"discountVnd"`
 	ShippingFeeVND   int64           `json:"shippingFeeVnd"`
 	Items            []snapshot.Line `json:"items"`
 	Payment          paymentView     `json:"payment"`
@@ -154,15 +158,18 @@ func getStaffOrder(svc *checkout.Service) http.HandlerFunc {
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if _, limited := warehouseScope(claims); limited && !auth.CanAccessWarehouse(claims, o.WarehouseID) {
+		if _, limited := warehouseScope(claims); limited && !auth.CanAccessWarehouse(claims, o.WarehouseID) &&
+			!slices.ContainsFunc(o.Parcels, func(parcel orders.Parcel) bool {
+				return auth.CanAccessWarehouse(claims, parcel.WarehouseID)
+			}) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
 		own := detailOf(r, svc, o)
 		d := staffOrderDetail{
-			staffOrderRow: staffOrderRow{OrderID: o.OrderID, CustomerID: o.UserID, Status: o.Status, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
-				WarehouseID: o.WarehouseID, TotalPayableVND: o.TotalPayableVND, ItemCount: own.ItemCount, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt},
-			QuoteID: o.QuoteID, VoucherCode: o.VoucherCode, SubtotalVND: o.SubtotalVND, DiscountVND: o.DiscountVND, ShippingFeeVND: o.ShippingFeeVND,
+			staffOrderRow: staffOrderRow{OrderID: o.OrderID, CustomerID: o.UserID, Status: o.Status, PaymentMethod: o.PaymentMethod, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
+				WarehouseID: o.WarehouseID, DiscountVND: o.DiscountVND, TotalPayableVND: o.TotalPayableVND, ItemCount: own.ItemCount, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt},
+			QuoteID: o.QuoteID, VoucherCode: o.VoucherCode, SubtotalVND: o.SubtotalVND, ShippingFeeVND: o.ShippingFeeVND,
 			Items: own.Items, Payment: own.Payment, RefundObligation: own.RefundObligation,
 		}
 		if own.ShippingAddress != nil {

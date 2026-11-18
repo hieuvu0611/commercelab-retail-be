@@ -33,6 +33,7 @@ func registerOrderReadRoutes(mux *http.ServeMux, svc *checkout.Service) {
 type orderSummary struct {
 	OrderID         string     `json:"orderId"`
 	Status          string     `json:"status"`
+	PaymentMethod   string     `json:"paymentMethod,omitempty"`
 	PaymentStatus   string     `json:"paymentStatus"`
 	FailureCode     string     `json:"failureCode,omitempty"`
 	VoucherCode     string     `json:"voucherCode,omitempty"`
@@ -44,7 +45,7 @@ type orderSummary struct {
 }
 
 func summaryOf(o orders.Order) orderSummary {
-	return orderSummary{OrderID: o.OrderID, Status: o.Status, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
+	return orderSummary{OrderID: o.OrderID, Status: o.Status, PaymentMethod: o.PaymentMethod, PaymentStatus: o.PaymentStatus, FailureCode: o.FailureCode,
 		VoucherCode: o.VoucherCode, TotalPayableVND: o.TotalPayableVND, ItemCount: o.ItemCount, ExpiresAt: o.ExpiresAt,
 		CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 }
@@ -80,10 +81,10 @@ func statusParam(w http.ResponseWriter, r *http.Request) ([]string, bool) {
 		return nil, true
 	}
 	switch saga.State(v) {
-	case saga.StatePending, saga.StateReserved, saga.StateUnknownHold, saga.StateConfirmed, saga.StateInFulfillment, saga.StateDelivered, saga.StateFailedClosed, saga.StateCancelRequested, saga.StateCancelled:
+	case saga.StatePending, saga.StateReserved, saga.StateUnknownHold, saga.StateConfirmed, saga.StateInFulfillment, saga.StatePartiallyDelivered, saga.StateDelivered, saga.StateFailedClosed, saga.StateCancelRequested, saga.StateCancelled:
 		return []string{v}, true
 	}
-	badParam(w, r, "status", "status must be PENDING, RESERVED, UNKNOWN_HOLD, CONFIRMED, IN_FULFILLMENT, DELIVERED, FAILED_CLOSED, CANCEL_REQUESTED or CANCELLED")
+	badParam(w, r, "status", "status must be PENDING, RESERVED, UNKNOWN_HOLD, CONFIRMED, IN_FULFILLMENT, PARTIALLY_DELIVERED, DELIVERED, FAILED_CLOSED, CANCEL_REQUESTED or CANCELLED")
 	return nil, false
 }
 

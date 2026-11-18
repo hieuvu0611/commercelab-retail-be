@@ -5,6 +5,7 @@ package shipment
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
@@ -21,6 +22,7 @@ const (
 	StatusInTransit          Status = "IN_TRANSIT"
 	StatusDelivered          Status = "DELIVERED"
 	StatusDeliveryFailed     Status = "DELIVERY_FAILED"
+	StatusReturnToSender     Status = "RETURN_TO_SENDER"
 	StatusPartiallyDelivered Status = "PARTIALLY_DELIVERED"
 	StatusPickBlocked        Status = "PICK_BLOCKED"
 	// StatusStoppedForCancel: the order was cancelled before handover; the parcel can never be handed over (B05, SC06).
@@ -48,17 +50,22 @@ type Item struct {
 
 // Shipment is one parcel of an order. Version grows with every change (optimistic locking).
 type Shipment struct {
-	ShipmentID   string     `json:"shipmentId"`
-	OrderID      string     `json:"orderId"`
-	UserID       string     `json:"-"`
-	WarehouseID  string     `json:"warehouseId"`
-	Status       Status     `json:"status"`
-	Items        []Item     `json:"items"`
-	Version      int64      `json:"version"`
-	HandedOverAt *time.Time `json:"handedOverAt,omitempty"`
-	DeliveredAt  *time.Time `json:"deliveredAt,omitempty"`
+	ShipmentID         string     `json:"shipmentId"`
+	OrderID            string     `json:"orderId"`
+	UserID             string     `json:"-"`
+	WarehouseID        string     `json:"warehouseId"`
+	ParcelIndex        int        `json:"parcelIndex,omitempty"`
+	TotalParcels       int        `json:"totalParcels,omitempty"`
+	PaymentMethod      string     `json:"paymentMethod,omitempty"`
+	CodAmountToCollect int64      `json:"codAmountToCollect,omitempty"`
+	Status             Status     `json:"status"`
+	Items              []Item     `json:"items"`
+	Version            int64      `json:"version"`
+	HandedOverAt       *time.Time `json:"handedOverAt,omitempty"`
+	DeliveredAt        *time.Time `json:"deliveredAt,omitempty"`
 	// StopRequestedAt is when the customer's cancellation asked the warehouse to stop (SC06); nil when nobody did.
 	StopRequestedAt *time.Time `json:"stopRequestedAt,omitempty"`
+	StopConfirmedAt *time.Time `json:"-"`
 	// ReturnWindowEndsAt is DeliveredAt plus ReturnWindow (P07); nil until delivered.
 	ReturnWindowEndsAt *time.Time `json:"returnWindowEndsAt,omitempty"`
 	FailureReason      string     `json:"failureReason,omitempty"`
@@ -88,7 +95,49 @@ func New(orderID, userID, warehouseID string, items []Item, now time.Time) (Ship
 		merged = append(merged, it)
 	}
 	return Shipment{ShipmentID: ID(orderID), OrderID: orderID, UserID: userID, WarehouseID: warehouseID,
+		ParcelIndex: 1, TotalParcels: 1,
+		PaymentMethod: "PREPAID", CodAmountToCollect: 0,
 		Status: StatusPendingPick, Items: merged, Version: 1, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}, nil
+}
+
+// NewWithCOD builds a parcel with payment method and COD collection amount specified.
+func NewWithCOD(orderID, userID, warehouseID, paymentMethod string, codAmount int64, items []Item, now time.Time) (Shipment, error) {
+	return NewParcel(orderID, userID, warehouseID, paymentMethod, codAmount, 1, 1, items, now)
+}
+
+// NewParcel builds one parcel of a single-parcel or multi-parcel order.
+func NewParcel(orderID, userID, warehouseID, paymentMethod string, codAmount int64, parcelIndex, totalParcels int, items []Item, now time.Time) (Shipment, error) {
+	s, err := New(orderID, userID, warehouseID, items, now)
+	if err != nil {
+		return Shipment{}, err
+	}
+	if totalParcels <= 1 {
+		parcelIndex, totalParcels = 1, 1
+	} else {
+		if parcelIndex < 1 {
+			parcelIndex = 1
+		}
+		s.ShipmentID = fmt.Sprintf("SHP-%s-%d", orderID, parcelIndex)
+	}
+	s.ParcelIndex = parcelIndex
+	s.TotalParcels = totalParcels
+	if paymentMethod == "" {
+		paymentMethod = "PREPAID"
+	}
+	s.PaymentMethod = paymentMethod
+	s.CodAmountToCollect = codAmount
+	return s, nil
+}
+
+func (s Shipment) MarkReturnToSender(reason string, now time.Time) (Shipment, error) {
+	if s.Status == StatusReturnToSender {
+		return s, nil
+	}
+	s.Status = StatusReturnToSender
+	s.FailureReason = reason
+	s.Version++
+	s.UpdatedAt = now.UTC()
+	return s, nil
 }
 
 // ReturnWindow is how long after delivery a customer may request a return.
@@ -130,4 +179,20 @@ type Store interface {
 	SaveWith(ctx context.Context, s Shipment, expectedVersion int64, o SaveOptions) error
 	// ListCases returns cases oldest first and the number of matches ignoring paging.
 	ListCases(ctx context.Context, f CaseFilter) ([]Case, int, error)
+}
+
+// MultiParcelStore is an optional extension of Store returning all parcels of an order.
+type MultiParcelStore interface {
+	ListByOrder(ctx context.Context, orderID string) ([]Shipment, error)
+}
+
+// StopUpdate is one parcel transition in an atomic split-order stop.
+type StopUpdate struct {
+	Shipment        Shipment
+	ExpectedVersion int64
+	Events          []events.DomainEvent
+}
+
+type SplitStopStore interface {
+	SaveStopUpdates(ctx context.Context, updates []StopUpdate) error
 }

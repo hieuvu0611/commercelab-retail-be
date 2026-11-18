@@ -26,7 +26,7 @@ func (s Shipment) with(status Status, items []Item, now time.Time) Shipment {
 // Scan records quantity units of skuID picked from the shelf. It verifies the SKU and never lets a line go
 // past the ordered quantity. The receiver is not changed.
 func (s Shipment) Scan(skuID string, quantity int64, now time.Time) (Shipment, error) {
-	if s.Status != StatusPendingPick && s.Status != StatusPicking {
+	if s.StopConfirmedAt != nil || (s.Status != StatusPendingPick && s.Status != StatusPicking) {
 		return Shipment{}, ErrNotPickable
 	}
 	if quantity <= 0 {
@@ -51,7 +51,7 @@ func (s Shipment) Pack(now time.Time) (Shipment, error) {
 	if s.Status == StatusPacked {
 		return s, nil
 	}
-	if s.Status != StatusPendingPick && s.Status != StatusPicking {
+	if s.StopConfirmedAt != nil || (s.Status != StatusPendingPick && s.Status != StatusPicking) {
 		return Shipment{}, ErrNotPickable
 	}
 	for _, it := range s.Items {
@@ -70,7 +70,7 @@ func (s Shipment) Handover(now time.Time) (Shipment, error) {
 	if s.Status == StatusHandedOver {
 		return s, nil
 	}
-	if s.Status != StatusPacked {
+	if s.StopConfirmedAt != nil || s.Status != StatusPacked {
 		return Shipment{}, ErrHandoverNotAllowed
 	}
 	at := now.UTC()

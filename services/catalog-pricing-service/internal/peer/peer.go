@@ -3,6 +3,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -75,6 +76,54 @@ func (v *Vouchers) Eligibility(ctx context.Context, bearer, code string) (Eligib
 	}
 	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseBytes)).Decode(&body); err != nil {
 		return Eligibility{}, dependency.Wrap(fmt.Errorf("voucher eligibility answered malformed JSON: %w", err))
+	}
+	return body.Data, nil
+}
+
+type PromoEvalLine struct {
+	SkuID        string `json:"skuId"`
+	CategoryID   string `json:"categoryId,omitempty"`
+	Quantity     int64  `json:"quantity"`
+	UnitPriceVND int64  `json:"unitPriceVnd"`
+}
+
+type AppliedPromo struct {
+	CampaignID  string `json:"campaignId"`
+	Code        string `json:"code"`
+	Name        string `json:"name"`
+	DiscountVND int64  `json:"discountVnd"`
+}
+
+type PromoEvaluation struct {
+	TotalDiscountVND int64          `json:"totalDiscountVnd"`
+	Applied          []AppliedPromo `json:"applied"`
+}
+
+// EvaluatePromotions asks order-checkout-service to evaluate eligible B08 campaigns (reserves nothing).
+func (v *Vouchers) EvaluatePromotions(ctx context.Context, bearer string, campaignIDs []string, lines []PromoEvalLine) (PromoEvaluation, error) {
+	payload, _ := json.Marshal(map[string]any{
+		"campaignIds": campaignIDs,
+		"lines":       lines,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, v.url+"/api/v1/promotions/evaluate", bytes.NewReader(payload))
+	if err != nil {
+		return PromoEvaluation{}, dependency.Wrap(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	res, err := v.http.Do(req)
+	if err != nil {
+		return PromoEvaluation{}, dependency.Wrap(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return PromoEvaluation{}, dependency.Wrap(fmt.Errorf("promotion evaluate answered %d", res.StatusCode))
+	}
+	var body struct {
+		Data PromoEvaluation `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(res.Body, maxResponseBytes)).Decode(&body); err != nil {
+		return PromoEvaluation{}, dependency.Wrap(fmt.Errorf("promotion evaluate answered malformed JSON: %w", err))
 	}
 	return body.Data, nil
 }

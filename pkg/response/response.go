@@ -8,10 +8,12 @@ import (
 
 // Metadata describes a paginated collection.
 type Metadata struct {
-	Total     int64 `json:"total"`
-	Page      int   `json:"page"`
-	PageCount int   `json:"pageCount"`
-	Limit     int   `json:"limit"`
+	Total        int64  `json:"total"`
+	Page         int    `json:"page"`
+	PageCount    int    `json:"pageCount"`
+	Limit        int    `json:"limit"`
+	SearchEngine string `json:"searchEngine,omitempty"`
+	Facets       any    `json:"facets,omitempty"`
 }
 
 // ApiResponse is the common JSON success envelope.

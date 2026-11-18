@@ -45,6 +45,8 @@ type Store interface {
 	// event again changes nothing and returns the stored attempt with Change.Replay. A refund obligation is
 	// recorded exactly once per attempt, and the order's captured and refund-pending totals follow the Change.
 	Apply(ctx context.Context, attemptID string, o Outcome, amountVND int64, eventID string) (Attempt, Change, error)
+	// ApplyCODParcel records a terminal shipment outcome and closes the attempt when all parcels settle.
+	ApplyCODParcel(ctx context.Context, attemptID string, parcel CODParcel) (Attempt, Change, error)
 	// GetByOrder returns the order's attempt or ErrNotFound.
 	GetByOrder(ctx context.Context, orderID string) (Attempt, error)
 	// Close ends the attempt because its order is closed (see the package-level Close). It is idempotent.
@@ -62,4 +64,15 @@ type Store interface {
 	Summary(ctx context.Context, orderID string) (Summary, error)
 	// Obligations lists the order's refund obligations.
 	Obligations(ctx context.Context, orderID string) ([]Obligation, error)
+}
+
+// ReservationStore persists RMA refund ceiling reservations and payouts (I03, SC08).
+type ReservationStore interface {
+	ReserveRefund(ctx context.Context, orderID, reservationID string, amountVND int64) (Summary, error)
+	CompleteRefundReservation(ctx context.Context, orderID, reservationID string, amountVND int64, providerRef string) (Summary, error)
+}
+
+// MetricsStore aggregates authoritative payment collections and completed refunds.
+type MetricsStore interface {
+	Metrics(ctx context.Context, since *time.Time) (grossCollectedVND, totalRefundedVND int64, err error)
 }

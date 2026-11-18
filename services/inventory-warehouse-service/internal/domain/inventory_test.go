@@ -103,3 +103,19 @@ func TestDuplicateLinesAreCheckedAgainstTheirSum(t *testing.T) {
 		t.Fatal("2 + 2 > 3 must be rejected")
 	}
 }
+
+func TestReceiveTransferInsufficientInTransitError(t *testing.T) {
+	engine := NewLedgerEngine([]StockItem{{SkuID: "SKU-A", WarehouseID: "WH-HN-01", OnHand: 2, InTransit: 1}})
+	err := engine.ReceiveTransfer("WH-HN-01", map[string]int64{"SKU-A": 3}, []TransferReceiveLine{
+		{SkuID: "SKU-A", ReceivedGoodQty: 3},
+	})
+	if err != ErrTransferInsufficientInTransit {
+		t.Fatalf("expected ErrTransferInsufficientInTransit, got %v", err)
+	}
+	errMissing := engine.ReceiveTransfer("WH-DN-01", map[string]int64{"SKU-A": 1}, []TransferReceiveLine{
+		{SkuID: "SKU-A", ReceivedGoodQty: 1},
+	})
+	if errMissing != ErrTransferInsufficientInTransit {
+		t.Fatalf("expected ErrTransferInsufficientInTransit for missing row, got %v", errMissing)
+	}
+}

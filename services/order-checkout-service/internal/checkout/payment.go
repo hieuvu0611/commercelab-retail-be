@@ -27,6 +27,9 @@ const (
 	payFailed       = "FAILED"
 	payExpired30m   = "EXPIRED_30M"
 	payCapturedLate = "CAPTURED_LATE"
+	payCODPending   = "COD_PENDING"
+	payCODCollected = "COLLECTED"
+	payCODCancelled = "COD_CANCELLED"
 )
 
 // PaymentReport is what the payment service says about an order's attempt. The expected amount is never part of
@@ -89,7 +92,7 @@ func paymentEvents(o orders.Order, r PaymentReport) ([]saga.Event, error) {
 	// included) says nothing new, and the refund is never created twice.
 	lateMoney := o.Status == string(saga.StateCancelled) && o.CapturedVND == 0
 	switch r.Status {
-	case payProcessing:
+	case payProcessing, payCODPending, payCODCollected, payCODCancelled:
 		return nil, nil
 	case payCaptured, payCapturedLate:
 		if cancelled && !lateMoney {
@@ -101,7 +104,7 @@ func paymentEvents(o orders.Order, r PaymentReport) ([]saga.Event, error) {
 		}
 	}
 	switch r.Status {
-	case payProcessing:
+	case payProcessing, payCODPending, payCODCollected, payCODCancelled:
 		return nil, nil
 	case payCaptured:
 		return []saga.Event{saga.PaymentCaptured{CapturedVND: r.CapturedVND, ExpectedVND: o.TotalPayableVND}}, nil
@@ -216,6 +219,11 @@ func (s *Service) runEffects(ctx context.Context, o orders.Order, effects []saga
 					return false, err
 				}
 			}
+			if s.Promotions != nil && len(o.AppliedPromotions) > 0 {
+				if err := s.Promotions.ConsumeOrder(ctx, o.OrderID); err != nil {
+					return false, err
+				}
+			}
 		case saga.HoldStockException:
 			if err := s.Stock.ExceptionHold(ctx, o.OrderID); errors.Is(err, ErrReservationLost) {
 				log.Printf("[order] exception hold for order %s: the reservation is already gone", o.OrderID)
@@ -250,6 +258,36 @@ func (s *Service) closeLost(ctx context.Context, o orders.Order, from saga.State
 
 // recordCapture stores the captured and refundable amounts the report carries.
 func (s *Service) recordCapture(ctx context.Context, o orders.Order, r PaymentReport) (orders.Order, error) {
+	if r.Status == payCODPending || r.Status == payCODCollected {
+		captured := r.CapturedVND
+		if r.Status == payCODCollected && captured <= 0 {
+			captured = o.TotalPayableVND
+		}
+		if captured > o.CapturedVND {
+			if err := s.Orders.RecordCapture(ctx, o.OrderID, captured, o.RefundPendingVND); err != nil {
+				return o, err
+			}
+			o.CapturedVND = captured
+		}
+		if r.Status == payCODCollected && o.PaymentStatus != payCODCollected &&
+			o.PaymentStatus != PayRefundPending && !refundSettled(o.PaymentStatus) {
+			if err := s.Orders.RecordRefund(ctx, o.OrderID, o.RefundedVND, o.RefundPendingVND, payCODCollected); err != nil {
+				return o, err
+			}
+			o.PaymentStatus = payCODCollected
+		}
+		return o, nil
+	}
+	if r.Status == payCODCancelled {
+		if o.CapturedVND > 0 {
+			return o, nil
+		}
+		if err := s.Orders.RecordRefund(ctx, o.OrderID, o.RefundedVND, o.RefundPendingVND, payCODCancelled); err != nil {
+			return o, err
+		}
+		o.PaymentStatus = payCODCancelled
+		return o, nil
+	}
 	if r.Status != payCaptured && r.Status != payCapturedLate {
 		return o, nil
 	}

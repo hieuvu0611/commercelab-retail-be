@@ -40,6 +40,14 @@ func (s *MemoryStore) WithClock(now func() time.Time) *MemoryStore { s.now = now
 
 func clone(o Order) Order {
 	o.Items = append([]Item(nil), o.Items...)
+	if len(o.Parcels) > 0 {
+		parcels := make([]Parcel, len(o.Parcels))
+		for i, p := range o.Parcels {
+			p.Items = append([]Item(nil), p.Items...)
+			parcels[i] = p
+		}
+		o.Parcels = parcels
+	}
 	return o
 }
 
@@ -60,6 +68,14 @@ func (s *MemoryStore) Create(_ context.Context, key, hash string, o Order, ev ..
 	}
 	if o.PaymentStatus == "" {
 		o.PaymentStatus = PaymentUnpaid
+	}
+	if o.PaymentMethod == "" {
+		o.PaymentMethod = "PREPAID"
+	}
+	if o.PaymentMethod == "COD" {
+		if count := s.countActiveCODLocked(o.UserID); count >= MaxActiveCODOrders {
+			return Order{}, false, ErrCODVelocityLimit
+		}
 	}
 	s.keys[k] = memEntry{hash: hash, orderID: o.OrderID}
 	s.orders[o.OrderID] = clone(o)
@@ -122,8 +138,19 @@ func matches(o Order, f Filter) bool {
 	if !f.UpdatedBefore.IsZero() && o.UpdatedAt.After(f.UpdatedBefore) {
 		return false
 	}
-	if len(f.WarehouseIDs) > 0 && !contains(f.WarehouseIDs, o.WarehouseID) {
-		return false
+	if len(f.WarehouseIDs) > 0 {
+		matchedWH := contains(f.WarehouseIDs, o.WarehouseID)
+		if !matchedWH {
+			for _, p := range o.Parcels {
+				if contains(f.WarehouseIDs, p.WarehouseID) {
+					matchedWH = true
+					break
+				}
+			}
+		}
+		if !matchedWH {
+			return false
+		}
 	}
 	if !f.UpdatedAfter.IsZero() && o.UpdatedAt.Before(f.UpdatedAfter) {
 		return false
@@ -168,6 +195,23 @@ func (s *MemoryStore) RecordCapture(_ context.Context, orderID string, capturedV
 	return nil
 }
 
+func (s *MemoryStore) countActiveCODLocked(userID string) int {
+	var count int
+	for _, o := range s.orders {
+		if o.UserID == userID && o.PaymentMethod == "COD" && o.PaymentStatus == "COD_PENDING" &&
+			o.Status != "DELIVERED" && o.Status != "CANCELLED" && o.Status != "FAILED_CLOSED" {
+			count++
+		}
+	}
+	return count
+}
+
+func (s *MemoryStore) CountActiveCODOrders(_ context.Context, userID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.countActiveCODLocked(userID), nil
+}
+
 func (s *MemoryStore) RecordRefund(_ context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -196,4 +240,32 @@ func (s *MemoryStore) Transition(_ context.Context, orderID, from, to, paymentSt
 	s.orders[orderID] = o
 	s.outbox = append(s.outbox, ev...)
 	return clone(o), nil
+}
+
+// MarkParcelDelivered marks one warehouse's parcel as DELIVERED and returns true when all parcels of the order are delivered.
+func (s *MemoryStore) MarkParcelDelivered(_ context.Context, orderID, warehouseID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, ok := s.orders[orderID]
+	if !ok {
+		return false, ErrNotFound
+	}
+	if len(o.Parcels) <= 1 {
+		if len(o.Parcels) == 1 {
+			o.Parcels[0].Status = "DELIVERED"
+			s.orders[orderID] = o
+		}
+		return true, nil
+	}
+	all := true
+	for i := range o.Parcels {
+		if warehouseID != "" && o.Parcels[i].WarehouseID == warehouseID {
+			o.Parcels[i].Status = "DELIVERED"
+		}
+		if o.Parcels[i].Status != "DELIVERED" {
+			all = false
+		}
+	}
+	s.orders[orderID] = o
+	return all, nil
 }

@@ -187,3 +187,100 @@ func TestConcurrentStopsAndScansLeaveOneConsistentParcel(t *testing.T) {
 		}
 	}
 }
+
+func TestStopForCancelHandlesAllParcelsOfSplitOrder(t *testing.T) {
+	stock := &fakeStock{}
+	e := handoverEnv(t, stock)
+	// Replace store with a 2-parcel split order O-SPLIT2
+	for idx, wh := range []string{"WH-HCM-01", "WH-HN-01"} {
+		s, _ := shipment.NewParcel("O-SPLIT2", "user-1", wh, "PREPAID", 0, idx+1, 2,
+			[]shipment.Item{{SkuID: "SKU-A", Quantity: 1}}, time.Now())
+		_, _, _ = e.store.Create(context.Background(), s, "evt-sp2-"+wh)
+	}
+	rec := e.stop(t, "O-SPLIT2", stopBody, true)
+	got := decode[stopResp](t, rec)
+	if rec.Code != 200 || got.Result != "STOPPED" {
+		t.Fatalf("split stop = %d %+v", rec.Code, got)
+	}
+	for _, id := range []string{"SHP-O-SPLIT2-1", "SHP-O-SPLIT2-2"} {
+		s, _ := e.store.Get(context.Background(), id)
+		if s.Status != shipment.StatusStoppedForCancel {
+			t.Fatalf("%s status = %s, want STOPPED_FOR_CANCEL", id, s.Status)
+		}
+	}
+
+	// If second parcel of a split order was already handed over, stop returns TOO_LATE and stops neither parcel
+	for idx, wh := range []string{"WH-HCM-01", "WH-HN-01"} {
+		s, _ := shipment.NewParcel("O-SPLIT3", "user-1", wh, "PREPAID", 0, idx+1, 2,
+			[]shipment.Item{{SkuID: "SKU-A", Quantity: 1}}, time.Now())
+		if idx == 1 {
+			s, _ = s.Scan("SKU-A", 1, time.Now())
+			s, _ = s.Pack(time.Now())
+			s, _ = s.Handover(time.Now())
+		}
+		_, _, _ = e.store.Create(context.Background(), s, "evt-sp3-"+wh)
+	}
+	recLate := e.stop(t, "O-SPLIT3", stopBody, true)
+	gotLate := decode[stopResp](t, recLate)
+	if recLate.Code != 200 || gotLate.Result != "TOO_LATE" {
+		t.Fatalf("late split stop = %d %+v", recLate.Code, gotLate)
+	}
+	p1, _ := e.store.Get(context.Background(), "SHP-O-SPLIT3-1")
+	if p1.Status != shipment.StatusPendingPick {
+		t.Fatalf("parcel 1 mutated despite parcel 2 handed over: %s", p1.Status)
+	}
+}
+
+func TestSplitStopDoesNotReleaseStockWhenSiblingHandoverWins(t *testing.T) {
+	stock := &fakeStock{}
+	e := handoverEnv(t, stock)
+	ctx := context.Background()
+	for index, warehouse := range []string{"WH-HCM-01", "WH-HN-01"} {
+		parcel, _ := shipment.NewParcel("O-SPLIT-RACE", "user-1", warehouse, "PREPAID", 0, index+1, 2,
+			[]shipment.Item{{SkuID: "SKU-A", Quantity: 1}}, time.Now())
+		if index == 1 {
+			parcel, _ = parcel.Scan("SKU-A", 1, time.Now())
+			parcel, _ = parcel.Pack(time.Now())
+		}
+		if _, _, err := e.store.Create(ctx, parcel, "test-"+warehouse); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := e.stop(t, "O-SPLIT-RACE", stopBody, true)
+	if got := decode[stopResp](t, rec); rec.Code != 200 || got.Result != "STOP_REQUESTED" || len(stock.released) != 0 {
+		t.Fatalf("initial split stop = %d %+v, releases %v", rec.Code, got, stock.released)
+	}
+	handed := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-RACE-2/handover", `{}`, &hnStaff)
+	if handed.Code != 200 {
+		t.Fatalf("handover: %d %s", handed.Code, handed.Body)
+	}
+	late := e.stop(t, "O-SPLIT-RACE", stopBody, true)
+	if got := decode[stopResp](t, late); late.Code != 200 || got.Result != "TOO_LATE" || len(stock.released) != 0 {
+		t.Fatalf("late split stop = %d %+v, releases %v", late.Code, got, stock.released)
+	}
+	first, err := e.store.Get(ctx, "SHP-O-SPLIT-RACE-1")
+	if err != nil || first.Status != shipment.StatusPendingPick || first.StopConfirmedAt != nil {
+		t.Fatalf("unpicked sibling should resume work: %+v, %v", first, err)
+	}
+}
+
+func TestSplitStopBeforeShipmentIntakeUsesRealWarehouses(t *testing.T) {
+	stock := &fakeStock{}
+	e := handoverEnv(t, stock)
+	rec := e.stop(t, "O-SPLIT-NEW", `{"userId":"user-1","warehouseId":"MULTI","paymentMethod":"PREPAID","parcels":[
+		{"parcelSeq":1,"warehouseId":"WH-HCM-01","items":[{"skuId":"SKU-A","quantity":1}]},
+		{"parcelSeq":2,"warehouseId":"WH-HN-01","items":[{"skuId":"SKU-B","quantity":1}]}
+	]}`, true)
+	if got := decode[stopResp](t, rec); rec.Code != 200 || got.Result != "STOPPED" || len(stock.released) != 1 {
+		t.Fatalf("stop before intake: %d %+v releases=%v", rec.Code, got, stock.released)
+	}
+	list, err := e.store.ListByOrder(context.Background(), "O-SPLIT-NEW")
+	if err != nil || len(list) != 2 || list[0].WarehouseID != "WH-HCM-01" || list[1].WarehouseID != "WH-HN-01" {
+		t.Fatalf("stopped warehouses: %+v %v", list, err)
+	}
+	for _, parcel := range list {
+		if parcel.Status != shipment.StatusStoppedForCancel {
+			t.Fatalf("parcel was not stopped: %+v", parcel)
+		}
+	}
+}

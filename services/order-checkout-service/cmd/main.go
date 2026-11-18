@@ -22,6 +22,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/paymentsync"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/peer"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/promotion"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/migrations"
@@ -34,7 +35,7 @@ type voucherStore interface {
 }
 
 // NewServer builds the order service handler. checkoutSvc places orders; vouchers and admin serve the voucher APIs.
-func NewServer(checkoutSvc *checkout.Service, vouchers *voucher.Service, admin *voucher.Admin) http.Handler {
+func NewServer(checkoutSvc *checkout.Service, vouchers *voucher.Service, admin *voucher.Admin, promotions ...promotion.Store) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +49,9 @@ func NewServer(checkoutSvc *checkout.Service, vouchers *voucher.Service, admin *
 	registerOrderRoutes(mux, checkoutSvc)
 	registerVoucherRoutes(mux, vouchers)
 	registerVoucherAdminRoutes(mux, admin)
+	if len(promotions) > 0 && promotions[0] != nil {
+		registerPromotionRoutes(mux, promotions[0])
+	}
 	return middleware.Chain(mux)
 }
 
@@ -81,12 +85,14 @@ func main() {
 	// Without Postgres (ALLOW_MEMORY_FALLBACK=true, dev/test only) the seeded development vouchers and an
 	// in-memory order store are used.
 	var (
-		store      voucherStore = voucher.NewMemoryStore(voucher.DevCampaigns()...)
-		orderStore orders.Store = orders.NewMemoryStore()
+		store      voucherStore    = voucher.NewMemoryStore(voucher.DevCampaigns()...)
+		promoStore promotion.Store = promotion.NewMemoryStore(promotion.DevCampaigns()...)
+		orderStore orders.Store    = orders.NewMemoryStore()
 	)
 	if pool != nil {
 		defer pool.Close()
 		store = voucher.NewPostgresStore(pool)
+		promoStore = promotion.NewPostgresStore(pool)
 		orderStore = orders.NewPostgresStore(pool)
 	}
 	// Without MongoDB (ALLOW_MEMORY_FALLBACK=true, dev/test only) snapshots are kept in memory.
@@ -111,6 +117,7 @@ func main() {
 		Stock:       peer.NewStock(config.EnvOrDefault("INVENTORY_SERVICE_URL", "http://localhost:8082"), peers),
 		Payments:    peer.NewPayments(config.EnvOrDefault("PAYMENT_SERVICE_URL", "http://localhost:8084"), peers),
 		Vouchers:    store,
+		Promotions:  promoStore,
 		Addresses:   peer.NewAddresses(config.EnvOrDefault("IAM_SERVICE_URL", "http://localhost:8087"), peers),
 		Snapshots:   snapshots,
 		Fulfillment: peer.NewFulfillment(config.EnvOrDefault("FULFILLMENT_SERVICE_URL", "http://localhost:8085"), peers),
@@ -150,5 +157,5 @@ func main() {
 	}()
 
 	log.Printf("[order-checkout-service] listening on :%s (schema: orders, mongo: order_commercial_snapshots)", port)
-	log.Fatal(http.ListenAndServe(":"+port, NewServer(checkoutSvc, voucher.NewService(store), voucher.NewAdmin(store))))
+	log.Fatal(http.ListenAndServe(":"+port, NewServer(checkoutSvc, voucher.NewService(store), voucher.NewAdmin(store), promoStore)))
 }

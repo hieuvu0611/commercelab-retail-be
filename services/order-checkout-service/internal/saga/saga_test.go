@@ -230,12 +230,12 @@ func TestMoneyAfterACancellationIsRefunded(t *testing.T) {
 
 func TestCancelRequestAndRejectionByState(t *testing.T) {
 	for _, from := range []State{StateConfirmed, StateInFulfillment, StateCancelRequested} {
-		got, err := Next(from, CancelRequested{})
+		got, err := Next(from, CancelRequested{PaymentStatus: PayCaptured})
 		if err != nil || got.State != StateCancelRequested || got.PaymentStatus != PayCaptured || len(got.Effects) != 0 {
 			t.Errorf("%s: request = %+v %v", from, got, err)
 		}
 	}
-	got, err := Next(StateCancelRequested, CancelRejected{})
+	got, err := Next(StateCancelRequested, CancelRejected{PaymentStatus: PayCaptured})
 	if err != nil || got.State != StateInFulfillment || got.PaymentStatus != PayCaptured || len(got.Effects) != 0 {
 		t.Errorf("rejection = %+v %v, want back to IN_FULFILLMENT with no effect", got, err)
 	}
@@ -247,6 +247,30 @@ func TestCancelRequestAndRejectionByState(t *testing.T) {
 	for _, from := range []State{StatePending, StateReserved, StateUnknownHold, StateDelivered, StateFailedClosed, StateCancelled} {
 		if _, err := Next(from, CancelRequested{}); !errors.Is(err, ErrInvalidTransition) {
 			t.Errorf("%s: request = %v, want ErrInvalidTransition", from, err)
+		}
+	}
+}
+
+func TestCancellationPreservesPendingCODPayment(t *testing.T) {
+	for _, from := range []State{StateConfirmed, StateInFulfillment, StateCancelRequested} {
+		got, err := Next(from, CancelRequested{PaymentStatus: PayCODPending})
+		if err != nil || got.State != StateCancelRequested || got.PaymentStatus != PayCODPending {
+			t.Fatalf("%s: request = %+v, %v", from, got, err)
+		}
+	}
+	got, err := Next(StateCancelRequested, CancelRejected{PaymentStatus: PayCODPending})
+	if err != nil || got.State != StateInFulfillment || got.PaymentStatus != PayCODPending {
+		t.Fatalf("rejection = %+v, %v", got, err)
+	}
+}
+
+func TestPartiallyDeliveredOrderCannotCancel(t *testing.T) {
+	if !StatePartiallyDelivered.IsPaid() {
+		t.Fatal("a partially delivered order must be treated as confirmed")
+	}
+	for _, event := range []Event{CancelRequested{}, CustomerCancelled{}} {
+		if _, err := Next(StatePartiallyDelivered, event); !errors.Is(err, ErrInvalidTransition) {
+			t.Fatalf("%T = %v, want ErrInvalidTransition", event, err)
 		}
 	}
 }
