@@ -6,11 +6,21 @@ import {
 } from '@nestjs/common';
 import { AuthenticatedUser } from './jwt-auth.guard';
 
+const CROSS_WAREHOUSE_ROLES = new Set([
+  'ADMIN',
+  'OPS_MGR',
+  'CSKH',
+  'SUPPORT_AGENT',
+  'SUPPORT_STAFF',
+  'SUPPORT_LEAD',
+  'FINANCE',
+  'FINANCE_MGR',
+]);
+
 export function hasAllWarehouseScope(user?: AuthenticatedUser): boolean {
   if (!user) return false;
   return (
-    user.roles.includes('ADMIN') ||
-    user.roles.includes('OPS_MGR') ||
+    user.roles.some((role) => CROSS_WAREHOUSE_ROLES.has(role)) ||
     user.isInternal === true ||
     user.warehouses.includes('*') ||
     user.warehouses.includes('ALL')

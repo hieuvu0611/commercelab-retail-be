@@ -215,10 +215,17 @@ func TestListOrderShipmentsRespectsWarehouseScopeAndStaffDeliverActions(t *testi
 		t.Fatalf("expected 2 parcels for ALL scope, got %+v", allParcels)
 	}
 
+	// Delivery coordinator and ops manager without explicit warehouseScopes (matching iam-auth-service JWTs) see both parcels
+	deliveryCoord := auth.Identity{UserID: "staff-delivery-coord", Roles: []string{"DELIVERY_COORD"}}
+	coordParcels := decode[[]shipmentView](t, e.call(t, "GET", "/api/v1/admin/orders/O-SPLIT/shipments", "", &deliveryCoord))
+	if len(coordParcels) != 2 {
+		t.Fatalf("expected 2 parcels for DELIVERY_COORD without warehouseScopes, got %+v", coordParcels)
+	}
+
 	// Staff marks parcel 1 delivered and parcel 2 failed
-	d1 := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-1/deliver", `{}`, &hcmStaff)
+	d1 := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-1/deliver", `{}`, &deliveryCoord)
 	if v := decode[shipmentView](t, d1); d1.Code != 200 || v.Status != "DELIVERED" {
-		t.Fatalf("deliver parcel 1 = %d %+v", d1.Code, v)
+		t.Fatalf("deliver parcel 1 as DELIVERY_COORD = %d %+v", d1.Code, v)
 	}
 	f2 := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-2/delivery-failed", `{"reason":"Recipient unreachable"}`, &hnStaff)
 	if v := decode[shipmentView](t, f2); f2.Code != 200 || v.Status != "DELIVERY_FAILED" {

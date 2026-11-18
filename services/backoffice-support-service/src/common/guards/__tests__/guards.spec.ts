@@ -68,6 +68,28 @@ describe('Auth Guards', () => {
       });
     });
 
+    it('maps iam-auth-service plural warehouseScopes claim onto user.warehouses', () => {
+      const token = jwt.sign(
+        {
+          sub: 'staff-wh-hcm',
+          userId: 'staff-wh-hcm',
+          roles: ['WAREHOUSE_STAFF'],
+          warehouseScopes: ['WH-HCM-01'],
+        },
+        secret,
+      );
+      const req: any = { headers: { authorization: `Bearer ${token}` } };
+      const ctx = mockContext(req);
+
+      expect(guard.canActivate(ctx)).toBe(true);
+      expect(req.user).toEqual({
+        userId: 'staff-wh-hcm',
+        roles: ['WAREHOUSE_STAFF'],
+        warehouses: ['WH-HCM-01'],
+        isInternal: false,
+      });
+    });
+
     it('rejects Bearer verification when secret is missing outside APP_ENV=dev', () => {
       const savedSecret = process.env.JWT_ACCESS_SECRET;
       const savedEnv = process.env.APP_ENV;
@@ -166,6 +188,16 @@ describe('Auth Guards', () => {
         params: { warehouseId: 'WH-HN-01' },
       });
       expect(() => guard.canActivate(ctx)).toThrow(ForbiddenException);
+    });
+
+    it('allows cross-warehouse support and finance roles without explicit warehouseScopes', () => {
+      for (const role of ['SUPPORT_AGENT', 'CSKH', 'SUPPORT_LEAD', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR']) {
+        const ctx = mockContext({
+          user: { roles: [role], warehouses: [] },
+          params: { warehouseId: 'WH-HCM-01' },
+        });
+        expect(guard.canActivate(ctx)).toBe(true);
+      }
     });
   });
 });

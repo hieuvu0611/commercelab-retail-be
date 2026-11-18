@@ -26,6 +26,26 @@ func extractRoles(claims *auth.Claims) []string {
 	return nil
 }
 
+func hasCrossWarehouseProcurementAccess(claims *auth.Claims) bool {
+	if claims == nil {
+		return false
+	}
+	for _, r := range extractRoles(claims) {
+		switch r {
+		case "ADMIN", "OPS_MGR", "OPS_DIRECTOR", "FINANCE_MGR", "PROCUREMENT_MGR", "PROCUREMENT", "SUPPLY_CHAIN_MGR":
+			return true
+		}
+	}
+	return false
+}
+
+func canAccessProcurementWarehouse(claims *auth.Claims, warehouseID string) bool {
+	if warehouseID == "" {
+		return false
+	}
+	return hasCrossWarehouseProcurementAccess(claims) || auth.CanAccessWarehouse(claims, warehouseID)
+}
+
 // procurementWarehouseFilter uses nil for all warehouses and an empty slice for no access.
 func procurementWarehouseFilter(claims *auth.Claims, requested string) []string {
 	if requested != "" {
@@ -33,6 +53,9 @@ func procurementWarehouseFilter(claims *auth.Claims, requested string) []string 
 	}
 	if claims == nil {
 		return []string{}
+	}
+	if hasCrossWarehouseProcurementAccess(claims) {
+		return nil
 	}
 	for _, scope := range claims.WarehouseScopes {
 		if scope == auth.AllWarehouses {
@@ -56,7 +79,7 @@ func requireProcurementWarehouse(w http.ResponseWriter, r *http.Request, warehou
 		return false
 	}
 	claims, _ := auth.ClaimsFrom(r.Context())
-	if !auth.CanAccessWarehouse(claims, warehouseID) {
+	if !canAccessProcurementWarehouse(claims, warehouseID) {
 		auth.ForbiddenWarehouse(w, r)
 		return false
 	}
@@ -128,7 +151,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		status := strings.TrimSpace(r.URL.Query().Get("status"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -161,7 +184,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, po.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, po.WarehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -185,7 +208,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			req.WarehouseID = domain.DefaultWarehouseID
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, req.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, req.WarehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -313,7 +336,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		poID := strings.TrimSpace(r.URL.Query().Get("poId"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -347,7 +370,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			req.WarehouseID = domain.DefaultWarehouseID
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, req.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, req.WarehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -405,7 +428,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		supplierID := strings.TrimSpace(r.URL.Query().Get("supplierId"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -438,7 +461,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, ret.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, ret.WarehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -456,7 +479,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			req.WarehouseID = domain.DefaultWarehouseID
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, req.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, req.WarehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -476,7 +499,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 	mux.Handle("GET /api/v1/admin/inventory/stocktakes", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -509,7 +532,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, stk.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, stk.WarehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -555,7 +578,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		status := strings.TrimSpace(r.URL.Query().Get("status"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !auth.CanAccessWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}

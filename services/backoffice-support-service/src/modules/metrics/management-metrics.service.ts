@@ -48,6 +48,20 @@ export class ManagementMetricsService {
     return start;
   }
 
+  private async fetchJson(url: string, headers: Record<string, string>, label: string): Promise<any> {
+    let res: Response;
+    try {
+      res = await fetch(url, { headers });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'network error';
+      throw new ServiceUnavailableException(`Upstream ${label} unreachable: ${detail}`);
+    }
+    if (!res.ok) {
+      throw new ServiceUnavailableException(`Upstream ${label} failed (${res.status})`);
+    }
+    return res.json();
+  }
+
   private async fetchAllInternalPages(
     baseUrl: string,
     path: string,
@@ -58,15 +72,11 @@ export class ManagementMetricsService {
     let pageCount = 1;
     do {
       const sep = path.includes('?') ? '&' : '?';
-      const res = await fetch(`${baseUrl}${path}${sep}limit=100&page=${page}`, {
-        headers: { 'X-Internal-Token': token },
-      });
-      if (!res.ok) {
-        throw new ServiceUnavailableException(
-          `Upstream metrics endpoint ${path} failed (${res.status})`,
-        );
-      }
-      const json = (await res.json()) as {
+      const json = (await this.fetchJson(
+        `${baseUrl}${path}${sep}limit=100&page=${page}`,
+        { 'X-Internal-Token': token },
+        `metrics endpoint ${path}`,
+      )) as {
         data?: any[];
         metadata?: { pageCount?: number };
       };
@@ -81,7 +91,6 @@ export class ManagementMetricsService {
   async getMetrics(period: string = 'TODAY'): Promise<ManagementMetricsResponse> {
     const now = new Date();
     const since = this.periodStart(period, now);
-    const sinceIso = since ? since.toISOString() : null;
 
     let totalOrders = 0;
     let confirmedOrders = 0;
@@ -109,12 +118,13 @@ export class ManagementMetricsService {
         );
       }
 
-      const [orders, paymentRes, shipments, stock] = await Promise.all([
+      const [orders, payJson, shipments, stock] = await Promise.all([
         this.fetchAllInternalPages(orderUrl, '/api/v1/orders/internal', token),
-        fetch(
+        this.fetchJson(
           `${paymentUrl}/api/v1/payments/internal/metrics?period=${encodeURIComponent(period || 'TODAY')}`,
-          { headers: { 'X-Internal-Token': token } },
-        ),
+          { 'X-Internal-Token': token },
+          'payment metrics',
+        ) as Promise<{ data?: { grossCollectedVnd?: number; totalRefundedVnd?: number } }>,
         fulfillmentUrl
           ? this.fetchAllInternalPages(fulfillmentUrl, '/api/v1/shipments/internal', token)
           : Promise.resolve([]),
@@ -122,15 +132,6 @@ export class ManagementMetricsService {
           ? this.fetchAllInternalPages(inventoryUrl, '/api/v1/inventory/internal/stock', token)
           : Promise.resolve([]),
       ]);
-
-      if (!paymentRes.ok) {
-        throw new ServiceUnavailableException(
-          `Upstream payment metrics failed (${paymentRes.status})`,
-        );
-      }
-      const payJson = (await paymentRes.json()) as {
-        data?: { grossCollectedVnd?: number; totalRefundedVnd?: number };
-      };
 
       const filteredOrders = since
         ? orders.filter((o) => !o.createdAt || new Date(o.createdAt) >= since)
@@ -157,35 +158,11 @@ export class ManagementMetricsService {
         onTimeDeliveryRate =
           terminal.length > 0 ? Math.round((delivered / terminal.length) * 1000) / 10 : 100;
       }
-    } else if (this.db) {
-      const orderRes = await this.db.query(
-        `SELECT COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE status IN ('CONFIRMED', 'IN_FULFILLMENT', 'PARTIALLY_DELIVERED', 'DELIVERED')) AS confirmed
-         FROM orders.orders
-         WHERE ($1::timestamptz IS NULL OR created_at >= $1)`,
-        [sinceIso],
+    } else if (this.db || process.env.DATABASE_URL_SUPPORT?.trim()) {
+      // Cross-schema SQL queries from backoffice into orders/payments are disallowed (docs/04 §4.1); fail explicitly.
+      throw new ServiceUnavailableException(
+        'ORDER_SERVICE_URL and PAYMENT_SERVICE_URL must be configured to aggregate management metrics from owning services',
       );
-      totalOrders = Number(orderRes.rows?.[0]?.total || 0);
-      confirmedOrders = Number(orderRes.rows?.[0]?.confirmed || 0);
-
-      const payRes = await this.db.query(
-        `SELECT COALESCE(SUM(COALESCE(NULLIF(captured_amount_vnd, 0), amount_vnd)), 0) AS collected
-         FROM payments.payment_attempts
-         WHERE status IN ('CAPTURED', 'COLLECTED')
-           AND ($1::timestamptz IS NULL OR COALESCE(outcome_at, created_at) >= $1)`,
-        [sinceIso],
-      );
-      grossCollected = Number(payRes.rows?.[0]?.collected || 0);
-
-      const refRes = await this.db.query(
-        `SELECT COALESCE(SUM(amount_vnd), 0) AS refunded
-         FROM payments.refund_obligations
-         WHERE status = 'DONE'
-           AND ($1::timestamptz IS NULL OR COALESCE(refunded_at, created_at) >= $1)`,
-        [sinceIso],
-      );
-      totalRefunded = Number(refRes.rows?.[0]?.refunded || 0);
-
     } else {
       // Isolated unit test without DB or HTTP upstreams
       totalOrders = 120;

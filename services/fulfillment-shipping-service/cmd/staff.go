@@ -173,12 +173,24 @@ func listOrderShipments(d Deps) http.HandlerFunc {
 		claims, _ := auth.ClaimsFrom(r.Context())
 		views := make([]shipmentView, 0, len(list))
 		for _, s := range list {
-			if claims == nil || auth.CanAccessWarehouse(claims, s.WarehouseID) {
+			if claims == nil || canAccessShipmentWarehouse(claims, s.WarehouseID) {
 				views = append(views, viewOf(s))
 			}
 		}
 		response.JSON(w, http.StatusOK, "Order shipments", views, nil)
 	}
+}
+
+func canAccessShipmentWarehouse(claims *auth.Claims, warehouseID string) bool {
+	if claims == nil {
+		return false
+	}
+	for _, role := range []string{"OPS_MGR", "DELIVERY_COORD", "CSKH", "SUPPORT_AGENT", "SUPPORT_LEAD", "FINANCE", "FINANCE_MGR", "ADMIN"} {
+		if claims.HasRole(role) {
+			return true
+		}
+	}
+	return auth.CanAccessWarehouse(claims, warehouseID)
 }
 
 // withShipment loads the shipment of the path and refuses callers whose token does not cover its warehouse.
@@ -194,7 +206,7 @@ func withShipment(d Deps, next func(http.ResponseWriter, *http.Request, shipment
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, s.WarehouseID) {
+		if !canAccessShipmentWarehouse(claims, s.WarehouseID) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}

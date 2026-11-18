@@ -70,10 +70,24 @@ func TestProcurementAPI(t *testing.T) {
 			t.Errorf("expected 403 Forbidden for self-approval, got %d (%s)", rec.Code, rec.Body.String())
 		}
 
-		// Other manager (opsDirector) approves
-		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/procurement/orders/%s/approve", poID), "", &opsDirector)
+		// Other manager without explicit warehouseScopes (matching iam-auth-service JWT for OPS_MGR/OPS_DIRECTOR) approves
+		opsMgrToken := auth.Identity{UserID: "mgr-ops", Roles: []string{"OPS_MGR"}}
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/procurement/orders/%s/approve", poID), "", &opsMgrToken)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK for approval, got %d (%s)", rec.Code, rec.Body.String())
+			t.Fatalf("expected 200 OK for OPS_MGR approval without warehouseScopes, got %d (%s)", rec.Code, rec.Body.String())
+		}
+
+		// Scoped warehouse staff from another warehouse is still denied access
+		otherWhStaff := auth.Identity{UserID: "wh-hn-01", Roles: []string{"WAREHOUSE_STAFF"}, WarehouseScopes: []string{"WH-HN-01"}}
+		rec = call(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/admin/procurement/orders/%s", poID), "", &otherWhStaff)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for cross-warehouse WAREHOUSE_STAFF, got %d (%s)", rec.Code, rec.Body.String())
+		}
+
+		// OPS_MGR without explicit warehouseScopes can list and inspect the PO
+		rec = call(t, srv, http.MethodGet, "/api/v1/admin/procurement/orders", "", &opsMgrToken)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for OPS_MGR listing POs, got %d (%s)", rec.Code, rec.Body.String())
 		}
 	})
 
