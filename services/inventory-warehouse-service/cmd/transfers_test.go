@@ -75,6 +75,57 @@ func TestMultiWarehouseAvailabilityAndAtomicSplitReservation(t *testing.T) {
 	}
 }
 
+func TestTransferListingRequiresScopeAndIncludesEveryAssignedWarehouse(t *testing.T) {
+	authtest.Configure(t)
+	repo := repository.NewInventoryRepository(nil)
+	srv := newTestServer(repo, false)
+	items := []domain.ReserveLine{{SkuID: "SKU-BALO-BLACK-20L", Quantity: 1}}
+	for _, warehouses := range [][2]string{
+		{"WH-HCM-01", "WH-OTHER-01"},
+		{"WH-OTHER-01", "WH-HN-01"},
+		{"WH-OTHER-01", "WH-OTHER-02"},
+	} {
+		if _, err := repo.CreateTransfer(t.Context(), warehouses[0], warehouses[1], "maker", "", items); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, suffix := range []string{"", "?warehouse=ALL", "?warehouse=WH-HCM-01"} {
+		for _, tc := range []struct {
+			scopes []string
+			code   int
+			count  int
+		}{
+			{nil, http.StatusForbidden, 0},
+			{[]string{"WH-HCM-01", "WH-HN-01"}, http.StatusOK, 2},
+			{[]string{auth.AllWarehouses}, http.StatusOK, 3},
+		} {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/inventory/transfers"+suffix, nil)
+			req.Header.Set("Authorization", bearerFor(t, auth.Identity{
+				UserID: "staff", Roles: []string{"WAREHOUSE_STAFF"}, WarehouseScopes: tc.scopes,
+			}))
+			rec := httptest.NewRecorder()
+			srv.ServeHTTP(rec, req)
+			if rec.Code != tc.code {
+				t.Fatalf("%s scopes %v = %d %s", suffix, tc.scopes, rec.Code, rec.Body.String())
+			}
+			if rec.Code != http.StatusOK {
+				continue
+			}
+			var res struct{ Data []domain.WarehouseTransfer }
+			if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+				t.Fatal(err)
+			}
+			want := tc.count
+			if suffix == "?warehouse=WH-HCM-01" {
+				want = 1
+			}
+			if len(res.Data) != want {
+				t.Fatalf("%s scopes %v: got %d transfers, want %d", suffix, tc.scopes, len(res.Data), want)
+			}
+		}
+	}
+}
+
 func TestInterWarehouseTransferLifecycleAndSC09Discrepancy(t *testing.T) {
 	authtest.Configure(t)
 	var openedCase bool

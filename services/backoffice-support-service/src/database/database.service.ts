@@ -1,5 +1,5 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { Pool, QueryResult } from 'pg';
+import { Pool, PoolClient, QueryResult } from 'pg';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
@@ -46,6 +46,30 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       return res.rows[0]?.ok === 1;
     } catch {
       return false;
+    }
+  }
+
+  async transaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+    if (!this.pool) {
+      throw new Error('Database pool is not initialized');
+    }
+    const client = await this.pool.connect();
+    let releaseError: Error | undefined;
+    try {
+      await client.query('BEGIN');
+      const result = await work(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackError) {
+        releaseError = new AggregateError([error, rollbackError], 'Database transaction and rollback failed');
+        throw releaseError;
+      }
+      throw error;
+    } finally {
+      client.release(releaseError);
     }
   }
 

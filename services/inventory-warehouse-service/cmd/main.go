@@ -310,7 +310,11 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and positive quantity are required", nil)
 			return
 		}
-		st, err := repo.ReceiveReturnedItem(r.Context(), req.WarehouseID, req.SkuID, req.Quantity)
+		st, err := repo.ReceiveReturnedItem(r.Context(), req.WarehouseID, req.SkuID, req.Quantity, r.Header.Get("Idempotency-Key"))
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusConflict, "RECEIVE_RETURN_FAILED", err.Error(), nil)
 			return
@@ -325,11 +329,16 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			SkuID       string `json:"skuId"`
 			Quantity    int64  `json:"quantity"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SkuID == "" || req.Quantity <= 0 {
-			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and positive quantity are required", nil)
+		key := r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SkuID == "" || req.Quantity < 0 || (req.Quantity == 0 && key == "") {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "skuId and a valid QC pass quantity are required", nil)
 			return
 		}
-		st, err := repo.ApproveReturnQC(r.Context(), req.WarehouseID, req.SkuID, req.Quantity)
+		st, err := repo.ApproveReturnQC(r.Context(), req.WarehouseID, req.SkuID, req.Quantity, key)
+		if dependency.IsUnavailable(err) {
+			dependency.WriteUnavailable(w, r, err)
+			return
+		}
 		if err != nil {
 			response.Error(w, r, http.StatusConflict, "QC_PASS_FAILED", err.Error(), nil)
 			return

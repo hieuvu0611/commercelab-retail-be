@@ -35,14 +35,10 @@ export const VALID_REASONS = [
   'SELLER_FAULT',
 ] as const;
 
-export class CreateReturnRequestDto {
+class ReturnRequestFields {
   @IsOptional()
   @IsString()
   rmaId?: string;
-
-  @IsString()
-  @IsNotEmpty()
-  orderId: string;
 
   @IsOptional()
   @IsInt()
@@ -64,4 +60,16 @@ export class CreateReturnRequestDto {
 
   @IsOptional()
   isExchange?: boolean;
+}
+
+export class CreateReturnRequestDto extends ReturnRequestFields {
+  @IsString()
+  @IsNotEmpty()
+  orderId: string;
+}
+
+export class CreateOrderReturnRequestDto extends ReturnRequestFields {
+  @IsOptional()
+  @IsString()
+  orderId?: string;
 }

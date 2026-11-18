@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 
@@ -119,13 +120,13 @@ func (r *InventoryRepository) GetTransfer(ctx context.Context, transferID string
 	return &t, dependency.Wrap(rows.Err())
 }
 
-func (r *InventoryRepository) ListTransfers(ctx context.Context, warehouseID string) ([]domain.WarehouseTransfer, error) {
+func (r *InventoryRepository) ListTransfers(ctx context.Context, warehouses []string) ([]domain.WarehouseTransfer, error) {
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		out := make([]domain.WarehouseTransfer, 0)
 		for _, t := range r.transfers {
-			if warehouseID == "" || warehouseID == "ALL" || t.FromWarehouseID == warehouseID || t.ToWarehouseID == warehouseID {
+			if warehouses == nil || slices.Contains(warehouses, t.FromWarehouseID) || slices.Contains(warehouses, t.ToWarehouseID) {
 				cp := *t
 				cp.Items = append([]domain.TransferItem(nil), t.Items...)
 				out = append(out, cp)
@@ -136,9 +137,9 @@ func (r *InventoryRepository) ListTransfers(ctx context.Context, warehouseID str
 	}
 	rows, err := r.pool.Query(ctx, `
 		SELECT transfer_id FROM inventory.warehouse_transfers
-		WHERE ($1 = '' OR $1 = 'ALL' OR from_warehouse_id = $1 OR to_warehouse_id = $1)
+		WHERE ($1::text[] IS NULL OR from_warehouse_id = ANY($1) OR to_warehouse_id = ANY($1))
 		ORDER BY created_at DESC LIMIT 100
-	`, warehouseID)
+	`, warehouses)
 	if err != nil {
 		return nil, dependency.Wrap(err)
 	}
@@ -150,6 +151,10 @@ func (r *InventoryRepository) ListTransfers(ctx context.Context, warehouseID str
 			return nil, dependency.Wrap(err)
 		}
 		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, dependency.Wrap(err)
 	}
 	rows.Close()
 	out := make([]domain.WarehouseTransfer, 0, len(ids))

@@ -59,24 +59,15 @@ func registerTransferRoutes(mux *http.ServeMux, repo *repository.InventoryReposi
 	mux.Handle("GET /api/v1/admin/inventory/transfers", staff(func(w http.ResponseWriter, r *http.Request) {
 		wh := strings.TrimSpace(r.URL.Query().Get("warehouse"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if wh == "" || wh == "ALL" {
-			hasAll := false
-			for _, sc := range claims.WarehouseScopes {
-				if sc == auth.AllWarehouses {
-					hasAll = true
-					break
-				}
-			}
-			if !hasAll && len(claims.WarehouseScopes) > 0 {
-				wh = claims.WarehouseScopes[0]
-			} else {
-				wh = "ALL"
-			}
-		} else if !auth.CanAccessWarehouse(claims, wh) {
+		if wh == "ALL" {
+			wh = ""
+		}
+		warehouses := procurementWarehouseFilter(claims, wh)
+		if (wh != "" && !auth.CanAccessWarehouse(claims, wh)) || (warehouses != nil && len(warehouses) == 0) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListTransfers(r.Context(), wh)
+		list, err := repo.ListTransfers(r.Context(), warehouses)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return

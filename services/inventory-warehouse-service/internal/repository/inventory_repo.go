@@ -51,6 +51,7 @@ type InventoryRepository struct {
 	stocktakes      map[string]*domain.Stocktake
 	adjustments     map[string]*domain.StockAdjustment
 	transfers       map[string]*domain.WarehouseTransfer
+	returnSteps     map[string]returnStockChange
 	now             func() time.Time
 }
 
@@ -75,6 +76,7 @@ func NewInventoryRepository(pool *pgxpool.Pool) *InventoryRepository {
 		stocktakes:      make(map[string]*domain.Stocktake),
 		adjustments:     make(map[string]*domain.StockAdjustment),
 		transfers:       make(map[string]*domain.WarehouseTransfer),
+		returnSteps:     make(map[string]returnStockChange),
 		now:             time.Now,
 	}
 	// Seed memory suppliers
@@ -607,63 +609,4 @@ func (r *InventoryRepository) HandoverOrderShipmentForWarehouse(ctx context.Cont
 	target.Status = "HANDED_OVER"
 	cp := *target
 	return &cp, nil
-}
-
-// ReceiveReturnedItem implements SC07: OnHand +qty, Unsellable +qty, Available unchanged.
-func (r *InventoryRepository) ReceiveReturnedItem(ctx context.Context, warehouseID, skuID string, qty int64) (domain.StockItem, error) {
-	if warehouseID == "" {
-		warehouseID = domain.DefaultWarehouseID
-	}
-	if qty <= 0 {
-		return domain.StockItem{}, domain.ErrInvalidReservationState
-	}
-	if r.pool != nil {
-		var st domain.StockItem
-		err := r.pool.QueryRow(ctx, `
-			UPDATE stock_items
-			SET on_hand = on_hand + $1,
-			    unsellable = unsellable + $1,
-			    version = version + 1
-			WHERE sku_id = $2 AND warehouse_id = $3
-			RETURNING sku_id, warehouse_id, on_hand, unsellable, reserved, committed, in_transit, version
-		`, qty, skuID, warehouseID).Scan(&st.SkuID, &st.WarehouseID, &st.OnHand, &st.Unsellable, &st.Reserved, &st.Committed, &st.InTransit, &st.Version)
-		if err != nil {
-			return domain.StockItem{}, dependency.Wrap(err)
-		}
-		return st, nil
-	}
-	if err := r.engine.ReceiveReturnedItem(warehouseID, skuID, qty); err != nil {
-		return domain.StockItem{}, err
-	}
-	st, _ := r.engine.GetStock(warehouseID, skuID)
-	return st, nil
-}
-
-// ApproveReturnQC implements SC07: QC pass -> Unsellable -qty, Available +qty.
-func (r *InventoryRepository) ApproveReturnQC(ctx context.Context, warehouseID, skuID string, qty int64) (domain.StockItem, error) {
-	if warehouseID == "" {
-		warehouseID = domain.DefaultWarehouseID
-	}
-	if qty <= 0 {
-		return domain.StockItem{}, domain.ErrInvalidReservationState
-	}
-	if r.pool != nil {
-		var st domain.StockItem
-		err := r.pool.QueryRow(ctx, `
-			UPDATE stock_items
-			SET unsellable = unsellable - $1,
-			    version = version + 1
-			WHERE sku_id = $2 AND warehouse_id = $3 AND unsellable >= $1
-			RETURNING sku_id, warehouse_id, on_hand, unsellable, reserved, committed, in_transit, version
-		`, qty, skuID, warehouseID).Scan(&st.SkuID, &st.WarehouseID, &st.OnHand, &st.Unsellable, &st.Reserved, &st.Committed, &st.InTransit, &st.Version)
-		if err != nil {
-			return domain.StockItem{}, dependency.Wrap(err)
-		}
-		return st, nil
-	}
-	if err := r.engine.ApproveReturnQC(warehouseID, skuID, qty); err != nil {
-		return domain.StockItem{}, err
-	}
-	st, _ := r.engine.GetStock(warehouseID, skuID)
-	return st, nil
 }

@@ -12,7 +12,8 @@ describe('Exchange Orders (P8-T06, B06)', () => {
 
   beforeEach(() => {
     mockDb = {
-      query: jest.fn().mockResolvedValue({ rows: [] }),
+      query: jest.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
+      transaction: (work: (client: typeof mockDb) => Promise<unknown>) => work(mockDb),
       ping: jest.fn().mockResolvedValue(true),
     };
     paymentClient = new PaymentClient();
@@ -28,7 +29,9 @@ describe('Exchange Orders (P8-T06, B06)', () => {
       isExchange: true,
     });
 
+    await expect(service.createLinkedExchangeOrder(rma.returnId)).rejects.toThrow(ConflictException);
     await service.receiveRma(rma.returnId, 'wh-staff');
+    await expect(service.createLinkedExchangeOrder(rma.returnId)).rejects.toThrow(ConflictException);
     await service.submitQcResult(
       rma.returnId,
       [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 1, failedQuantity: 0 }],
@@ -44,6 +47,10 @@ describe('Exchange Orders (P8-T06, B06)', () => {
     expect(exchanged.isExchange).toBe(true);
     expect(exchanged.linkedOrderId).toBe(`O-EXCH-${rma.returnId}`);
     expect(exchanged.items[0].skuId).toBe('SKU-BALO-BLACK-20L'); // original SKU unchanged
+    expect(mockDb.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO support.rma_timeline'),
+      expect.arrayContaining([rma.returnId, expect.stringContaining('Linked exchange order')]),
+    );
 
     // Repeated call throws ConflictException
     await expect(

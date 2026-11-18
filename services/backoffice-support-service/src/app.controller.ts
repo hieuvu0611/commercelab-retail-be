@@ -16,7 +16,7 @@ import { ExceptionCasesService } from './modules/exception-cases/exception-cases
 import { AuditLogsService } from './modules/audit-logs/audit-logs.service';
 import { ManagementMetricsService } from './modules/metrics/management-metrics.service';
 import { ClickhouseAnalyticsService } from './modules/analytics/clickhouse-analytics.service';
-import { CreateReturnRequestDto } from './modules/returns-rma/create-return.dto';
+import { CreateOrderReturnRequestDto, CreateReturnRequestDto } from './modules/returns-rma/create-return.dto';
 import { ApiResult } from './common/http/api-response.interceptor';
 import { DatabaseService } from './database/database.service';
 import { AuthenticatedUser, JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -125,12 +125,11 @@ export class AppController {
   async createOrderReturn(
     @Req() req: any,
     @Param('orderId') orderId: string,
-    @Body() body: CreateReturnRequestDto,
+    @Body() body: CreateOrderReturnRequestDto,
   ) {
-    body.orderId = orderId;
     const customerId = req.user?.userId || 'cust-default';
     const authHeader = req.headers?.authorization as string | undefined;
-    const result = await this.returnsService.openRmaRequest(body, customerId, authHeader);
+    const result = await this.returnsService.openRmaRequest({ ...body, orderId }, customerId, authHeader);
     return new ApiResult(result, 'Return request created successfully');
   }
 
@@ -216,7 +215,6 @@ export class AppController {
     }
     const actor = req.user?.userId || 'warehouse-staff';
     const item = await this.returnsService.receiveRma(rmaId, actor);
-    await this.returnsService.syncRecord(item);
     return new ApiResult(item, 'Return parcel received by warehouse (SC07)');
   }
 
@@ -235,7 +233,6 @@ export class AppController {
     }
     const actor = req.user?.userId || 'qc-inspector';
     const item = await this.returnsService.submitQcResult(rmaId, results || [], actor);
-    await this.returnsService.syncRecord(item);
     return new ApiResult(item, 'QC inspection recorded successfully (SC07)');
   }
 
@@ -350,6 +347,7 @@ export class AppController {
     @Param('rmaId') rmaId: string,
     @Body('replacementSkuId') replacementSkuId?: string,
   ) {
+    await this.returnsService.ensureHydrated();
     const actor = req.user?.userId || 'support-agent';
     const item = await this.returnsService.createLinkedExchangeOrder(
       rmaId,

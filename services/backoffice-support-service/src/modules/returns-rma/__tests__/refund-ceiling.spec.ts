@@ -12,7 +12,8 @@ describe('Refund Ceiling & Execution (P8-T04, I03, SC08)', () => {
 
   beforeEach(() => {
     mockDb = {
-      query: jest.fn().mockResolvedValue({ rows: [] }),
+      query: jest.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
+      transaction: (work: (client: typeof mockDb) => Promise<unknown>) => work(mockDb),
       ping: jest.fn().mockResolvedValue(true),
     };
     paymentClient = new PaymentClient();

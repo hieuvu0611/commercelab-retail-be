@@ -12,13 +12,12 @@ describe('Shipping Refund Rules & Approval Thresholds (P8-T05, P09, P11, P10)', 
 
   beforeEach(() => {
     mockDb = {
-      query: jest.fn().mockImplementation(async (sql: string, params: unknown[]) => ({
-        rows: sql.includes('RETURNING approval_id') ? [{ approval_id: params[4] }] : [],
-      })),
+      query: jest.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
+      transaction: (work: (client: typeof mockDb) => Promise<unknown>) => work(mockDb),
       ping: jest.fn().mockResolvedValue(true),
     };
     paymentClient = new PaymentClient();
-    makerChecker = new MakerCheckerPolicyService(mockDb as DatabaseService);
+    makerChecker = new MakerCheckerPolicyService();
     service = new ReturnsRmaService(mockDb as DatabaseService, paymentClient, makerChecker);
   });
 

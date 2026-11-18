@@ -81,6 +81,7 @@ export class ReturnsRmaService implements OnModuleInit {
   private readonly ceilings = new Map<string, OrderLineCeiling>();
   private readonly orderedQuantities = new Map<string, number>();
   private readonly returnCases = new Map<string, ReturnCaseRecord>();
+  private readonly openRequests = new Map<string, Promise<unknown>>();
   private hydrated = false;
 
   constructor(
@@ -393,6 +394,27 @@ export class ReturnsRmaService implements OnModuleInit {
     const parcels = usesLiveShipments
       ? await this.hydrateCeilingsFromOrderServices(dto.orderId, authHeader, customerId)
       : new Map<number, string>();
+    const pending = this.openRequests.get(dto.orderId) ?? Promise.resolve();
+    const request = pending
+      .catch(() => undefined)
+      .then(() => this.createRmaRecord(dto, customerId, rmaId, usesLiveShipments, parcels));
+    this.openRequests.set(dto.orderId, request);
+    try {
+      return await request;
+    } finally {
+      if (this.openRequests.get(dto.orderId) === request) {
+        this.openRequests.delete(dto.orderId);
+      }
+    }
+  }
+
+  private async createRmaRecord(
+    dto: CreateReturnRequestDto,
+    customerId: string,
+    rmaId: string,
+    usesLiveShipments: boolean,
+    parcels: Map<number, string>,
+  ): Promise<ReturnCaseRecord> {
     const replay = this.returnCases.get(rmaId);
     if (replay) return replay;
     const requestedWarehouse = dto.parcelIndex !== undefined ? parcels.get(dto.parcelIndex) : undefined;
@@ -429,7 +451,6 @@ export class ReturnsRmaService implements OnModuleInit {
     const items: ReturnCaseLine[] = [];
     for (const line of dto.lines) {
       const ceiling = this.getCeiling(dto.orderId, line.skuId, warehouseId)!;
-      ceiling.returnOpenQty += line.quantity;
       goodsRefundVnd += line.quantity * ceiling.allocatedUnitPaidVnd;
       items.push({
         skuId: line.skuId,
@@ -495,11 +516,12 @@ export class ReturnsRmaService implements OnModuleInit {
       ],
     };
 
-    this.returnCases.set(rmaId, record);
-
-    if (this.dbReady()) {
-      await this.persistRma(record, record.timeline[0]);
+    await this.persistRma(record, record.timeline[0]);
+    for (const item of record.items) {
+      const ceiling = this.getCeiling(record.orderId, item.skuId, warehouseId)!;
+      ceiling.returnOpenQty += item.quantity;
     }
+    this.returnCases.set(rmaId, record);
 
     return record;
   }
@@ -507,79 +529,90 @@ export class ReturnsRmaService implements OnModuleInit {
   private async persistRma(
     record: ReturnCaseRecord,
     timelineEntry?: { status?: string; actor: string; note: string; at: string },
+    expectedStatus?: ReturnCaseRecord['status'],
   ): Promise<void> {
     if (!this.dbReady()) return;
-    await this.db.query(
-      `INSERT INTO support.rma_requests (
-        rma_id, order_id, customer_id, warehouse_id, reason, status,
-        refundable_amount_vnd, shipping_refund_vnd, is_exchange, linked_order_id, notes, customer_note, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-      ON CONFLICT (rma_id) DO UPDATE SET
-        status = EXCLUDED.status,
-        refundable_amount_vnd = EXCLUDED.refundable_amount_vnd,
-        shipping_refund_vnd = EXCLUDED.shipping_refund_vnd,
-        is_exchange = EXCLUDED.is_exchange,
-        linked_order_id = EXCLUDED.linked_order_id,
-        notes = EXCLUDED.notes,
-        customer_note = COALESCE(EXCLUDED.customer_note, support.rma_requests.customer_note),
-        updated_at = EXCLUDED.updated_at`,
-      [
-        record.returnId,
-        record.orderId,
-        record.customerId,
-        record.warehouseId,
-        record.reason,
-        record.status,
-        record.refundableAmountVnd,
-        record.shippingRefundVnd,
-        record.isExchange,
-        record.linkedOrderId || null,
-        record.rejectionNote || null,
-        record.customerNote || null,
-        record.createdAt,
-        record.updatedAt,
-      ],
-    );
-
-    for (const item of record.items) {
-      const qcStatus =
-        item.qcPassedQuantity > 0 ? 'PASS' : item.qcFailedQuantity > 0 ? 'FAIL' : 'PENDING';
-      await this.db.query(
-        `INSERT INTO support.rma_items (
-          rma_id, sku_id, sku_name, quantity, unit_paid_vnd, qc_status, received_qty, qc_passed_qty, qc_failed_qty
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        ON CONFLICT (rma_id, sku_id) DO UPDATE SET
-          qc_status = EXCLUDED.qc_status,
-          received_qty = EXCLUDED.received_qty,
-          qc_passed_qty = EXCLUDED.qc_passed_qty,
-          qc_failed_qty = EXCLUDED.qc_failed_qty`,
+    await this.db.transaction(async (client) => {
+      const result = await client.query(
+        `INSERT INTO support.rma_requests (
+          rma_id, order_id, customer_id, warehouse_id, reason, status,
+          refundable_amount_vnd, shipping_refund_vnd, is_exchange, linked_order_id, notes, customer_note, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (rma_id) DO UPDATE SET
+          status = EXCLUDED.status,
+          refundable_amount_vnd = EXCLUDED.refundable_amount_vnd,
+          shipping_refund_vnd = EXCLUDED.shipping_refund_vnd,
+          is_exchange = EXCLUDED.is_exchange,
+          linked_order_id = EXCLUDED.linked_order_id,
+          notes = EXCLUDED.notes,
+          customer_note = COALESCE(EXCLUDED.customer_note, support.rma_requests.customer_note),
+          updated_at = EXCLUDED.updated_at
+        WHERE $15::text IS NULL OR (
+          support.rma_requests.status = $15
+          AND support.rma_requests.linked_order_id IS NULL
+        )`,
         [
           record.returnId,
-          item.skuId,
-          item.skuName,
-          item.quantity,
-          item.allocatedUnitPaidVnd,
-          qcStatus,
-          item.receivedQuantity,
-          item.qcPassedQuantity,
-          item.qcFailedQuantity,
+          record.orderId,
+          record.customerId,
+          record.warehouseId,
+          record.reason,
+          record.status,
+          record.refundableAmountVnd,
+          record.shippingRefundVnd,
+          record.isExchange,
+          record.linkedOrderId || null,
+          record.rejectionNote || null,
+          record.customerNote || null,
+          record.createdAt,
+          record.updatedAt,
+          expectedStatus ?? null,
         ],
       );
-    }
+      if (expectedStatus && result.rowCount !== 1) {
+        throw new ConflictException('The return status changed before the operation could be saved');
+      }
 
-    if (timelineEntry) {
-      await this.db.query(
-        `INSERT INTO support.rma_timeline (rma_id, status, actor, note, created_at)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [
-          record.returnId,
-          timelineEntry.status || record.status,
-          timelineEntry.actor,
-          timelineEntry.note,
-          timelineEntry.at,
-        ],
-      );
-    }
+      for (const item of record.items) {
+        const qcStatus =
+          item.qcPassedQuantity > 0 ? 'PASS' : item.qcFailedQuantity > 0 ? 'FAIL' : 'PENDING';
+        await client.query(
+          `INSERT INTO support.rma_items (
+            rma_id, sku_id, sku_name, quantity, unit_paid_vnd, qc_status, received_qty, qc_passed_qty, qc_failed_qty
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          ON CONFLICT (rma_id, sku_id) DO UPDATE SET
+            qc_status = EXCLUDED.qc_status,
+            received_qty = EXCLUDED.received_qty,
+            qc_passed_qty = EXCLUDED.qc_passed_qty,
+            qc_failed_qty = EXCLUDED.qc_failed_qty`,
+          [
+            record.returnId,
+            item.skuId,
+            item.skuName,
+            item.quantity,
+            item.allocatedUnitPaidVnd,
+            qcStatus,
+            item.receivedQuantity,
+            item.qcPassedQuantity,
+            item.qcFailedQuantity,
+          ],
+        );
+      }
+
+      if (timelineEntry) {
+        await client.query(
+          `INSERT INTO support.rma_timeline (rma_id, status, actor, note, created_at)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            record.returnId,
+            timelineEntry.status || record.status,
+            timelineEntry.actor,
+            timelineEntry.note,
+            timelineEntry.at,
+          ],
+        );
+      }
+    });
   }
 
   async syncRecord(record: ReturnCaseRecord): Promise<void> {
@@ -648,11 +681,11 @@ export class ReturnsRmaService implements OnModuleInit {
 
   private async syncInventoryReturnStep(
     path: '/api/v1/inventory/returns/receive' | '/api/v1/inventory/returns/qc-pass' | '/api/v1/inventory/returns/qc-fail',
+    returnId: string,
     warehouseId: string,
     skuId: string,
     quantity: number,
   ): Promise<void> {
-    if (quantity <= 0) return;
     const baseUrl = process.env.INVENTORY_SERVICE_URL?.trim().replace(/\/$/, '');
     if (!baseUrl) return;
 
@@ -673,6 +706,7 @@ export class ReturnsRmaService implements OnModuleInit {
       headers: {
         'Content-Type': 'application/json',
         'X-Internal-Token': token,
+        'Idempotency-Key': encodeURIComponent(JSON.stringify([returnId, path, skuId])),
       },
       body: JSON.stringify({ warehouseId, skuId, quantity }),
     });
@@ -688,7 +722,9 @@ export class ReturnsRmaService implements OnModuleInit {
    * Kho tiếp nhận kiện hàng trả (SC07: OnHand +qty, Unsellable +qty, Available giữ nguyên)
    */
   async receiveRma(returnId: string, actor: string): Promise<ReturnCaseRecord> {
-    const record = this.getReturn(returnId);
+    const current = this.getReturn(returnId);
+    const expectedStatus = current.status;
+    const record = structuredClone(current);
     if (!['REQUESTED', 'APPROVED'].includes(record.status)) {
       throw new ConflictException(`Không thể nhận hàng trả ở trạng thái ${record.status}`);
     }
@@ -696,6 +732,7 @@ export class ReturnsRmaService implements OnModuleInit {
     for (const item of record.items) {
       await this.syncInventoryReturnStep(
         '/api/v1/inventory/returns/receive',
+        returnId,
         record.warehouseId,
         item.skuId,
         item.quantity,
@@ -716,7 +753,7 @@ export class ReturnsRmaService implements OnModuleInit {
       note: `Kho đã tiếp nhận kiện hàng trả. Tồn kho chuyển vào xô Chờ kiểm định (Unsellable +${record.items.map((i) => i.quantity).reduce((a, b) => a + b, 0)}).`,
     });
 
-    return record;
+    return this.persistTransition(record, current, expectedStatus);
   }
 
   /**
@@ -727,7 +764,8 @@ export class ReturnsRmaService implements OnModuleInit {
     results: Array<{ skuId: string; passedQuantity: number; failedQuantity: number }>,
     actor: string,
   ): Promise<ReturnCaseRecord> {
-    const record = this.getReturn(returnId);
+    const current = this.getReturn(returnId);
+    const record = structuredClone(current);
     if (record.status !== 'RECEIVED') {
       throw new ConflictException(`Chỉ có thể nhập kết quả QC cho hồ sơ đã nhận hàng (hiện tại: ${record.status})`);
     }
@@ -769,17 +807,17 @@ export class ReturnsRmaService implements OnModuleInit {
 
     for (const item of record.items) {
       const res = bySku.get(item.skuId)!;
-      if (res.passedQuantity > 0) {
-        await this.syncInventoryReturnStep(
-          '/api/v1/inventory/returns/qc-pass',
-          record.warehouseId,
-          item.skuId,
-          res.passedQuantity,
-        );
-      }
+      await this.syncInventoryReturnStep(
+        '/api/v1/inventory/returns/qc-pass',
+        returnId,
+        record.warehouseId,
+        item.skuId,
+        res.passedQuantity,
+      );
       if (res.failedQuantity > 0) {
         await this.syncInventoryReturnStep(
           '/api/v1/inventory/returns/qc-fail',
+          returnId,
           record.warehouseId,
           item.skuId,
           res.failedQuantity,
@@ -826,19 +864,37 @@ export class ReturnsRmaService implements OnModuleInit {
       });
     } else {
       record.status = 'QC_FAILED';
+      record.timeline.push({
+        at: nowIso,
+        actor,
+        note: `QC complete. All ${totalFailed} units failed inspection.`,
+      });
+    }
+
+    await this.persistTransition(record, current, 'RECEIVED');
+    if (record.status === 'QC_FAILED') {
       for (const item of record.items) {
         const ceiling = this.getCeiling(record.orderId, item.skuId, record.warehouseId);
         if (ceiling) {
           ceiling.returnOpenQty = Math.max(0, ceiling.returnOpenQty - item.quantity);
         }
       }
-      record.timeline.push({
-        at: nowIso,
-        actor,
-        note: `Hoàn tất thẩm định QC: Toàn bộ ${totalFailed} sản phẩm không đạt chuẩn chất lượng.`,
-      });
     }
 
+    return record;
+  }
+
+  private async persistTransition(
+    record: ReturnCaseRecord,
+    previous: ReturnCaseRecord,
+    expectedStatus: ReturnCaseRecord['status'],
+  ): Promise<ReturnCaseRecord> {
+    const current = this.getReturn(record.returnId);
+    if (current !== previous || current.status !== expectedStatus || current.linkedOrderId) {
+      throw new ConflictException('The return changed before the operation could be saved');
+    }
+    await this.persistRma(record, record.timeline[record.timeline.length - 1], expectedStatus);
+    this.returnCases.set(record.returnId, record);
     return record;
   }
 
@@ -980,53 +1036,38 @@ export class ReturnsRmaService implements OnModuleInit {
   }
 
   /**
-   * Nghiệp vụ Đổi hàng (Exchange = return + linked new order, B06):
-   * Khách đổi sản phẩm: Sau khi nhận hàng & QC đạt (hoặc CSKH duyệt đổi),
-   * hệ thống sinh một đơn hàng mới liên kết (linkedOrderId) thay vì sửa SKU/giá của đơn cũ.
+   * Link a replacement order after warehouse receipt and QC pass.
    */
   async createLinkedExchangeOrder(
     returnId: string,
     replacementSkuId?: string,
     actor = 'support-agent',
   ): Promise<ReturnCaseRecord> {
-    const record = this.getReturn(returnId);
-    if (!['REQUESTED', 'APPROVED', 'RECEIVED', 'QC_PASSED'].includes(record.status)) {
-      throw new ConflictException(`Không thể tạo đơn đổi hàng cho hồ sơ ở trạng thái ${record.status}`);
+    const current = this.getReturn(returnId);
+    if (current.status !== 'QC_PASSED') {
+      throw new ConflictException('The return must pass warehouse QC before an exchange can be linked');
     }
 
-    if (record.linkedOrderId) {
-      throw new ConflictException(`Hồ sơ đổi hàng này đã được liên kết với đơn ${record.linkedOrderId}`);
+    if (current.linkedOrderId) {
+      throw new ConflictException(`This return is already linked to exchange order ${current.linkedOrderId}`);
     }
+    const record = structuredClone(current);
 
     const linkedOrderId = `O-EXCH-${record.returnId}`;
     const nowIso = new Date().toISOString();
 
     record.isExchange = true;
     record.linkedOrderId = linkedOrderId;
-    record.status = 'QC_PASSED';
     record.updatedAt = nowIso;
 
     const targetSku = replacementSkuId || record.items[0]?.skuId || 'SKU-EXCHANGE';
     record.timeline.push({
       at: nowIso,
       actor,
-      note: `Tạo đơn hàng đổi mới liên kết ${linkedOrderId} (sản phẩm đổi: ${targetSku}). Hồ sơ trả cũ giữ nguyên không sửa đổi dữ liệu gốc (B06).`,
+      note: `Linked exchange order ${linkedOrderId} for replacement SKU ${targetSku} (B06).`,
     });
 
-    if (this.db) {
-      try {
-        await this.db.query(
-          `UPDATE support.rma_requests
-           SET is_exchange = TRUE, linked_order_id = $1, status = $2, updated_at = $3
-           WHERE rma_id = $4`,
-          [linkedOrderId, record.status, nowIso, returnId],
-        );
-      } catch {
-        // Fallback in-memory
-      }
-    }
-
-    return record;
+    return this.persistTransition(record, current, 'QC_PASSED');
   }
 
   /**

@@ -12,12 +12,27 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
 
   beforeEach(() => {
     mockDb = {
-      query: jest.fn().mockResolvedValue({ rows: [] }),
+      query: jest.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
+      transaction: (work: (client: typeof mockDb) => Promise<unknown>) => work(mockDb),
       ping: jest.fn().mockResolvedValue(true),
     };
     paymentClient = new PaymentClient();
     makerChecker = new MakerCheckerPolicyService(mockDb as DatabaseService);
     service = new ReturnsRmaService(mockDb as DatabaseService, paymentClient, makerChecker);
+  });
+
+  it('leaves an RMA and its quantity ceiling unchanged when the database transaction fails', async () => {
+    await service.ensureHydrated();
+    mockDb.query.mockRejectedValueOnce(new Error('write failed'));
+    const skuId = 'SKU-BALO-BLACK-20L';
+    const dto = {
+      rmaId: 'RMA-WRITE-FAIL', orderId: 'O-001', reason: 'DEFECTIVE', lines: [{ skuId, quantity: 2 }],
+    };
+    await expect(service.openRmaRequest(dto)).rejects.toThrow('write failed');
+    expect(service.listReturns({ orderId: dto.orderId })).toEqual([]);
+    expect(service.getCeiling(dto.orderId, skuId)?.returnOpenQty).toBe(0);
+    await expect(service.openRmaRequest(dto)).resolves.toMatchObject({ returnId: dto.rmaId });
+    expect(service.getCeiling(dto.orderId, skuId)?.returnOpenQty).toBe(2);
   });
 
   it('creates an RMA request within 7 days and calculates SC07 refund amount for change of mind (P09)', async () => {

@@ -1,8 +1,9 @@
-import { ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, ValidationPipe } from '@nestjs/common';
 import { AppController } from '../app.controller';
 import { MakerCheckerPolicyService } from '../common/guards/maker-checker.guard';
 import { PaymentClient } from '../modules/returns-rma/payment.client';
 import { ReturnsRmaService } from '../modules/returns-rma/returns.service';
+import { CreateOrderReturnRequestDto, CreateReturnRequestDto } from '../modules/returns-rma/create-return.dto';
 
 describe('AppController security & policy enforcement (BE-T2, BE-T3, BE-T4)', () => {
   let controller: AppController;
@@ -22,6 +23,19 @@ describe('AppController security & policy enforcement (BE-T2, BE-T3, BE-T4)', ()
       undefined as any,
       undefined as any,
     );
+  });
+
+  it('accepts an order ID in the route and requires it on the general returns endpoint', async () => {
+    const pipe = new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true });
+    const payload = {
+      reason: 'DEFECTIVE',
+      lines: [{ skuId: 'SKU-BALO-BLACK-20L', quantity: 1 }],
+    };
+    const body = await pipe.transform(payload, { type: 'body', metatype: CreateOrderReturnRequestDto });
+    const result = await controller.createOrderReturn({ user: { userId: 'user-lan' } }, 'O-001', body);
+    expect(result.data.orderId).toBe('O-001');
+    await expect(pipe.transform(payload, { type: 'body', metatype: CreateReturnRequestDto }))
+      .rejects.toThrow(BadRequestException);
   });
 
   it('blocks cross-customer IDOR on GET /api/v1/returns/:returnId and GET /api/v1/orders/:orderId/returns', async () => {

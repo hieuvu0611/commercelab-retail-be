@@ -178,15 +178,28 @@ func (r *InventoryRepository) GetPurchaseOrder(ctx context.Context, poID string)
 		return *po, true, nil
 	}
 
+	return readPurchaseOrder(ctx, r.pool, poID, false)
+}
+
+type procurementQueryer interface {
+	resQueryer
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func readPurchaseOrder(ctx context.Context, q procurementQueryer, poID string, lock bool) (domain.PurchaseOrder, bool, error) {
 	var po domain.PurchaseOrder
 	var approvedBy *string
-	err := r.pool.QueryRow(ctx, `
+	query := `
 		SELECT p.po_id, p.supplier_id, s.name, p.warehouse_id, p.status, p.total_amount_vnd,
 		       p.created_by, p.approved_by, p.approved_at, p.notes, p.created_at, p.updated_at
 		FROM purchase_orders p
 		LEFT JOIN suppliers s ON p.supplier_id = s.supplier_id
 		WHERE p.po_id = $1
-	`, poID).Scan(
+	`
+	if lock {
+		query += " FOR UPDATE OF p"
+	}
+	err := q.QueryRow(ctx, query, poID).Scan(
 		&po.POID, &po.SupplierID, &po.SupplierName, &po.WarehouseID, &po.Status, &po.TotalAmountVND,
 		&po.CreatedBy, &approvedBy, &po.ApprovedAt, &po.Notes, &po.CreatedAt, &po.UpdatedAt,
 	)
@@ -200,7 +213,7 @@ func (r *InventoryRepository) GetPurchaseOrder(ctx context.Context, poID string)
 		po.ApprovedBy = *approvedBy
 	}
 
-	linesRows, err := r.pool.Query(ctx, `
+	linesRows, err := q.Query(ctx, `
 		SELECT id, po_id, sku_id, ordered_qty, unit_cost_vnd, received_qty, damaged_qty, short_qty
 		FROM purchase_order_lines WHERE po_id = $1 ORDER BY id
 	`, poID)
@@ -310,17 +323,23 @@ func (r *InventoryRepository) ApprovePurchaseOrder(ctx context.Context, poID str
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		if r.purchaseOrders[poID].Status != domain.POStatusPendingApproval {
+			return domain.PurchaseOrder{}, domain.ErrInvalidPOState
+		}
 		r.purchaseOrders[poID] = &po
 		return po, nil
 	}
 
-	_, err = r.pool.Exec(ctx, `
+	tag, err := r.pool.Exec(ctx, `
 		UPDATE purchase_orders
 		SET status = $1, approved_by = $2, approved_at = $3, updated_at = $4
-		WHERE po_id = $5
-	`, po.Status, po.ApprovedBy, po.ApprovedAt, po.UpdatedAt, poID)
+		WHERE po_id = $5 AND status = $6
+	`, po.Status, po.ApprovedBy, po.ApprovedAt, po.UpdatedAt, poID, domain.POStatusPendingApproval)
 	if err != nil {
 		return domain.PurchaseOrder{}, dependency.Wrap(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.PurchaseOrder{}, domain.ErrInvalidPOState
 	}
 
 	return po, nil
@@ -349,17 +368,23 @@ func (r *InventoryRepository) RejectPurchaseOrder(ctx context.Context, poID stri
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		if r.purchaseOrders[poID].Status != domain.POStatusPendingApproval {
+			return domain.PurchaseOrder{}, domain.ErrInvalidPOState
+		}
 		r.purchaseOrders[poID] = &po
 		return po, nil
 	}
 
-	_, err = r.pool.Exec(ctx, `
+	tag, err := r.pool.Exec(ctx, `
 		UPDATE purchase_orders
 		SET status = $1, notes = $2, updated_at = $3
-		WHERE po_id = $4
-	`, po.Status, po.Notes, po.UpdatedAt, poID)
+		WHERE po_id = $4 AND status = $5
+	`, po.Status, po.Notes, po.UpdatedAt, poID, domain.POStatusPendingApproval)
 	if err != nil {
 		return domain.PurchaseOrder{}, dependency.Wrap(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.PurchaseOrder{}, domain.ErrInvalidPOState
 	}
 
 	return po, nil
@@ -368,7 +393,26 @@ func (r *InventoryRepository) RejectPurchaseOrder(ctx context.Context, poID stri
 // RecordReceivingInspection processes inbound receipt and QC according to SC09:
 // Order 100, receive 90, 5 damaged -> on-hand +90, available +85, unsellable +5, short 10.
 func (r *InventoryRepository) RecordReceivingInspection(ctx context.Context, poID string, inspectorID string, notes string, lines []domain.ReceivingInspectionLine) (domain.ReceivingInspection, error) {
-	po, ok, err := r.GetPurchaseOrder(ctx, poID)
+	var po domain.PurchaseOrder
+	var tx pgx.Tx
+	var ok bool
+	var err error
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		stored := r.purchaseOrders[poID]
+		if stored != nil {
+			po, ok = *stored, true
+			po.Lines = slices.Clone(stored.Lines)
+		}
+	} else {
+		tx, err = r.pool.Begin(ctx)
+		if err != nil {
+			return domain.ReceivingInspection{}, dependency.Wrap(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		po, ok, err = readPurchaseOrder(ctx, tx, poID, true)
+	}
 	if err != nil {
 		return domain.ReceivingInspection{}, err
 	}
@@ -390,12 +434,21 @@ func (r *InventoryRepository) RecordReceivingInspection(ctx context.Context, poI
 
 	// Validate lines against PO
 	validatedLines := make([]domain.ReceivingInspectionLine, 0, len(lines))
+	seen := make(map[string]bool, len(lines))
 	for _, l := range lines {
 		poLine, exists := poLinesMap[l.SkuID]
 		if !exists {
 			return domain.ReceivingInspection{}, fmt.Errorf("SKU %s does not belong to PO %s", l.SkuID, poID)
 		}
-		short, err := domain.ValidateInspectionLine(poLine.OrderedQty, l.DeliveredQty, l.PassedQty, l.DamagedQty)
+		if seen[l.SkuID] {
+			return domain.ReceivingInspection{}, fmt.Errorf("SKU %s appears more than once in the inspection", l.SkuID)
+		}
+		seen[l.SkuID] = true
+		remaining := poLine.OrderedQty - poLine.ReceivedQty - poLine.DamagedQty
+		if remaining <= 0 || l.DeliveredQty > remaining {
+			return domain.ReceivingInspection{}, fmt.Errorf("receipt exceeds the outstanding quantity for SKU %s", l.SkuID)
+		}
+		short, err := domain.ValidateInspectionLine(remaining, l.DeliveredQty, l.PassedQty, l.DamagedQty)
 		if err != nil {
 			return domain.ReceivingInspection{}, err
 		}
@@ -416,10 +469,7 @@ func (r *InventoryRepository) RecordReceivingInspection(ctx context.Context, poI
 		CreatedAt:    now,
 	}
 
-	if r.pool == nil {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-
+	if tx == nil {
 		for _, l := range validatedLines {
 			if err := r.engine.ReceiveInboundQC(po.WarehouseID, l.SkuID, l.PassedQty, l.DamagedQty); err != nil {
 				return domain.ReceivingInspection{}, err
@@ -459,13 +509,6 @@ func (r *InventoryRepository) RecordReceivingInspection(ctx context.Context, poI
 		r.inspections[inspectionID] = &insp
 		return insp, nil
 	}
-
-	// Real Postgres transaction
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return domain.ReceivingInspection{}, dependency.Wrap(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO receiving_inspections (inspection_id, po_id, warehouse_id, inspector_id, status, notes, created_at)
@@ -539,15 +582,22 @@ func (r *InventoryRepository) RecordReceivingInspection(ctx context.Context, poI
 		SELECT COALESCE(SUM(ordered_qty - (received_qty + damaged_qty + short_qty)), 0)
 		FROM purchase_order_lines WHERE po_id = $1
 	`, poID).Scan(&remainingUnresolved)
-	if err == nil && remainingUnresolved <= 0 {
+	if err != nil {
+		return domain.ReceivingInspection{}, dependency.Wrap(err)
+	}
+	if remainingUnresolved <= 0 {
 		newStatus = domain.POStatusCompleted
 	}
 
-	_, err = tx.Exec(ctx, `
-		UPDATE purchase_orders SET status = $1, updated_at = NOW() WHERE po_id = $2
-	`, newStatus, poID)
+	tag, err := tx.Exec(ctx, `
+		UPDATE purchase_orders SET status = $1, updated_at = NOW()
+		WHERE po_id = $2 AND status = $3
+	`, newStatus, poID, po.Status)
 	if err != nil {
 		return domain.ReceivingInspection{}, dependency.Wrap(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.ReceivingInspection{}, errors.New("PO is not in an approved/receivable state")
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -679,7 +729,25 @@ func (r *InventoryRepository) CreateSupplierReturn(ctx context.Context, ret doma
 // DispatchSupplierReturn executes the supplier return, decreasing onHand and unsellable stock.
 // Invariant I01 ensures available stock is unchanged.
 func (r *InventoryRepository) DispatchSupplierReturn(ctx context.Context, returnID, actorID, trackingNumber string) (domain.SupplierReturn, error) {
-	ret, ok, err := r.GetSupplierReturn(ctx, returnID)
+	var ret domain.SupplierReturn
+	var tx pgx.Tx
+	var ok bool
+	var err error
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		stored := r.supplierReturns[returnID]
+		if stored != nil {
+			ret, ok = *stored, true
+		}
+	} else {
+		tx, err = r.pool.Begin(ctx)
+		if err != nil {
+			return domain.SupplierReturn{}, dependency.Wrap(err)
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		ret, ok, err = readSupplierReturn(ctx, tx, returnID, true)
+	}
 	if err != nil {
 		return domain.SupplierReturn{}, err
 	}
@@ -697,9 +765,7 @@ func (r *InventoryRepository) DispatchSupplierReturn(ctx context.Context, return
 	ret.TrackingNumber = trackingNumber
 	ret.UpdatedAt = now
 
-	if r.pool == nil {
-		r.mu.Lock()
-		defer r.mu.Unlock()
+	if tx == nil {
 		for _, l := range ret.Lines {
 			if err := r.engine.DispatchSupplierReturn(ret.WarehouseID, l.SkuID, l.Quantity); err != nil {
 				return domain.SupplierReturn{}, err
@@ -712,12 +778,6 @@ func (r *InventoryRepository) DispatchSupplierReturn(ctx context.Context, return
 		r.supplierReturns[returnID] = &ret
 		return ret, nil
 	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return domain.SupplierReturn{}, dependency.Wrap(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	for _, l := range ret.Lines {
 		tag, err := tx.Exec(ctx, `
@@ -741,13 +801,16 @@ func (r *InventoryRepository) DispatchSupplierReturn(ctx context.Context, return
 		}
 	}
 
-	_, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		UPDATE supplier_returns
 		SET status = $1, dispatched_by = $2, dispatched_at = $3, tracking_number = $4, updated_at = $5
-		WHERE return_id = $6
+		WHERE return_id = $6 AND status = 'DRAFT'
 	`, ret.Status, ret.DispatchedBy, ret.DispatchedAt, ret.TrackingNumber, ret.UpdatedAt, returnID)
 	if err != nil {
 		return domain.SupplierReturn{}, dependency.Wrap(err)
+	}
+	if tag.RowsAffected() != 1 {
+		return domain.SupplierReturn{}, errors.New("supplier return is not in DRAFT status")
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -769,14 +832,22 @@ func (r *InventoryRepository) GetSupplierReturn(ctx context.Context, returnID st
 		return *ret, true, nil
 	}
 
+	return readSupplierReturn(ctx, r.pool, returnID, false)
+}
+
+func readSupplierReturn(ctx context.Context, q procurementQueryer, returnID string, lock bool) (domain.SupplierReturn, bool, error) {
 	var ret domain.SupplierReturn
-	err := r.pool.QueryRow(ctx, `
+	query := `
 		SELECT r.return_id, r.supplier_id, COALESCE(s.name, ''), r.warehouse_id, r.po_id, r.status,
 		       r.created_by, r.dispatched_by, r.dispatched_at, r.tracking_number, r.notes, r.created_at, r.updated_at
 		FROM supplier_returns r
 		LEFT JOIN suppliers s ON r.supplier_id = s.supplier_id
 		WHERE r.return_id = $1
-	`, returnID).Scan(
+	`
+	if lock {
+		query += " FOR UPDATE OF r"
+	}
+	err := q.QueryRow(ctx, query, returnID).Scan(
 		&ret.ReturnID, &ret.SupplierID, &ret.SupplierName, &ret.WarehouseID, &ret.POID, &ret.Status,
 		&ret.CreatedBy, &ret.DispatchedBy, &ret.DispatchedAt, &ret.TrackingNumber, &ret.Notes, &ret.CreatedAt, &ret.UpdatedAt,
 	)
@@ -787,7 +858,7 @@ func (r *InventoryRepository) GetSupplierReturn(ctx context.Context, returnID st
 		return domain.SupplierReturn{}, false, dependency.Wrap(err)
 	}
 
-	rows, err := r.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		SELECT id, return_id, sku_id, quantity, reason
 		FROM supplier_return_lines WHERE return_id = $1 ORDER BY id
 	`, returnID)
