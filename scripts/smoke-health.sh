@@ -23,8 +23,10 @@ export JWT_ACCESS_SECRET JWT_REFRESH_SECRET INTERNAL_SERVICE_TOKEN PAYMENT_WEBHO
 
 # Use free host ports so the smoke run never collides with a stack that is already running.
 export POSTGRES_HOST_PORT="$(free_port)" MONGO_HOST_PORT="$(free_port)" REDIS_HOST_PORT="$(free_port)"
+export S3_HOST_PORT="$(free_port)"
 export REDPANDA_KAFKA_HOST_PORT="$(free_port)" REDPANDA_ADMIN_HOST_PORT="$(free_port)"
 export API_GATEWAY_HOST_PORT="$(free_port)" BACKOFFICE_SUPPORT_HOST_PORT="$(free_port)" NOTIFICATION_SERVICE_HOST_PORT="$(free_port)"
+export OPENSEARCH_HOST_PORT="$(free_port)" CLICKHOUSE_HTTP_PORT="$(free_port)"
 
 cleanup() {
   echo "Cleaning up Compose project ${PROJECT}..."
@@ -47,8 +49,8 @@ CHECKS=(
   "order-checkout-service:8083:"
   "payment-service:8084:"
   "fulfillment-shipping-service:8085:"
-  "ledger-reconciliation-service:8086:"
-  "backoffice-support-service:8088:"
+  "ledger-reconciliation-service:8086:.data.pgConnected == true"
+  "backoffice-support-service:8088:.data.postgresConnected == true"
   "notification-service:8089:"
 )
 
