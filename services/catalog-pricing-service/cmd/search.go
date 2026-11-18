@@ -42,7 +42,7 @@ func (a *openSearchAdapter) SearchProducts(ctx context.Context, q domain.Storefr
 
 func registerSearchAdminRoutes(mux *http.ServeMux, store domain.StorefrontStore, prices domain.PriceLookup, client *search.Client) {
 	adminGuard := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole("PRODUCT_STAFF", "MARKETING", "OPS_MGR", "ADMIN", "ACCESS_ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole("PRODUCT_STAFF", "MARKETING", "OPS_MGR", "ADMIN")(h))
 	}
 
 	mux.Handle("POST /api/v1/admin/search/reindex", adminGuard(func(w http.ResponseWriter, r *http.Request) {
