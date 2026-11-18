@@ -20,6 +20,14 @@ export function configureHttpFoundation(app: INestApplication): void {
     const id = /^[A-Za-z0-9._-]{1,128}$/.test(supplied) ? supplied : `req-${randomBytes(8).toString('hex')}`;
     req.headers['x-correlation-id'] = id;
     res.setHeader('X-Correlation-ID', id);
+    const started = process.hrtime.bigint();
+    res.on('finish', () => {
+      if (req.path === '/health' && res.statusCode < 400) return;
+      const durationMs = (Number(process.hrtime.bigint() - started) / 1e6).toFixed(2);
+      console.log(
+        `http method=${req.method} path=${req.path} status=${res.statusCode} durationMs=${durationMs} correlationId=${id}`,
+      );
+    });
     next();
   });
   app.useGlobalFilters(new ApiExceptionFilter());

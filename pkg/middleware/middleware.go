@@ -9,15 +9,16 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 )
 
 var validCorrelationID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
-// Chain installs common request context, panic recovery and CORS handling.
+// Chain installs common request context, structured access logging, panic recovery and CORS handling.
 func Chain(h http.Handler) http.Handler {
-	return CorrelationID(Recovery(CORS(h)))
+	return CorrelationID(AccessLog(Recovery(CORS(h))))
 }
 
 type correlationKey struct{}
@@ -54,29 +55,64 @@ func CorrelationID(next http.Handler) http.Handler {
 type trackedWriter struct {
 	http.ResponseWriter
 	committed bool
+	status    int
 }
 
 func (w *trackedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 func (w *trackedWriter) WriteHeader(status int) {
-	if status >= 200 {
+	if !w.committed && status >= 200 {
 		w.committed = true
+		w.status = status
 	}
 	w.ResponseWriter.WriteHeader(status)
 }
 func (w *trackedWriter) Write(body []byte) (int, error) {
-	w.committed = true
+	if !w.committed {
+		w.committed = true
+		if w.status == 0 {
+			w.status = http.StatusOK
+		}
+	}
 	return w.ResponseWriter.Write(body)
 }
 func (w *trackedWriter) Flush() {
 	w.committed = true
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
 	_ = http.NewResponseController(w.ResponseWriter).Flush()
 }
 func (w *trackedWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	conn, rw, err := http.NewResponseController(w.ResponseWriter).Hijack()
 	if err == nil {
 		w.committed = true
+		if w.status == 0 {
+			w.status = http.StatusOK
+		}
 	}
 	return conn, rw, err
+}
+
+// AccessLog logs non-health HTTP requests and failed health checks with X-Correlation-ID.
+func AccessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		tracked := &trackedWriter{ResponseWriter: w, status: http.StatusOK}
+		defer func() {
+			if r.URL.Path == "/health" && tracked.status < http.StatusBadRequest {
+				return
+			}
+			log.Printf(
+				"http method=%s path=%s status=%d durationMs=%.2f correlationId=%s",
+				r.Method,
+				r.URL.Path,
+				tracked.status,
+				float64(time.Since(started).Microseconds())/1000.0,
+				CorrelationIDFrom(r.Context()),
+			)
+		}()
+		next.ServeHTTP(tracked, r)
+	})
 }
 
 // Recovery returns a safe error before the response is committed and aborts
