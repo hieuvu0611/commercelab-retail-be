@@ -103,7 +103,10 @@ func ParseSettlementCSV(r io.Reader, filename, s3Key, importedBy string) (Settle
 
 		var fee int64
 		if hasFee && feeColIdx < len(row) && strings.TrimSpace(row[feeColIdx]) != "" {
-			fee, _ = strconv.ParseInt(strings.TrimSpace(row[feeColIdx]), 10, 64)
+			fee, err = strconv.ParseInt(strings.TrimSpace(row[feeColIdx]), 10, 64)
+			if err != nil {
+				return SettlementBatch{}, nil, fmt.Errorf("%w at line %d: invalid fee_amount_vnd", ErrInvalidCSVLine, lineNum)
+			}
 		}
 
 		net, err := strconv.ParseInt(strings.TrimSpace(row[colIdx["net_amount_vnd"]]), 10, 64)
@@ -131,6 +134,9 @@ func ParseSettlementCSV(r io.Reader, filename, s3Key, importedBy string) (Settle
 			CreatedAt:      now,
 		}
 
+		if err := ValidateSettlementLine(line); err != nil {
+			return SettlementBatch{}, nil, err
+		}
 		lines = append(lines, line)
 		totalGross += gross
 		totalFee += fee
@@ -153,6 +159,14 @@ func ParseSettlementCSV(r io.Reader, filename, s3Key, importedBy string) (Settle
 	}
 
 	return batch, lines, nil
+}
+
+// ValidateSettlementLine accepts positive payouts only. Refunds use a separate reconciliation flow.
+func ValidateSettlementLine(line SettlementLine) error {
+	if line.Type == "REFUND" || line.GrossAmountVND <= 0 || line.NetAmountVND <= 0 || line.FeeAmountVND < 0 {
+		return fmt.Errorf("%w at line %d: refund and non-positive payouts require a separate reconciliation flow", ErrInvalidCSVLine, line.LineNumber)
+	}
+	return nil
 }
 
 func parseTimestamp(val string) (time.Time, error) {

@@ -16,7 +16,7 @@ import (
 
 func registerSettlementRoutes(mux *http.ServeMux, settleRepo *repository.SettlementRepository, ledgerRepo *repository.LedgerRepository, caseRepo *repository.CaseRepository) {
 	financeAuth := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole("FINANCE", "FINANCE_MGR", "OPS_MGR", "ADMIN", "ACCESS_ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole("FINANCE", "FINANCE_MGR", "OPS_MGR", "ADMIN")(h))
 	}
 
 	// POST /api/v1/admin/ledger/settlements/import - Import partner settlement CSV (idempotent)
@@ -172,6 +172,10 @@ func registerSettlementRoutes(mux *http.ServeMux, settleRepo *repository.Settlem
 		if err != nil {
 			if errors.Is(err, repository.ErrBatchNotFound) {
 				response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Settlement batch not found", nil)
+				return
+			}
+			if errors.Is(err, domain.ErrInvalidCSVLine) {
+				response.Error(w, r, http.StatusBadRequest, "INVALID_CSV", err.Error(), nil)
 				return
 			}
 			response.Error(w, r, http.StatusInternalServerError, "MATCH_ERROR", err.Error(), nil)

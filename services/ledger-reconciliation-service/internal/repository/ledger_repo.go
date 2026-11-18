@@ -49,6 +49,9 @@ func (r *LedgerRepository) seedDefaultAccounts() {
 		{AccountCode: "1120", AccountName: "Payment Gateway Receivable (VNPay / Stripe)", AccountType: domain.AccountAsset, BalanceVND: 0, CreatedAt: now},
 		{AccountCode: "1388", AccountName: "Reconciliation Discrepancies Receivable", AccountType: domain.AccountAsset, BalanceVND: 0, CreatedAt: now},
 		{AccountCode: "3388", AccountName: "Customer Refund Obligations", AccountType: domain.AccountLiability, BalanceVND: 0, CreatedAt: now},
+		{AccountCode: "3389", AccountName: "Settlement Overpayments Payable", AccountType: domain.AccountLiability, CreatedAt: now},
+		{AccountCode: "1310", AccountName: "3PL COD Receivables", AccountType: domain.AccountAsset, CreatedAt: now},
+		{AccountCode: "6420", AccountName: "Carrier COD Processing Fees", AccountType: domain.AccountExpense, CreatedAt: now},
 		{AccountCode: "5110", AccountName: "Gross Sales Revenue", AccountType: domain.AccountRevenue, BalanceVND: 0, CreatedAt: now},
 		{AccountCode: "5210", AccountName: "Sales Returns & Deductions", AccountType: domain.AccountRevenue, BalanceVND: 0, CreatedAt: now},
 		{AccountCode: "6410", AccountName: "Payment Gateway Processing Fees", AccountType: domain.AccountExpense, BalanceVND: 0, CreatedAt: now},
@@ -77,12 +80,18 @@ func (r *LedgerRepository) RecordJournalEntry(ctx context.Context, entry domain.
 		r.mu.Lock()
 		defer r.mu.Unlock()
 
+		if stored, exists := r.entries[entry.EntryID]; exists {
+			return *stored, nil
+		}
+
 		// Verify accounts exist and calculate delta
 		for _, p := range entry.Postings {
-			acc, ok := r.accounts[p.AccountCode]
-			if !ok {
+			if _, ok := r.accounts[p.AccountCode]; !ok {
 				return domain.JournalEntry{}, fmt.Errorf("%w: %s", ErrAccountNotFound, p.AccountCode)
 			}
+		}
+		for _, p := range entry.Postings {
+			acc := r.accounts[p.AccountCode]
 			var delta int64
 			if acc.AccountType == domain.AccountAsset || acc.AccountType == domain.AccountExpense {
 				if p.Direction == domain.DirectionDebit {

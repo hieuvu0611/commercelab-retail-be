@@ -254,7 +254,7 @@ func (r *SettlementRepository) UpdateLineMatchStatus(ctx context.Context, batchI
 		defer r.mu.Unlock()
 		lines := r.lines[batchID]
 		for i := range lines {
-			if lines[i].LineNumber == lineNumber {
+			if lines[i].LineNumber == lineNumber && lines[i].MatchStatus != "RESOLVED" {
 				lines[i].MatchStatus = status
 				return nil
 			}
@@ -264,7 +264,7 @@ func (r *SettlementRepository) UpdateLineMatchStatus(ctx context.Context, batchI
 
 	_, err := r.pool.Exec(ctx, `
 		UPDATE settlement_lines SET match_status = $3
-		WHERE batch_id = $1 AND line_number = $2
+		WHERE batch_id = $1 AND line_number = $2 AND match_status <> 'RESOLVED'
 	`, batchID, lineNumber, status)
 	if err != nil {
 		return dependency.Wrap(err)
@@ -306,6 +306,12 @@ func (r *SettlementRepository) MatchBatch(
 	lines, err := r.ListSettlementLines(ctx, batchID)
 	if err != nil {
 		return domain.BatchMatchSummary{}, err
+	}
+
+	for _, line := range lines {
+		if err := domain.ValidateSettlementLine(line); err != nil {
+			return domain.BatchMatchSummary{}, err
+		}
 	}
 
 	summary := domain.BatchMatchSummary{
@@ -430,7 +436,7 @@ func (r *SettlementRepository) MatchBatch(
 
 		if _, err := tx.Exec(ctx, `
 			UPDATE settlement_lines SET match_status = $3
-			WHERE batch_id = $1 AND line_number = $2
+			WHERE batch_id = $1 AND line_number = $2 AND match_status <> 'RESOLVED'
 		`, batchID, line.LineNumber, res.Status); err != nil {
 			return domain.BatchMatchSummary{}, dependency.Wrap(err)
 		}

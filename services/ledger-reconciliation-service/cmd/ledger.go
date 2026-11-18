@@ -17,7 +17,7 @@ import (
 
 func registerLedgerRoutes(mux *http.ServeMux, repo *repository.LedgerRepository) {
 	financeAuth := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole("FINANCE", "FINANCE_MGR", "OPS_MGR", "ADMIN", "ACCESS_ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole("FINANCE", "FINANCE_MGR", "OPS_MGR", "ADMIN")(h))
 	}
 
 	// GET /api/v1/admin/ledger/accounts - List Chart of Accounts with balances

@@ -7,10 +7,10 @@ import (
 )
 
 var (
-	ErrUnbalancedEntry  = errors.New("journal entry is unbalanced: sum of debits must equal sum of credits")
+	ErrUnbalancedEntry   = errors.New("journal entry is unbalanced: sum of debits must equal sum of credits")
 	ErrInsufficientLines = errors.New("journal entry must have at least two posting lines")
-	ErrInvalidPosting   = errors.New("invalid posting line: account code and positive amount are required")
-	ErrMissingField     = errors.New("required entry field is missing")
+	ErrInvalidPosting    = errors.New("invalid posting line: account code and positive amount are required")
+	ErrMissingField      = errors.New("required entry field is missing")
 )
 
 type AccountType string
@@ -174,33 +174,7 @@ func NewSettlementMatchedEntry(
 	}
 	now := time.Now().UTC()
 
-	postings := []Posting{
-		{
-			AccountCode: "1110",
-			Direction:   DirectionDebit,
-			AmountVND:   netVND,
-		},
-		{
-			AccountCode: "6410",
-			Direction:   DirectionDebit,
-			AmountVND:   feeVND,
-		},
-	}
-
-	if diffVND > 0 {
-		postings = append(postings, Posting{
-			AccountCode: "1388",
-			Direction:   DirectionDebit,
-			AmountVND:   diffVND,
-		})
-	}
-
-	postings = append(postings, Posting{
-		AccountCode: "1120",
-		Direction:   DirectionCredit,
-		AmountVND:   grossVND,
-	})
-
+	postings := settlementPostings(grossVND, feeVND, netVND, diffVND, "6410", "1120")
 	entry := JournalEntry{
 		EntryID:     entryID,
 		EventType:   "SETTLEMENT_MATCHED",
@@ -218,6 +192,22 @@ func NewSettlementMatchedEntry(
 	return entry, nil
 }
 
+func settlementPostings(gross, fee, net, difference int64, feeAccount, receivableAccount string) []Posting {
+	postings := make([]Posting, 0, 4)
+	if net != 0 {
+		postings = append(postings, Posting{AccountCode: "1110", Direction: DirectionDebit, AmountVND: net})
+	}
+	if fee != 0 {
+		postings = append(postings, Posting{AccountCode: feeAccount, Direction: DirectionDebit, AmountVND: fee})
+	}
+	if difference > 0 {
+		postings = append(postings, Posting{AccountCode: "1388", Direction: DirectionDebit, AmountVND: difference})
+	} else if difference < 0 {
+		postings = append(postings, Posting{AccountCode: "3389", Direction: DirectionCredit, AmountVND: -difference})
+	}
+	return append(postings, Posting{AccountCode: receivableAccount, Direction: DirectionCredit, AmountVND: gross})
+}
+
 // NewCompensatingAdjustmentEntry builds a balanced double entry to offset an investigated discrepancy from account 1388
 // Debit: compensatingAccountCode (default 6410 Payment Gateway Processing Fees)
 // Credit: 1388 (Reconciliation Discrepancies Receivable)
@@ -228,11 +218,15 @@ func NewCompensatingAdjustmentEntry(
 	category, notes string,
 	actor string,
 ) (JournalEntry, error) {
-	if discrepancyVND <= 0 {
-		return JournalEntry{}, fmt.Errorf("discrepancy amount must be positive, got %d", discrepancyVND)
+	if discrepancyVND == 0 {
+		return JournalEntry{}, errors.New("discrepancy amount must be nonzero")
 	}
+	debitAccount, creditAccount := compensatingAccountCode, "1388"
 	if compensatingAccountCode == "" {
-		compensatingAccountCode = "6410" // Default to payment gateway processing fees
+		debitAccount = "6410"
+	}
+	if discrepancyVND < 0 {
+		debitAccount, creditAccount, discrepancyVND = "3389", debitAccount, -discrepancyVND
 	}
 	now := time.Now().UTC()
 	entry := JournalEntry{
@@ -245,12 +239,12 @@ func NewCompensatingAdjustmentEntry(
 		CreatedAt:   now,
 		Postings: []Posting{
 			{
-				AccountCode: compensatingAccountCode,
+				AccountCode: debitAccount,
 				Direction:   DirectionDebit,
 				AmountVND:   discrepancyVND,
 			},
 			{
-				AccountCode: "1388",
+				AccountCode: creditAccount,
 				Direction:   DirectionCredit,
 				AmountVND:   discrepancyVND,
 			},
@@ -314,30 +308,7 @@ func NewCODSettlementMatchedEntry(
 		return JournalEntry{}, fmt.Errorf("gross collected amount must be positive, got %d", grossCollectedVND)
 	}
 	now := time.Now().UTC()
-	postings := []Posting{
-		{
-			AccountCode: "1110",
-			Direction:   DirectionDebit,
-			AmountVND:   netPayoutVND,
-		},
-		{
-			AccountCode: "6420",
-			Direction:   DirectionDebit,
-			AmountVND:   feeVND,
-		},
-	}
-	if diffVND > 0 {
-		postings = append(postings, Posting{
-			AccountCode: "1388",
-			Direction:   DirectionDebit,
-			AmountVND:   diffVND,
-		})
-	}
-	postings = append(postings, Posting{
-		AccountCode: "1310",
-		Direction:   DirectionCredit,
-		AmountVND:   grossCollectedVND,
-	})
+	postings := settlementPostings(grossCollectedVND, feeVND, netPayoutVND, diffVND, "6420", "1310")
 	entry := JournalEntry{
 		EntryID:     entryID,
 		EventType:   "COD_SETTLEMENT_MATCHED",

@@ -18,7 +18,7 @@ func registerCaseRoutes(
 	settleRepo *repository.SettlementRepository,
 ) {
 	financeAuth := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole("FINANCE", "FINANCE_MGR", "OPS_MGR", "ADMIN", "ACCESS_ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole("FINANCE", "FINANCE_MGR", "OPS_MGR", "ADMIN")(h))
 	}
 
 	// GET /api/v1/admin/ledger/discrepancies - List discrepancy cases

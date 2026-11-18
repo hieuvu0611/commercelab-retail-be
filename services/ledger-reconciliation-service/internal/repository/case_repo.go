@@ -171,9 +171,15 @@ func (r *CaseRepository) GetCase(ctx context.Context, caseID string) (domain.Rec
 		return *c, nil
 	}
 
+	return getCaseWith(ctx, r.pool, caseID, false)
+}
+
+func getCaseWith(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, caseID string, lock bool) (domain.ReconciliationCase, error) {
 	var c domain.ReconciliationCase
 	var resolvedAt *time.Time
-	err := r.pool.QueryRow(ctx, `
+	query := `
 		SELECT
 			case_id, batch_id, line_number, order_id, transaction_ref,
 			expected_payout_vnd, actual_payout_vnd, discrepancy_vnd,
@@ -181,7 +187,11 @@ func (r *CaseRepository) GetCase(ctx context.Context, caseID string) (domain.Rec
 			resolved_at, created_at, updated_at
 		FROM ledger.reconciliation_cases
 		WHERE case_id = $1
-	`, caseID).Scan(
+	`
+	if lock {
+		query += " FOR UPDATE"
+	}
+	err := db.QueryRow(ctx, query, caseID).Scan(
 		&c.CaseID, &c.BatchID, &c.LineNumber, &c.OrderID, &c.TransactionRef,
 		&c.ExpectedPayoutVND, &c.ActualPayoutVND, &c.DiscrepancyVND,
 		&c.CauseCategory, &c.Status, &c.AssignedTo, &c.ResolvedBy, &c.ResolutionNotes,
@@ -206,9 +216,27 @@ func (r *CaseRepository) ResolveCase(
 	ledgerRepo *LedgerRepository,
 	settleRepo *SettlementRepository,
 ) (domain.ReconciliationCase, domain.JournalEntry, error) {
-	c, err := r.GetCase(ctx, caseID)
-	if err != nil {
-		return domain.ReconciliationCase{}, domain.JournalEntry{}, err
+	var c domain.ReconciliationCase
+	var tx pgx.Tx
+	var err error
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		current, found := r.cases[caseID]
+		if !found {
+			return domain.ReconciliationCase{}, domain.JournalEntry{}, ErrCaseNotFound
+		}
+		c = *current
+	} else {
+		tx, err = r.pool.Begin(ctx)
+		if err != nil {
+			return domain.ReconciliationCase{}, domain.JournalEntry{}, dependency.Wrap(err)
+		}
+		defer tx.Rollback(ctx)
+		c, err = getCaseWith(ctx, tx, caseID, true)
+		if err != nil {
+			return domain.ReconciliationCase{}, domain.JournalEntry{}, err
+		}
 	}
 	if c.Status == "RESOLVED" {
 		return domain.ReconciliationCase{}, domain.JournalEntry{}, ErrCaseAlreadyResolved
@@ -234,12 +262,6 @@ func (r *CaseRepository) ResolveCase(
 		return domain.ReconciliationCase{}, domain.JournalEntry{}, fmt.Errorf("failed to build compensating entry: %w", err)
 	}
 
-	if ledgerRepo != nil {
-		if _, err := ledgerRepo.RecordJournalEntry(ctx, entry); err != nil {
-			return domain.ReconciliationCase{}, domain.JournalEntry{}, fmt.Errorf("failed to record compensating journal entry: %w", err)
-		}
-	}
-
 	now := time.Now().UTC()
 	c.Status = "RESOLVED"
 	c.CauseCategory = req.CauseCategory
@@ -248,31 +270,51 @@ func (r *CaseRepository) ResolveCase(
 	c.ResolvedAt = &now
 	c.UpdatedAt = now
 
-	if r.pool == nil {
-		r.mu.Lock()
+	if tx == nil {
+		if ledgerRepo != nil {
+			if _, err := ledgerRepo.RecordJournalEntry(ctx, entry); err != nil {
+				return domain.ReconciliationCase{}, domain.JournalEntry{}, err
+			}
+		}
+		if settleRepo != nil {
+			if err := settleRepo.UpdateLineMatchStatus(ctx, c.BatchID, c.LineNumber, "RESOLVED"); err != nil {
+				return domain.ReconciliationCase{}, domain.JournalEntry{}, err
+			}
+		}
 		r.cases[caseID] = &c
-		r.mu.Unlock()
-	} else {
-		_, err := r.pool.Exec(ctx, `
-			UPDATE ledger.reconciliation_cases
-			SET
-				status = 'RESOLVED',
-				cause_category = $1,
-				resolution_notes = $2,
-				resolved_by = $3,
-				resolved_at = $4,
-				updated_at = $5
-			WHERE case_id = $6
-		`, c.CauseCategory, c.ResolutionNotes, c.ResolvedBy, c.ResolvedAt, c.UpdatedAt, caseID)
-		if err != nil {
-			return domain.ReconciliationCase{}, domain.JournalEntry{}, dependency.Wrap(err)
+		return c, entry, nil
+	}
+
+	if ledgerRepo != nil {
+		if err := recordJournalEntryTx(ctx, tx, entry); err != nil {
+			return domain.ReconciliationCase{}, domain.JournalEntry{}, err
 		}
 	}
 
-	// Update associated settlement line status
-	if settleRepo != nil {
-		_ = settleRepo.UpdateLineMatchStatus(ctx, c.BatchID, c.LineNumber, "RESOLVED")
+	tag, err := tx.Exec(ctx, `
+		UPDATE ledger.reconciliation_cases
+		SET status = 'RESOLVED', cause_category = $1, resolution_notes = $2,
+			resolved_by = $3, resolved_at = $4, updated_at = $5
+		WHERE case_id = $6 AND status <> 'RESOLVED'
+	`, c.CauseCategory, c.ResolutionNotes, c.ResolvedBy, c.ResolvedAt, c.UpdatedAt, caseID)
+	if err != nil {
+		return domain.ReconciliationCase{}, domain.JournalEntry{}, dependency.Wrap(err)
 	}
-
+	if tag.RowsAffected() != 1 {
+		return domain.ReconciliationCase{}, domain.JournalEntry{}, ErrCaseAlreadyResolved
+	}
+	if settleRepo != nil {
+		tag, err := tx.Exec(ctx, `UPDATE ledger.settlement_lines SET match_status = 'RESOLVED'
+			WHERE batch_id = $1 AND line_number = $2`, c.BatchID, c.LineNumber)
+		if err != nil {
+			return domain.ReconciliationCase{}, domain.JournalEntry{}, dependency.Wrap(err)
+		}
+		if tag.RowsAffected() != 1 {
+			return domain.ReconciliationCase{}, domain.JournalEntry{}, fmt.Errorf("settlement line %s/%d not found", c.BatchID, c.LineNumber)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.ReconciliationCase{}, domain.JournalEntry{}, dependency.Wrap(err)
+	}
 	return c, entry, nil
 }
