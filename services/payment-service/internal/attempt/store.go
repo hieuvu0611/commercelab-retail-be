@@ -63,3 +63,14 @@ type Store interface {
 	// Obligations lists the order's refund obligations.
 	Obligations(ctx context.Context, orderID string) ([]Obligation, error)
 }
+
+// ReservationStore persists RMA refund ceiling reservations and payouts (I03, SC08).
+type ReservationStore interface {
+	ReserveRefund(ctx context.Context, orderID, reservationID string, amountVND int64) (Summary, error)
+	CompleteRefundReservation(ctx context.Context, orderID, reservationID string, amountVND int64, providerRef string) (Summary, error)
+}
+
+// MetricsStore aggregates authoritative payment collections and completed refunds.
+type MetricsStore interface {
+	Metrics(ctx context.Context, since *time.Time) (grossCollectedVND, totalRefundedVND int64, err error)
+}

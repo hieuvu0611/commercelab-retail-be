@@ -258,6 +258,13 @@ func (s *Service) closeLost(ctx context.Context, o orders.Order, from saga.State
 
 // recordCapture stores the captured and refundable amounts the report carries.
 func (s *Service) recordCapture(ctx context.Context, o orders.Order, r PaymentReport) (orders.Order, error) {
+	if r.Status == payCODPending && r.CapturedVND > 0 {
+		if err := s.Orders.RecordCapture(ctx, o.OrderID, r.CapturedVND, 0); err != nil {
+			return o, err
+		}
+		o.CapturedVND = r.CapturedVND
+		return o, nil
+	}
 	if r.Status == payCODCollected {
 		captured := r.CapturedVND
 		if captured <= 0 {

@@ -141,6 +141,20 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, e
 	if method == "" {
 		method = "PREPAID"
 	}
+	if method == "COD" {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('cod:' || $1))`, o.UserID); err != nil {
+			return Order{}, false, dependency.Wrap(err)
+		}
+		var activeCOD int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders
+			WHERE user_id = $1 AND payment_method = 'COD' AND payment_status = 'COD_PENDING'
+			AND status NOT IN ('DELIVERED', 'CANCELLED', 'FAILED_CLOSED')`, o.UserID).Scan(&activeCOD); err != nil {
+			return Order{}, false, dependency.Wrap(err)
+		}
+		if activeCOD >= MaxActiveCODOrders {
+			return Order{}, false, ErrCODVelocityLimit
+		}
+	}
 	promoJSON, _ := json.Marshal(o.AppliedPromotions)
 	if len(o.AppliedPromotions) == 0 {
 		promoJSON = []byte("[]")

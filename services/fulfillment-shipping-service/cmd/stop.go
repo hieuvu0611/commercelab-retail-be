@@ -62,44 +62,81 @@ func stopForCancel(d Deps) http.HandlerFunc {
 			return
 		}
 		orderID := r.PathValue("orderId")
-		s, err := d.Shipments.GetByOrder(r.Context(), orderID)
+		list, err := loadOrderShipments(r, d, orderID)
 		if errors.Is(err, shipment.ErrNotFound) {
-			s, err = createStopped(r, d, orderID, req.UserID, req.WarehouseID, req.Items)
+			s, err := createStopped(r, d, orderID, req.UserID, req.WarehouseID, req.Items)
 			if err != nil {
 				writeStopError(w, r, err)
 				return
 			}
+			list = []shipment.Shipment{s}
 		} else if err != nil {
 			writeStoreError(w, r, err)
 			return
 		}
-		for attempt := 0; attempt < maxStopRetries; attempt++ {
-			next, outcome := s.StopForCancel(d.now())
-			if next.Version == s.Version {
-				writeStop(w, r, outcome, s)
-				return
-			}
-			ev, entry := stoppedEvent(d, next), timeline.TypeStopped
-			if outcome == shipment.StopRequested {
-				ev, entry = stopRequestedEvent(d, next), timeline.TypeStopRequested
-			}
-			err := d.Shipments.Save(r.Context(), next, s.Version, ev)
-			if err == nil {
-				d.record(r, next, entry, "")
-				writeStop(w, r, outcome, next)
-				return
-			}
-			if !errors.Is(err, shipment.ErrStaleVersion) {
-				writeStoreError(w, r, err)
-				return
-			}
-			if s, err = d.Shipments.GetByOrder(r.Context(), orderID); err != nil {
-				writeStoreError(w, r, err)
+
+		// Reject if ANY parcel of the order has already left its warehouse.
+		for _, s := range list {
+			if _, outcome := s.StopForCancel(d.now()); outcome == shipment.StopTooLate {
+				writeStop(w, r, shipment.StopTooLate, s)
 				return
 			}
 		}
-		writeStale(w, r)
+
+		overallOutcome := shipment.StopStopped
+		var representative shipment.Shipment
+		for _, s := range list {
+			stoppedOrRequested, outcome, ok := stopOneParcel(w, r, d, s)
+			if !ok {
+				return
+			}
+			representative = stoppedOrRequested
+			if outcome == shipment.StopRequested {
+				overallOutcome = shipment.StopRequested
+			}
+		}
+		writeStop(w, r, overallOutcome, representative)
 	}
+}
+
+func loadOrderShipments(r *http.Request, d Deps, orderID string) ([]shipment.Shipment, error) {
+	if mp, ok := d.Shipments.(shipment.MultiParcelStore); ok {
+		return mp.ListByOrder(r.Context(), orderID)
+	}
+	s, err := d.Shipments.GetByOrder(r.Context(), orderID)
+	if err != nil {
+		return nil, err
+	}
+	return []shipment.Shipment{s}, nil
+}
+
+func stopOneParcel(w http.ResponseWriter, r *http.Request, d Deps, s shipment.Shipment) (shipment.Shipment, shipment.StopOutcome, bool) {
+	for attempt := 0; attempt < maxStopRetries; attempt++ {
+		next, outcome := s.StopForCancel(d.now())
+		if next.Version == s.Version {
+			return s, outcome, true
+		}
+		ev, entry := stoppedEvent(d, next), timeline.TypeStopped
+		if outcome == shipment.StopRequested {
+			ev, entry = stopRequestedEvent(d, next), timeline.TypeStopRequested
+		}
+		err := d.Shipments.Save(r.Context(), next, s.Version, ev)
+		if err == nil {
+			d.record(r, next, entry, "")
+			return next, outcome, true
+		}
+		if !errors.Is(err, shipment.ErrStaleVersion) {
+			writeStoreError(w, r, err)
+			return shipment.Shipment{}, "", false
+		}
+		var reloadErr error
+		if s, reloadErr = d.Shipments.Get(r.Context(), s.ShipmentID); reloadErr != nil {
+			writeStoreError(w, r, reloadErr)
+			return shipment.Shipment{}, "", false
+		}
+	}
+	writeStale(w, r)
+	return shipment.Shipment{}, "", false
 }
 
 // errBadStopDetails marks a stop request for an unknown parcel that lacks the order's details.

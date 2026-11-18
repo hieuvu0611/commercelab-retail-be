@@ -190,6 +190,9 @@ func (s *Service) cancelPaid(ctx context.Context, o orders.Order) (orders.Order,
 	if err := s.Payments.CloseAttemptForCancel(ctx, ids.PaymentAttemptID(o.OrderID)); err != nil {
 		return o, err
 	}
+	if o.PaymentMethod == PaymentMethodCOD && o.CapturedVND == 0 {
+		return s.storeCancelled(ctx, o, PayCODCancelled, 0)
+	}
 	owed := o.CapturedVND
 	if owed == 0 {
 		owed = o.TotalPayableVND // a confirmed order captured exactly its total (P04)

@@ -57,6 +57,8 @@ var (
 	ErrRefundCeiling = errors.New("a refund cannot exceed the captured amount")
 	// ErrIdempotencyConflict: the key was used for different content.
 	ErrIdempotencyConflict = errors.New("idempotency key was already used with different content")
+	// ErrCODAlreadyCollected: COD cash was already collected; cancellation cannot void payment and must use RMA/refund.
+	ErrCODAlreadyCollected = errors.New("COD payment was already collected")
 )
 
 // Attempt is the single payment attempt of an order (all amounts whole VND).
@@ -206,10 +208,15 @@ func CloseFor(a Attempt, now time.Time, reason string) (Attempt, Change, error) 
 	case StatusProcessing, StatusUnknown:
 		a.Status, a.OutcomeAt = StatusExpired30m, &now
 		return a, Change{}, nil
+	case StatusCODPending:
+		a.Status, a.OutcomeAt = StatusCODCancelled, &now
+		return a, Change{}, nil
 	case StatusCaptured:
 		a.Status = StatusCapturedLate
 		return a, Change{LateRefundVND: a.CapturedAmountVND, RefundReason: reason}, nil
-	case StatusCapturedLate, StatusFailed, StatusExpired30m:
+	case StatusCOLLECTED:
+		return a, Change{}, ErrCODAlreadyCollected
+	case StatusCapturedLate, StatusFailed, StatusExpired30m, StatusCODCancelled:
 		return a, Change{Replay: true}, nil
 	}
 	return a, Change{}, ErrInvalidOutcome

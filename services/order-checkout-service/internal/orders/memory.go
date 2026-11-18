@@ -72,6 +72,11 @@ func (s *MemoryStore) Create(_ context.Context, key, hash string, o Order, ev ..
 	if o.PaymentMethod == "" {
 		o.PaymentMethod = "PREPAID"
 	}
+	if o.PaymentMethod == "COD" {
+		if count := s.countActiveCODLocked(o.UserID); count >= MaxActiveCODOrders {
+			return Order{}, false, ErrCODVelocityLimit
+		}
+	}
 	s.keys[k] = memEntry{hash: hash, orderID: o.OrderID}
 	s.orders[o.OrderID] = clone(o)
 	s.outbox = append(s.outbox, ev...)
@@ -190,9 +195,7 @@ func (s *MemoryStore) RecordCapture(_ context.Context, orderID string, capturedV
 	return nil
 }
 
-func (s *MemoryStore) CountActiveCODOrders(_ context.Context, userID string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *MemoryStore) countActiveCODLocked(userID string) int {
 	var count int
 	for _, o := range s.orders {
 		if o.UserID == userID && o.PaymentMethod == "COD" && o.PaymentStatus == "COD_PENDING" &&
@@ -200,7 +203,13 @@ func (s *MemoryStore) CountActiveCODOrders(_ context.Context, userID string) (in
 			count++
 		}
 	}
-	return count, nil
+	return count
+}
+
+func (s *MemoryStore) CountActiveCODOrders(_ context.Context, userID string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.countActiveCODLocked(userID), nil
 }
 
 func (s *MemoryStore) RecordRefund(_ context.Context, orderID string, refundedVND, refundPendingVND int64, paymentStatus string) error {

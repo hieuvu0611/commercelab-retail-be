@@ -74,7 +74,7 @@ var (
 	// ErrCODCeilingExceeded: COD exceeds the 2,000,000 VND ceiling limit.
 	ErrCODCeilingExceeded = errors.New("order total exceeds COD ceiling limit of 2,000,000 VND")
 	// ErrCODVelocityLimit: Customer already has >= 2 active COD orders in transit.
-	ErrCODVelocityLimit = errors.New("customer has reached maximum active COD orders limit (2)")
+	ErrCODVelocityLimit = orders.ErrCODVelocityLimit
 )
 
 // QuoteLine is one priced line of an accepted quote (whole VND).
@@ -388,7 +388,19 @@ func (s *Service) run(ctx context.Context, p Principal, o orders.Order) orders.O
 			return s.undoAfterStoreFailure(ctx, o)
 		}
 		if _, err := s.Payments.CreateCODAttempt(ctx, confirmed.OrderID, p.UserID, confirmed.TotalPayableVND); err != nil {
-			log.Printf("[order] COD payment attempt creation error for order %s: %v", confirmed.OrderID, err)
+			log.Printf("[order] COD payment attempt creation failed for order %s, rolling back confirmation: %v", confirmed.OrderID, err)
+			if relErr := s.Stock.ReleaseCommitted(ctx, confirmed.OrderID); relErr != nil {
+				log.Printf("[order] rollback release committed stock failed for %s: %v", confirmed.OrderID, relErr)
+			}
+			s.releaseVoucher(ctx, confirmed)
+			if closed, tErr := s.Orders.Transition(ctx, confirmed.OrderID, string(saga.StateConfirmed), string(saga.StateFailedClosed), saga.PayFailed, FailureDependencyUnavailable,
+				s.orderFailed(confirmed, FailureDependencyUnavailable, saga.PayFailed)); tErr == nil {
+				return closed
+			}
+			confirmed.Status = string(saga.StateFailedClosed)
+			confirmed.PaymentStatus = saga.PayFailed
+			confirmed.FailureCode = FailureDependencyUnavailable
+			return confirmed
 		}
 		s.clearCart(ctx, confirmed)
 		return confirmed

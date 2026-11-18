@@ -9,17 +9,24 @@ import (
 	"time"
 )
 
+type memReservation struct {
+	orderID   string
+	amountVND int64
+	status    string
+}
+
 // MemoryStore is the dev/test store used when Postgres is absent (ALLOW_MEMORY_FALLBACK=true).
 type MemoryStore struct {
-	mu          sync.Mutex
-	byID        map[string]Attempt
-	byKey       map[string]string // idempotency key -> attempt id
-	byOrder     map[string]string // order id -> attempt id
-	summaries   map[string]*Summary
-	obligations map[string][]Obligation
-	events      map[string]bool
-	outbox      []events.DomainEvent
-	now         func() time.Time
+	mu           sync.Mutex
+	byID         map[string]Attempt
+	byKey        map[string]string // idempotency key -> attempt id
+	byOrder      map[string]string // order id -> attempt id
+	summaries    map[string]*Summary
+	obligations  map[string][]Obligation
+	reservations map[string]*memReservation
+	events       map[string]bool
+	outbox       []events.DomainEvent
+	now          func() time.Time
 }
 
 // Outbox returns the events written so far, oldest first (tests).
@@ -32,7 +39,8 @@ func (s *MemoryStore) Outbox() []events.DomainEvent {
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		byID: map[string]Attempt{}, byKey: map[string]string{}, byOrder: map[string]string{},
-		summaries: map[string]*Summary{}, obligations: map[string][]Obligation{}, events: map[string]bool{},
+		summaries: map[string]*Summary{}, obligations: map[string][]Obligation{},
+		reservations: map[string]*memReservation{}, events: map[string]bool{},
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -224,4 +232,97 @@ func (s *MemoryStore) CompleteRefund(_ context.Context, attemptID, providerRef s
 		return o, *sum, true, nil
 	}
 	return Obligation{}, Summary{}, false, ErrNotFound
+}
+
+func (s *MemoryStore) ReserveRefund(_ context.Context, orderID, reservationID string, amountVND int64) (Summary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sum, ok := s.summaries[orderID]
+	if !ok {
+		return Summary{}, ErrNotFound
+	}
+	if reservationID != "" {
+		if existing, exists := s.reservations[reservationID]; exists {
+			if existing.orderID != orderID || existing.amountVND != amountVND {
+				return *sum, ErrIdempotencyConflict
+			}
+			return *sum, nil
+		}
+	}
+	remaining := sum.CapturedVND - sum.RefundedVND - sum.RefundPending
+	if amountVND <= 0 || amountVND > remaining {
+		return *sum, ErrRefundCeiling
+	}
+	sum.RefundPending += amountVND
+	if reservationID != "" {
+		s.reservations[reservationID] = &memReservation{orderID: orderID, amountVND: amountVND, status: ObligationPending}
+	}
+	return *sum, nil
+}
+
+func (s *MemoryStore) CompleteRefundReservation(_ context.Context, orderID, reservationID string, amountVND int64, providerRef string) (Summary, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sum, ok := s.summaries[orderID]
+	if !ok {
+		return Summary{}, ErrNotFound
+	}
+	if reservationID != "" {
+		if existing, exists := s.reservations[reservationID]; exists {
+			if existing.status == ObligationDone {
+				return *sum, nil
+			}
+			if amountVND <= 0 {
+				amountVND = existing.amountVND
+			}
+		}
+	}
+	if amountVND <= 0 || amountVND > sum.RefundPending || sum.RefundedVND+amountVND > sum.CapturedVND {
+		return *sum, ErrRefundCeiling
+	}
+	sum.RefundPending -= amountVND
+	sum.RefundedVND += amountVND
+	if reservationID != "" {
+		s.reservations[reservationID] = &memReservation{orderID: orderID, amountVND: amountVND, status: ObligationDone}
+	}
+	at := s.now()
+	o := Obligation{OrderID: orderID, AttemptID: "PAY-" + orderID, AmountVND: amountVND, Reason: "RMA_REFUND", Status: ObligationDone, ProviderRef: providerRef, RefundedAt: &at}
+	s.outbox = append(s.outbox, RefundedEvent(o, *sum, at))
+	return *sum, nil
+}
+
+func (s *MemoryStore) Metrics(_ context.Context, since *time.Time) (int64, int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var collected, refunded int64
+	for _, a := range s.byID {
+		if a.Status != StatusCaptured && a.Status != StatusCOLLECTED {
+			continue
+		}
+		ts := a.CreatedAt
+		if a.OutcomeAt != nil {
+			ts = *a.OutcomeAt
+		}
+		if since != nil && ts.Before(*since) {
+			continue
+		}
+		amt := a.CapturedAmountVND
+		if amt <= 0 {
+			amt = a.AmountVND
+		}
+		collected += amt
+	}
+	for _, list := range s.obligations {
+		for _, o := range list {
+			if o.Status == ObligationDone && o.RefundedAt != nil && (since == nil || !o.RefundedAt.Before(*since)) {
+				refunded += o.AmountVND
+			}
+		}
+	}
+	for _, r := range s.reservations {
+		if r.status == ObligationDone {
+			refunded += r.amountVND
+		}
+	}
+	return collected, refunded, nil
 }

@@ -80,7 +80,7 @@ func (s *PostgresStore) Create(ctx context.Context, a Attempt) (Attempt, bool, e
 	if err != nil {
 		return Attempt{}, false, dependency.Wrap(err)
 	}
-	if cur.Status == StatusProcessing || cur.Status == StatusUnknown {
+	if cur.Status == StatusProcessing || cur.Status == StatusUnknown || cur.Status == StatusCODPending {
 		return Attempt{}, false, ErrActivePayment
 	}
 	return Attempt{}, false, ErrAttemptExists
@@ -297,4 +297,151 @@ func (s *PostgresStore) CompleteRefund(ctx context.Context, attemptID, providerR
 		return Obligation{}, Summary{}, false, dependency.Wrap(err)
 	}
 	return o, sum, true, dependency.Wrap(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) ReserveRefund(ctx context.Context, orderID, reservationID string, amountVND int64) (Summary, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Summary{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var sum Summary
+	err = tx.QueryRow(ctx, `SELECT order_id, expected_amount, captured_amount, refunded_amount, refund_pending
+		FROM payments.order_payment_summary WHERE order_id = $1 FOR UPDATE`, orderID).
+		Scan(&sum.OrderID, &sum.ExpectedVND, &sum.CapturedVND, &sum.RefundedVND, &sum.RefundPending)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Summary{}, ErrNotFound
+	}
+	if err != nil {
+		return Summary{}, dependency.Wrap(err)
+	}
+	if reservationID != "" {
+		var existingOrder, existingStatus string
+		var existingAmount int64
+		err := tx.QueryRow(ctx, `SELECT order_id, amount_vnd, status FROM payments.refund_reservations WHERE reservation_id = $1 FOR UPDATE`, reservationID).
+			Scan(&existingOrder, &existingAmount, &existingStatus)
+		if err == nil {
+			if existingOrder != orderID || existingAmount != amountVND {
+				return sum, ErrIdempotencyConflict
+			}
+			return sum, dependency.Wrap(tx.Commit(ctx))
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return Summary{}, dependency.Wrap(err)
+		}
+	}
+	if amountVND <= 0 {
+		return sum, ErrRefundCeiling
+	}
+	tag, err := tx.Exec(ctx, `UPDATE payments.order_payment_summary
+		SET refund_pending = refund_pending + $2, version = version + 1
+		WHERE order_id = $1 AND captured_amount >= refunded_amount + refund_pending + $2`, orderID, amountVND)
+	if err != nil {
+		return Summary{}, dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return sum, ErrRefundCeiling
+	}
+	if reservationID != "" {
+		if _, err := tx.Exec(ctx, `INSERT INTO payments.refund_reservations (reservation_id, order_id, amount_vnd, status)
+			VALUES ($1, $2, $3, 'PENDING')`, reservationID, orderID, amountVND); err != nil {
+			return Summary{}, dependency.Wrap(err)
+		}
+	}
+	sum.RefundPending += amountVND
+	return sum, dependency.Wrap(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) CompleteRefundReservation(ctx context.Context, orderID, reservationID string, amountVND int64, providerRef string) (Summary, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Summary{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var sum Summary
+	err = tx.QueryRow(ctx, `SELECT order_id, expected_amount, captured_amount, refunded_amount, refund_pending
+		FROM payments.order_payment_summary WHERE order_id = $1 FOR UPDATE`, orderID).
+		Scan(&sum.OrderID, &sum.ExpectedVND, &sum.CapturedVND, &sum.RefundedVND, &sum.RefundPending)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Summary{}, ErrNotFound
+	}
+	if err != nil {
+		return Summary{}, dependency.Wrap(err)
+	}
+	if reservationID != "" {
+		var resOrder, resStatus string
+		var resAmt int64
+		err := tx.QueryRow(ctx, `SELECT order_id, amount_vnd, status FROM payments.refund_reservations WHERE reservation_id = $1 FOR UPDATE`, reservationID).
+			Scan(&resOrder, &resAmt, &resStatus)
+		if err == nil {
+			if resOrder != orderID {
+				return sum, ErrIdempotencyConflict
+			}
+			if resStatus == ObligationDone {
+				return sum, dependency.Wrap(tx.Commit(ctx))
+			}
+			if amountVND <= 0 {
+				amountVND = resAmt
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return Summary{}, dependency.Wrap(err)
+		}
+	}
+	if amountVND <= 0 {
+		return sum, ErrRefundCeiling
+	}
+	tag, err := tx.Exec(ctx, `UPDATE payments.order_payment_summary
+		SET refund_pending = refund_pending - $2, refunded_amount = refunded_amount + $2, version = version + 1
+		WHERE order_id = $1 AND refund_pending >= $2 AND refunded_amount + $2 <= captured_amount`, orderID, amountVND)
+	if err != nil {
+		return Summary{}, dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return sum, ErrRefundCeiling
+	}
+	at := s.now()
+	if reservationID != "" {
+		if _, err := tx.Exec(ctx, `UPDATE payments.refund_reservations SET status = 'DONE', provider_ref = $2, completed_at = $3 WHERE reservation_id = $1`,
+			reservationID, providerRef, at); err != nil {
+			return Summary{}, dependency.Wrap(err)
+		}
+	}
+	sum.RefundPending -= amountVND
+	sum.RefundedVND += amountVND
+	attemptID := ""
+	_ = tx.QueryRow(ctx, `SELECT attempt_id FROM payments.payment_attempts WHERE order_id = $1 LIMIT 1`, orderID).Scan(&attemptID)
+	o := Obligation{OrderID: orderID, AttemptID: attemptID, AmountVND: amountVND, Reason: "RMA_REFUND", Status: ObligationDone, ProviderRef: providerRef, RefundedAt: &at}
+	if err := outbox.Insert(ctx, tx, outbox.PaymentsTable, RefundedEvent(o, sum, at)); err != nil {
+		return Summary{}, dependency.Wrap(err)
+	}
+	return sum, dependency.Wrap(tx.Commit(ctx))
+}
+
+func (s *PostgresStore) Metrics(ctx context.Context, since *time.Time) (int64, int64, error) {
+	var collected, obligationsRefunded, rmaRefunded int64
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(COALESCE(NULLIF(captured_amount_vnd, 0), amount_vnd)), 0)
+		FROM payments.payment_attempts
+		WHERE status IN ('CAPTURED', 'COLLECTED')
+		  AND ($1::timestamptz IS NULL OR COALESCE(outcome_at, created_at) >= $1)
+	`, since).Scan(&collected); err != nil {
+		return 0, 0, dependency.Wrap(err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount_vnd), 0)
+		FROM payments.refund_obligations
+		WHERE status = 'DONE' AND ($1::timestamptz IS NULL OR COALESCE(refunded_at, created_at) >= $1)
+	`, since).Scan(&obligationsRefunded); err != nil {
+		return 0, 0, dependency.Wrap(err)
+	}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(amount_vnd), 0)
+		FROM payments.refund_reservations
+		WHERE status = 'DONE' AND ($1::timestamptz IS NULL OR COALESCE(completed_at, created_at) >= $1)
+	`, since).Scan(&rmaRefunded); err != nil {
+		return 0, 0, dependency.Wrap(err)
+	}
+	return collected, obligationsRefunded + rmaRefunded, nil
 }

@@ -299,6 +299,10 @@ func (a *attemptAPI) close(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, attempt.ErrNotFound):
 		response.Error(w, r, http.StatusNotFound, "PAYMENT_NOT_FOUND", "Payment attempt not found", nil)
+	case errors.Is(err, attempt.ErrCODAlreadyCollected):
+		response.Error(w, r, http.StatusConflict, "COD_ALREADY_COLLECTED", err.Error(), nil)
+	case errors.Is(err, attempt.ErrInvalidOutcome):
+		response.Error(w, r, http.StatusConflict, "INVALID_PAYMENT_STATE", err.Error(), nil)
 	case err != nil:
 		writeStoreError(w, r, err)
 	default:

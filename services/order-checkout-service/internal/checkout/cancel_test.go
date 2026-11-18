@@ -436,3 +436,37 @@ func TestMoneyArrivingAfterAnUnpaidCancelIsRefundedOnce_SC05(t *testing.T) {
 		t.Fatalf("commits = %d, the order is cancelled", f.stock.commits)
 	}
 }
+
+func TestCancelConfirmedCODOrderClearsWithoutRefundPending(t *testing.T) {
+	f := newFixture()
+	o, _, err := f.svc.Place(context.Background(), Principal{UserID: "user-lan", Bearer: "tok"}, "cod-cancel-key", "Q-1", PaymentMethodCOD)
+	if err != nil || o.Status != "CONFIRMED" || o.PaymentStatus != PayCODPending {
+		t.Fatalf("place COD = %+v %v", o, err)
+	}
+	cancelled, err := f.cancel(t, o)
+	if err != nil {
+		t.Fatalf("cancel COD = %v", err)
+	}
+	if cancelled.Status != string(saga.StateCancelled) || cancelled.PaymentStatus != PayCODCancelled ||
+		cancelled.RefundPendingVND != 0 || cancelled.CapturedVND != 0 {
+		t.Fatalf("cancelled COD = %+v, want COD_CANCELLED with 0 refundPending", cancelled)
+	}
+	if f.stock.committedReleases != 1 {
+		t.Fatalf("expected committed stock release for COD cancel, got %d", f.stock.committedReleases)
+	}
+}
+
+func TestCODAttemptCreationFailureRollsBackConfirmation(t *testing.T) {
+	f := newFixture()
+	f.payments.failure = errors.New("payment db down")
+	o, _, err := f.svc.Place(context.Background(), Principal{UserID: "user-lan", Bearer: "tok"}, "cod-fail-key", "Q-1", PaymentMethodCOD)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if o.Status != string(saga.StateFailedClosed) || o.PaymentStatus != saga.PayFailed {
+		t.Fatalf("expected FAILED_CLOSED on CreateCODAttempt failure, got status=%s payment=%s", o.Status, o.PaymentStatus)
+	}
+	if f.stock.committedReleases != 1 {
+		t.Fatalf("expected committed stock rollback on CreateCODAttempt failure, got %d", f.stock.committedReleases)
+	}
+}

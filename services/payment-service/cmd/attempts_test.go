@@ -495,3 +495,38 @@ func TestCODCollectAndCancelAllowStaffBearerAndAccumulateMultiParcel(t *testing.
 		t.Fatalf("cod-cancel = %d %+v", rc.Code, got)
 	}
 }
+
+func TestCloseCODPendingCancelsAndCollectedConflicts(t *testing.T) {
+	f := newFixture(t, false)
+	_ = f.do(http.MethodPost, "/api/v1/payments/attempts", internalHeaders("cod-close-1"),
+		`{"orderId":"O-COD-CLOSE","userId":"user-lan","amountVnd":350000,"paymentMethod":"COD"}`)
+	if rec := f.do(http.MethodPost, "/api/v1/payments/attempts/PAY-O-COD-CLOSE/close", internalHeaders(""), `{"reason":"ORDER_CANCELLED"}`); rec.Code != http.StatusOK {
+		t.Fatalf("close COD_PENDING = %d %s", rec.Code, rec.Body.String())
+	} else if got := decode[attemptResp](t, rec); got.Data.Status != attempt.StatusCODCancelled {
+		t.Fatalf("status = %s, want COD_CANCELLED", got.Data.Status)
+	}
+
+	_ = f.do(http.MethodPost, "/api/v1/payments/attempts", internalHeaders("cod-close-2"),
+		`{"orderId":"O-COD-DONE","userId":"user-lan","amountVnd":350000,"paymentMethod":"COD"}`)
+	_, _, _ = f.store.Apply(context.Background(), "PAY-O-COD-DONE", attempt.OutcomeCODCollected, 350000, "evt-coll")
+	if rec := f.do(http.MethodPost, "/api/v1/payments/attempts/PAY-O-COD-DONE/close", internalHeaders(""), `{"reason":"ORDER_CANCELLED"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("close COLLECTED = %d, want 409", rec.Code)
+	}
+
+	// Store-backed refund reservation + payout + summary + metrics
+	f.createAttempt("k-res-1", "O-REAL-RMA", "user-lan", 500000)
+	_, _, _ = f.store.Apply(context.Background(), "PAY-O-REAL-RMA", attempt.OutcomeCaptured, 500000, "evt-cap")
+	if rec := f.do(http.MethodPost, "/api/v1/payments/O-REAL-RMA/refund-reservations", internalHeaders(""), `{"amountVnd":200000,"referenceId":"RMA-1"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("reserve refund = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.do(http.MethodPost, "/api/v1/payments/O-REAL-RMA/refund-reservations", internalHeaders(""), `{"amountVnd":400000,"referenceId":"RMA-2"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("over-ceiling reserve = %d, want 409", rec.Code)
+	}
+	if rec := f.do(http.MethodPost, "/api/v1/payments/O-REAL-RMA/refund-payouts", internalHeaders(""), `{"amountVnd":200000,"referenceId":"RMA-1"}`); rec.Code != http.StatusOK {
+		t.Fatalf("refund payout = %d %s", rec.Code, rec.Body.String())
+	}
+	sumRec := f.do(http.MethodGet, "/api/v1/payments/orders/O-REAL-RMA/summary", internalHeaders(""), "")
+	if sumRec.Code != http.StatusOK {
+		t.Fatalf("summary = %d %s", sumRec.Code, sumRec.Body.String())
+	}
+}

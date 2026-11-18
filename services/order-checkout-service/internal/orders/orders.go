@@ -25,7 +25,12 @@ var (
 	ErrNotFound = errors.New("order not found")
 	// ErrStaleState means the order was not in the state the caller expected, so nothing changed.
 	ErrStaleState = errors.New("order is not in the expected state")
+	// ErrCODVelocityLimit means the customer already has >= MaxActiveCODOrders active COD orders.
+	ErrCODVelocityLimit = errors.New("customer has reached maximum active COD orders limit (2)")
 )
+
+// MaxActiveCODOrders caps concurrent active/pending COD orders per customer.
+const MaxActiveCODOrders = 2
 
 // Item is one order line, frozen at the price the customer accepted (all amounts are whole VND).
 type Item struct {

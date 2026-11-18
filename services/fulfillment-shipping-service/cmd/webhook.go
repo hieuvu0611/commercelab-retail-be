@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -118,7 +119,7 @@ func applyNotice(w http.ResponseWriter, r *http.Request, d Deps, n noticeBody) {
 			response.JSON(w, http.StatusOK, "Notice ignored", noticeResult{ShipmentID: s.ShipmentID, Status: string(s.Status), Duplicate: true}, nil)
 			return
 		}
-		opts := changeOptions(next, d)
+		opts := changeOptions(r.Context(), next, d)
 		opts.CarrierEventID = n.EventID
 		err = d.Shipments.SaveWith(r.Context(), next, s.Version, opts)
 		switch {
@@ -158,9 +159,32 @@ func transition(s shipment.Shipment, n noticeBody, now time.Time) (shipment.Ship
 	}
 }
 
+// shouldCancelOrderCODPayment returns true when a failed COD parcel leaves no sibling parcels delivered or active.
+func shouldCancelOrderCODPayment(ctx context.Context, d Deps, failed shipment.Shipment) bool {
+	mp, ok := d.Shipments.(shipment.MultiParcelStore)
+	if !ok {
+		return true
+	}
+	list, err := mp.ListByOrder(ctx, failed.OrderID)
+	if err != nil || len(list) <= 1 {
+		return true
+	}
+	for _, s := range list {
+		if s.ShipmentID == failed.ShipmentID {
+			continue
+		}
+		if s.Status != shipment.StatusDeliveryFailed &&
+			s.Status != shipment.StatusReturnToSender &&
+			s.Status != shipment.StatusStoppedForCancel {
+			return false
+		}
+	}
+	return true
+}
+
 // changeOptions lists what a status change stores besides the shipment: the delivered event, or the exception
 // case (and its event) for a failed or partial delivery.
-func changeOptions(next shipment.Shipment, d Deps) shipment.SaveOptions {
+func changeOptions(ctx context.Context, next shipment.Shipment, d Deps) shipment.SaveOptions {
 	var o shipment.SaveOptions
 	switch next.Status {
 	case shipment.StatusDelivered:
@@ -175,7 +199,10 @@ func changeOptions(next shipment.Shipment, d Deps) shipment.SaveOptions {
 		o.Case, o.Events = &c, append(o.Events, caseOpenedEvent(c, d))
 		if next.PaymentMethod == "COD" {
 			o.Events = append(o.Events, outbox.NewEvent(events.EventPaymentCODCancelled, aggregateShipment, next.ShipmentID, d.now(), map[string]any{
-				"orderId": next.OrderID, "shipmentId": next.ShipmentID, "reason": next.FailureReason,
+				"orderId":            next.OrderID,
+				"shipmentId":         next.ShipmentID,
+				"reason":             next.FailureReason,
+				"cancelOrderPayment": shouldCancelOrderCODPayment(ctx, d, next),
 			}))
 		}
 	case shipment.StatusPartiallyDelivered:

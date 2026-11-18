@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
@@ -92,6 +93,11 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/report-shortage", staff(withShipment(d, reportShortage(d))))
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/handover", staff(withShipment(d, handoverParcel(d))))
 	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/confirm-stop", staff(withShipment(d, confirmStop(d))))
+	deliverStaff := func(h http.HandlerFunc) http.Handler {
+		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR")(h))
+	}
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/deliver", deliverStaff(withShipment(d, markDeliveredStaff(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/delivery-failed", deliverStaff(withShipment(d, markDeliveryFailedStaff(d))))
 }
 
 func listShipments(d Deps) http.HandlerFunc {
@@ -162,9 +168,12 @@ func listOrderShipments(d Deps) http.HandlerFunc {
 			writeStoreError(w, r, err)
 			return
 		}
-		views := make([]shipmentView, len(list))
-		for i, s := range list {
-			views[i] = viewOf(s)
+		claims, _ := auth.ClaimsFrom(r.Context())
+		views := make([]shipmentView, 0, len(list))
+		for _, s := range list {
+			if claims == nil || auth.CanAccessWarehouse(claims, s.WarehouseID) {
+				views = append(views, viewOf(s))
+			}
 		}
 		response.JSON(w, http.StatusOK, "Order shipments", views, nil)
 	}
@@ -306,5 +315,78 @@ func writeStoreError(w http.ResponseWriter, r *http.Request, err error) {
 		response.Error(w, r, http.StatusNotFound, "SHIPMENT_NOT_FOUND", "Shipment not found", nil)
 	default:
 		response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "The request could not be processed", nil)
+	}
+}
+
+func markDeliveredStaff(d Deps) func(http.ResponseWriter, *http.Request, shipment.Shipment) {
+	return func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
+		var req struct {
+			Version *int64 `json:"version"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		if s.Status == shipment.StatusDelivered {
+			response.JSON(w, http.StatusOK, "Shipment delivered", viewOf(s), nil)
+			return
+		}
+		if !versionGuard(w, r, s, req.Version) {
+			return
+		}
+		next, err := s.MarkDelivered(d.now())
+		if errors.Is(err, shipment.ErrNotDispatched) {
+			response.Error(w, r, http.StatusConflict, "SHIPMENT_NOT_DISPATCHED", "The shipment must be handed over before delivery", nil)
+			return
+		}
+		if err != nil {
+			writeStepError(w, r, err)
+			return
+		}
+		opts := changeOptions(r.Context(), next, d)
+		if err := d.Shipments.SaveWith(r.Context(), next, s.Version, opts); err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		d.record(r, next, timeline.TypeDelivered, "")
+		response.JSON(w, http.StatusOK, "Shipment delivered", viewOf(next), nil)
+	}
+}
+
+func markDeliveryFailedStaff(d Deps) func(http.ResponseWriter, *http.Request, shipment.Shipment) {
+	return func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
+		var req struct {
+			Version *int64 `json:"version"`
+			Reason  string `json:"reason"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		if s.Status == shipment.StatusDeliveryFailed || s.Status == shipment.StatusReturnToSender {
+			response.JSON(w, http.StatusOK, "Shipment delivery failure already recorded", viewOf(s), nil)
+			return
+		}
+		if !versionGuard(w, r, s, req.Version) {
+			return
+		}
+		reason := strings.TrimSpace(req.Reason)
+		if reason == "" {
+			reason = "Carrier delivery failed"
+		}
+		next, err := s.MarkDeliveryFailed(reason, d.now())
+		if errors.Is(err, shipment.ErrNotDispatched) {
+			response.Error(w, r, http.StatusConflict, "SHIPMENT_NOT_DISPATCHED", "The shipment must be handed over before marking delivery failed", nil)
+			return
+		}
+		if err != nil {
+			writeStepError(w, r, err)
+			return
+		}
+		opts := changeOptions(r.Context(), next, d)
+		if err := d.Shipments.SaveWith(r.Context(), next, s.Version, opts); err != nil {
+			writeStoreError(w, r, err)
+			return
+		}
+		d.record(r, next, timeline.TypeDeliveryFailed, next.FailureReason)
+		response.JSON(w, http.StatusOK, "Shipment marked as delivery failed", viewOf(next), nil)
 	}
 }

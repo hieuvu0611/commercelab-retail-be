@@ -187,3 +187,46 @@ func TestConcurrentStopsAndScansLeaveOneConsistentParcel(t *testing.T) {
 		}
 	}
 }
+
+func TestStopForCancelHandlesAllParcelsOfSplitOrder(t *testing.T) {
+	stock := &fakeStock{}
+	e := handoverEnv(t, stock)
+	// Replace store with a 2-parcel split order O-SPLIT2
+	for idx, wh := range []string{"WH-HCM-01", "WH-HN-01"} {
+		s, _ := shipment.NewParcel("O-SPLIT2", "user-1", wh, "PREPAID", 0, idx+1, 2,
+			[]shipment.Item{{SkuID: "SKU-A", Quantity: 1}}, time.Now())
+		_, _, _ = e.store.Create(context.Background(), s, "evt-sp2-"+wh)
+	}
+	rec := e.stop(t, "O-SPLIT2", stopBody, true)
+	got := decode[stopResp](t, rec)
+	if rec.Code != 200 || got.Result != "STOPPED" {
+		t.Fatalf("split stop = %d %+v", rec.Code, got)
+	}
+	for _, id := range []string{"SHP-O-SPLIT2-1", "SHP-O-SPLIT2-2"} {
+		s, _ := e.store.Get(context.Background(), id)
+		if s.Status != shipment.StatusStoppedForCancel {
+			t.Fatalf("%s status = %s, want STOPPED_FOR_CANCEL", id, s.Status)
+		}
+	}
+
+	// If second parcel of a split order was already handed over, stop returns TOO_LATE and stops neither parcel
+	for idx, wh := range []string{"WH-HCM-01", "WH-HN-01"} {
+		s, _ := shipment.NewParcel("O-SPLIT3", "user-1", wh, "PREPAID", 0, idx+1, 2,
+			[]shipment.Item{{SkuID: "SKU-A", Quantity: 1}}, time.Now())
+		if idx == 1 {
+			s, _ = s.Scan("SKU-A", 1, time.Now())
+			s, _ = s.Pack(time.Now())
+			s, _ = s.Handover(time.Now())
+		}
+		_, _, _ = e.store.Create(context.Background(), s, "evt-sp3-"+wh)
+	}
+	recLate := e.stop(t, "O-SPLIT3", stopBody, true)
+	gotLate := decode[stopResp](t, recLate)
+	if recLate.Code != 200 || gotLate.Result != "TOO_LATE" {
+		t.Fatalf("late split stop = %d %+v", recLate.Code, gotLate)
+	}
+	p1, _ := e.store.Get(context.Background(), "SHP-O-SPLIT3-1")
+	if p1.Status != shipment.StatusPendingPick {
+		t.Fatalf("parcel 1 mutated despite parcel 2 handed over: %s", p1.Status)
+	}
+}
