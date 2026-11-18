@@ -444,7 +444,7 @@ services:
       args:
         SERVICE_NAME: notification-service
     environment:
-      <<: [*go-env, *jwt-env]
+      <<: [*go-env, *jwt-env, *internal-env]
       NOTIFICATION_PORT: 8089
       REDPANDA_BROKERS: redpanda:9092
       DATABASE_URL_NOTIFICATIONS: postgres://notify_svc_user:notify_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=notifications
