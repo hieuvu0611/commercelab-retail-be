@@ -70,7 +70,7 @@ func (s Shipment) Handover(now time.Time) (Shipment, error) {
 	if s.Status == StatusHandedOver {
 		return s, nil
 	}
-	if s.Status != StatusPacked {
+	if s.StopConfirmedAt != nil || s.Status != StatusPacked {
 		return Shipment{}, ErrHandoverNotAllowed
 	}
 	at := now.UTC()
