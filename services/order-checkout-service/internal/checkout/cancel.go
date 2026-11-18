@@ -224,7 +224,7 @@ func (s *Service) awaitStop(ctx context.Context, o orders.Order) (orders.Order, 
 	if o.Status == string(saga.StateCancelRequested) {
 		return o, nil
 	}
-	res, err := saga.Next(saga.State(o.Status), saga.CancelRequested{})
+	res, err := saga.Next(saga.State(o.Status), saga.CancelRequested{PaymentStatus: o.PaymentStatus})
 	if err != nil {
 		return o, err
 	}
@@ -233,7 +233,7 @@ func (s *Service) awaitStop(ctx context.Context, o orders.Order) (orders.Order, 
 
 // rejectCancel puts a waiting order back into fulfillment because the parcel was handed over first (SC06 B).
 func (s *Service) rejectCancel(ctx context.Context, o orders.Order) (orders.Order, error) {
-	res, err := saga.Next(saga.StateCancelRequested, saga.CancelRejected{})
+	res, err := saga.Next(saga.StateCancelRequested, saga.CancelRejected{PaymentStatus: o.PaymentStatus})
 	if err != nil {
 		return o, err
 	}

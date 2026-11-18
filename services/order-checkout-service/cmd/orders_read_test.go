@@ -89,6 +89,29 @@ func TestOrderHistoryValidatesPagingAndNeedsACustomerToken(t *testing.T) {
 	}
 }
 
+func TestCustomerAndAdminCanFilterPartiallyDeliveredOrders(t *testing.T) {
+	f := newOrderFixture(t)
+	customer := bearer(t, "user-lan", "CUSTOMER")
+	placedOrder := f.place(t, customer, "partial", `{"quoteId":"Q-partial"}`)
+	if placedOrder.Code != http.StatusCreated {
+		t.Fatalf("place = %d %s", placedOrder.Code, placedOrder.Body.String())
+	}
+	orderID := decodeJSON[placed](t, placedOrder).Data.OrderID
+	if _, err := f.orders.Transition(t.Context(), orderID, "RESERVED", "PARTIALLY_DELIVERED", "CAPTURED", ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ path, token string }{
+		{"/api/v1/orders", customer},
+		{"/api/v1/admin/orders", bearer(t, "ops", "OPS_MGR")},
+	} {
+		rec := f.get(t, tc.token, tc.path+"?status=PARTIALLY_DELIVERED")
+		got := decodeJSON[listResp](t, rec)
+		if rec.Code != http.StatusOK || len(got.Data) != 1 || got.Data[0].OrderID != orderID {
+			t.Fatalf("%s = %d %s", tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 type detailResp struct {
 	Data struct {
 		OrderID       string `json:"orderId"`
