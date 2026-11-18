@@ -136,31 +136,27 @@ export class MakerCheckerPolicyService {
       updatedAt: nowIso,
     };
 
-    this.approvals.set(approvalId, record);
-
-    if (this.db) {
-      try {
-        await this.db.query(
-          `INSERT INTO support.approval_requests (
-            approval_id, request_type, reference_id, amount_vnd, quantity_diff,
-            maker_user_id, status, reason, created_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-          ON CONFLICT (approval_id) DO NOTHING`,
-          [
-            record.approvalId,
-            record.requestType,
-            record.referenceId,
-            record.amountVnd,
-            record.quantityDiff,
-            record.makerUserId,
-            record.status,
-            record.reason,
-            record.createdAt,
-          ],
-        );
-      } catch {
-        // Fallback in-memory
-      }
+    const db = this.approvalDatabase();
+    if (db) {
+      await db.query(
+        `INSERT INTO support.approval_requests (
+          approval_id, request_type, reference_id, amount_vnd, quantity_diff,
+          maker_user_id, status, reason, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          record.approvalId,
+          record.requestType,
+          record.referenceId,
+          record.amountVnd,
+          record.quantityDiff,
+          record.makerUserId,
+          record.status,
+          record.reason,
+          record.createdAt,
+        ],
+      );
+    } else {
+      this.approvals.set(approvalId, record);
     }
 
     return record;
@@ -201,8 +197,9 @@ export class MakerCheckerPolicyService {
       reason: note ? `${record.reason} | Note: ${note}` : record.reason,
     };
 
-    if (this.db) {
-      const result = await this.db.query(
+    const db = this.approvalDatabase();
+    if (db) {
+      const result = await db.query(
         `UPDATE support.approval_requests
          SET status = $1, checker_user_id = $2, decision_note = $3, updated_at = $4
          WHERE approval_id = $5 AND status = 'PENDING'
@@ -212,10 +209,12 @@ export class MakerCheckerPolicyService {
       if (result.rows.length === 0) {
         throw new ConflictException('Approval request already processed');
       }
-    } else if (this.approvals.get(approvalId)?.status !== 'PENDING') {
-      throw new ConflictException('Approval request already processed');
+    } else {
+      if (this.approvals.get(approvalId)?.status !== 'PENDING') {
+        throw new ConflictException('Approval request already processed');
+      }
+      this.approvals.set(approvalId, decided);
     }
-    this.approvals.set(approvalId, decided);
 
     return decided;
   }
@@ -237,24 +236,32 @@ export class MakerCheckerPolicyService {
     };
   }
 
+  private approvalDatabase(): DatabaseService | undefined {
+    if (typeof this.db?.getPool === 'function' && !process.env.DATABASE_URL_SUPPORT) {
+      return undefined;
+    }
+    return this.db;
+  }
+
   async getApproval(approvalId: string): Promise<ApprovalRecord | undefined> {
-    if (!this.db) {
+    const db = this.approvalDatabase();
+    if (!db) {
       return this.approvals.get(approvalId);
     }
-    const res = await this.db.query(
+    const res = await db.query(
       'SELECT * FROM support.approval_requests WHERE approval_id = $1',
       [approvalId],
     );
-    if (res.rows.length === 0) return this.approvals.get(approvalId);
-    return this.mapRow(res.rows[0]);
+    return res.rows[0] ? this.mapRow(res.rows[0]) : undefined;
   }
 
   async listApprovals(filter?: { status?: string; requestType?: string; makerUserId?: string }): Promise<ApprovalRecord[]> {
     let list: ApprovalRecord[];
-    if (!this.db) {
+    const db = this.approvalDatabase();
+    if (!db) {
       list = Array.from(this.approvals.values());
     } else {
-      const res = await this.db.query(
+      const res = await db.query(
         'SELECT * FROM support.approval_requests ORDER BY created_at DESC',
       );
       list = res.rows.map((r) => this.mapRow(r));
@@ -272,16 +279,14 @@ export class MakerCheckerPolicyService {
   }
 
   async getApprovalByReference(referenceId: string): Promise<ApprovalRecord | undefined> {
-    if (!this.db) {
+    const db = this.approvalDatabase();
+    if (!db) {
       return Array.from(this.approvals.values()).find((a) => a.referenceId === referenceId);
     }
-    const res = await this.db.query(
+    const res = await db.query(
       'SELECT * FROM support.approval_requests WHERE reference_id = $1 ORDER BY created_at DESC LIMIT 1',
       [referenceId],
     );
-    if (res.rows.length === 0) {
-      return Array.from(this.approvals.values()).find((a) => a.referenceId === referenceId);
-    }
-    return this.mapRow(res.rows[0]);
+    return res.rows[0] ? this.mapRow(res.rows[0]) : undefined;
   }
 }

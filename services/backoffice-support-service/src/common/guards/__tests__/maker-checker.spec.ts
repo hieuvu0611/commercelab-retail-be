@@ -1,11 +1,34 @@
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { MakerCheckerPolicyService } from '../maker-checker.guard';
+import { DatabaseService } from '../../../database/database.service';
 
 describe('MakerCheckerPolicyService', () => {
   let service: MakerCheckerPolicyService;
 
   beforeEach(() => {
     service = new MakerCheckerPolicyService();
+  });
+
+  it('propagates approval insert failures and reads only persisted records when a database is configured', async () => {
+    const db = new DatabaseService();
+    const query = jest.spyOn(db, 'query')
+      .mockRejectedValueOnce(new Error('write failed'))
+      .mockResolvedValue({ rows: [], command: 'SELECT', rowCount: 0, oid: 0, fields: [] });
+    const environment = jest.replaceProperty(process, 'env', {
+      ...process.env, DATABASE_URL_SUPPORT: 'postgres://test',
+    });
+    try {
+      const durable = new MakerCheckerPolicyService(db);
+      await expect(durable.createApprovalRequest({
+        requestType: 'EXCEPTION_REFUND', referenceId: 'RMA-DB', amountVnd: 10,
+        makerUserId: 'maker', reason: 'Refund',
+      })).rejects.toThrow('write failed');
+      expect(query).toHaveBeenCalledTimes(1);
+      await expect(durable.getApprovalByReference('RMA-DB')).resolves.toBeUndefined();
+    } finally {
+      environment.restore();
+      query.mockRestore();
+    }
   });
 
   describe('Validation & Policy P10 (Maker != Checker)', () => {
