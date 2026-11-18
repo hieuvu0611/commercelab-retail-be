@@ -26,6 +26,43 @@ func extractRoles(claims *auth.Claims) []string {
 	return nil
 }
 
+// procurementWarehouseFilter uses nil for all warehouses and an empty slice for no access.
+func procurementWarehouseFilter(claims *auth.Claims, requested string) []string {
+	if requested != "" {
+		return []string{requested}
+	}
+	if claims == nil {
+		return []string{}
+	}
+	for _, scope := range claims.WarehouseScopes {
+		if scope == auth.AllWarehouses {
+			return nil
+		}
+	}
+	return append([]string{}, claims.WarehouseScopes...)
+}
+
+func requireProcurementWarehouse(w http.ResponseWriter, r *http.Request, warehouseID string, found bool, err error) bool {
+	if dependency.IsUnavailable(err) {
+		dependency.WriteUnavailable(w, r, err)
+		return false
+	}
+	if err != nil {
+		response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to retrieve warehouse record", nil)
+		return false
+	}
+	if !found {
+		response.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Warehouse record not found", nil)
+		return false
+	}
+	claims, _ := auth.ClaimsFrom(r.Context())
+	if !auth.CanAccessWarehouse(claims, warehouseID) {
+		auth.ForbiddenWarehouse(w, r)
+		return false
+	}
+	return true
+}
+
 // registerProcurementRoutes adds suppliers, PR, and PO management APIs (B02 Stage 2, P01, P10, SC09).
 func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRepository) {
 	staffOrMgr := func(h http.HandlerFunc) http.Handler {
@@ -95,7 +132,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListPurchaseOrders(r.Context(), warehouseID, status)
+		list, err := repo.ListPurchaseOrders(r.Context(), procurementWarehouseFilter(claims, warehouseID), status)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -181,6 +218,10 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		claims, _ := auth.ClaimsFrom(r.Context())
 		roles := extractRoles(claims)
 
+		target, found, lookupErr := repo.GetPurchaseOrder(r.Context(), poID)
+		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr) {
+			return
+		}
 		po, err := repo.ApprovePurchaseOrder(r.Context(), poID, claims.UserID, roles)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
@@ -211,6 +252,10 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
+		target, found, lookupErr := repo.GetPurchaseOrder(r.Context(), poID)
+		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr) {
+			return
+		}
 		po, err := repo.RejectPurchaseOrder(r.Context(), poID, claims.UserID, req.Reason)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
@@ -243,6 +288,10 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
+		po, found, lookupErr := repo.GetPurchaseOrder(r.Context(), strings.TrimSpace(req.POID))
+		if !requireProcurementWarehouse(w, r, po.WarehouseID, found, lookupErr) {
+			return
+		}
 		insp, err := repo.RecordReceivingInspection(r.Context(), strings.TrimSpace(req.POID), claims.UserID, strings.TrimSpace(req.Notes), req.Lines)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
@@ -268,7 +317,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListReceivingInspections(r.Context(), warehouseID, poID)
+		list, err := repo.ListReceivingInspections(r.Context(), procurementWarehouseFilter(claims, warehouseID), poID)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -331,6 +380,10 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
+		target, found, lookupErr := repo.GetSupplierReturn(r.Context(), returnID)
+		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr) {
+			return
+		}
 		ret, err := repo.DispatchSupplierReturn(r.Context(), returnID, claims.UserID, strings.TrimSpace(req.TrackingNumber))
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
@@ -356,7 +409,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListSupplierReturns(r.Context(), warehouseID, supplierID)
+		list, err := repo.ListSupplierReturns(r.Context(), procurementWarehouseFilter(claims, warehouseID), supplierID)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -427,7 +480,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListStocktakes(r.Context(), warehouseID)
+		list, err := repo.ListStocktakes(r.Context(), procurementWarehouseFilter(claims, warehouseID))
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -474,9 +527,17 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "Non-empty count lines are required", nil)
 			return
 		}
+		target, found, lookupErr := repo.GetStocktake(r.Context(), stocktakeID)
+		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr) {
+			return
+		}
 		stk, adjustments, err := repo.SubmitStocktakeCount(r.Context(), stocktakeID, req.Lines)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if errors.Is(err, domain.ErrStocktakeNotInProgress) {
+			response.Error(w, r, http.StatusConflict, "STOCKTAKE_NOT_IN_PROGRESS", err.Error(), nil)
 			return
 		}
 		if err != nil {
@@ -498,7 +559,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListStockAdjustments(r.Context(), warehouseID, status)
+		list, err := repo.ListStockAdjustments(r.Context(), procurementWarehouseFilter(claims, warehouseID), status)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -528,9 +589,17 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 
+		warehouseID, found, lookupErr := repo.AdjustmentWarehouse(r.Context(), adjustmentID)
+		if !requireProcurementWarehouse(w, r, warehouseID, found, lookupErr) {
+			return
+		}
 		adj, err := repo.DecideStockAdjustment(r.Context(), adjustmentID, claims.UserID, roles, req.Action, strings.TrimSpace(req.Note))
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
+			return
+		}
+		if errors.Is(err, domain.ErrAdjustmentNotPending) {
+			response.Error(w, r, http.StatusConflict, "ADJUSTMENT_NOT_PENDING", err.Error(), nil)
 			return
 		}
 		if err != nil {

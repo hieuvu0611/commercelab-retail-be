@@ -320,6 +320,20 @@ func (e *LedgerEngine) QuarantineDiscrepancy(warehouseID, skuID string, shortage
 	return nil
 }
 
+// ReleaseDiscrepancy makes the quarantined units available after a rejected adjustment.
+func (e *LedgerEngine) ReleaseDiscrepancy(warehouseID, skuID string, shortageQty int64) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	st, ok := e.stocks[stockKey{skuID, warehouseID}]
+	if !ok || shortageQty <= 0 {
+		return ErrInvalidReservationState
+	}
+	st.Unsellable = max(0, st.Unsellable-shortageQty)
+	st.Version++
+	return nil
+}
+
 // ApplyAdjustment cập nhật tồn thực tế khi phiếu điều chỉnh được duyệt (P10).
 func (e *LedgerEngine) ApplyAdjustment(warehouseID, skuID string, diffQty int64, shortageQuarantined bool) error {
 	if diffQty == 0 {

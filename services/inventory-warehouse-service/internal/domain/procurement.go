@@ -185,6 +185,13 @@ type SupplierReturn struct {
 	UpdatedAt      time.Time            `json:"updatedAt"`
 }
 
+var (
+	ErrStocktakeNotFound      = errors.New("stocktake not found")
+	ErrStocktakeNotInProgress = errors.New("stocktake is not in progress")
+	ErrAdjustmentNotFound     = errors.New("adjustment not found")
+	ErrAdjustmentNotPending   = errors.New("adjustment is not pending approval")
+)
+
 const (
 	AdjustmentMaxQtyWarehouseMgr    int64 = 5
 	AdjustmentMaxAmountWarehouseMgr int64 = 2_000_000
@@ -239,7 +246,7 @@ func CanApproveAdjustment(adj StockAdjustment, approverID string, approverRoles 
 		return errors.New("maker-checker violation: requester cannot approve their own inventory adjustment (P10)")
 	}
 	if adj.Status != "PENDING_APPROVAL" {
-		return errors.New("adjustment is not pending approval")
+		return ErrAdjustmentNotPending
 	}
 
 	hasRole := func(target string) bool {

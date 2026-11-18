@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -223,13 +225,13 @@ func (r *InventoryRepository) GetPurchaseOrder(ctx context.Context, poID string)
 }
 
 // ListPurchaseOrders lists POs filtered by warehouse and status.
-func (r *InventoryRepository) ListPurchaseOrders(ctx context.Context, warehouseID, status string) ([]domain.PurchaseOrder, error) {
+func (r *InventoryRepository) ListPurchaseOrders(ctx context.Context, warehouses []string, status string) ([]domain.PurchaseOrder, error) {
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		list := make([]domain.PurchaseOrder, 0)
 		for _, po := range r.purchaseOrders {
-			if (warehouseID == "" || po.WarehouseID == warehouseID) && (status == "" || po.Status == status) {
+			if (warehouses == nil || slices.Contains(warehouses, po.WarehouseID)) && (status == "" || po.Status == status) {
 				list = append(list, *po)
 			}
 		}
@@ -240,16 +242,18 @@ func (r *InventoryRepository) ListPurchaseOrders(ctx context.Context, warehouseI
 	var sb strings.Builder
 	sb.WriteString(`
 		SELECT p.po_id, p.supplier_id, COALESCE(s.name, ''), p.warehouse_id, p.status, p.total_amount_vnd,
-		       p.created_by, COALESCE(p.approved_by, ''), p.approved_at, p.notes, p.created_at, p.updated_at
+		       p.created_by, COALESCE(p.approved_by, ''), p.approved_at, p.notes, p.created_at, p.updated_at,
+		       (SELECT jsonb_agg(jsonb_build_object('id', l.id, 'poId', l.po_id, 'skuId', l.sku_id, 'orderedQty', l.ordered_qty, 'unitCostVnd', l.unit_cost_vnd, 'receivedQty', l.received_qty, 'damagedQty', l.damaged_qty, 'shortQty', l.short_qty) ORDER BY l.id)
+		        FROM purchase_order_lines l WHERE l.po_id = p.po_id)
 		FROM purchase_orders p
 		LEFT JOIN suppliers s ON p.supplier_id = s.supplier_id
 		WHERE 1=1
 	`)
 	args := []any{}
 	idx := 1
-	if warehouseID != "" {
-		sb.WriteString(fmt.Sprintf(" AND p.warehouse_id = $%d", idx))
-		args = append(args, warehouseID)
+	if warehouses != nil {
+		sb.WriteString(fmt.Sprintf(" AND p.warehouse_id = ANY($%d::text[])", idx))
+		args = append(args, warehouses)
 		idx++
 	}
 	if status != "" {
@@ -270,7 +274,7 @@ func (r *InventoryRepository) ListPurchaseOrders(ctx context.Context, warehouseI
 		var po domain.PurchaseOrder
 		if err := rows.Scan(
 			&po.POID, &po.SupplierID, &po.SupplierName, &po.WarehouseID, &po.Status, &po.TotalAmountVND,
-			&po.CreatedBy, &po.ApprovedBy, &po.ApprovedAt, &po.Notes, &po.CreatedAt, &po.UpdatedAt,
+			&po.CreatedBy, &po.ApprovedBy, &po.ApprovedAt, &po.Notes, &po.CreatedAt, &po.UpdatedAt, &po.Lines,
 		); err != nil {
 			return nil, dependency.Wrap(err)
 		}
@@ -554,13 +558,13 @@ func (r *InventoryRepository) RecordReceivingInspection(ctx context.Context, poI
 }
 
 // ListReceivingInspections lists inspections for a warehouse or PO.
-func (r *InventoryRepository) ListReceivingInspections(ctx context.Context, warehouseID, poID string) ([]domain.ReceivingInspection, error) {
+func (r *InventoryRepository) ListReceivingInspections(ctx context.Context, warehouses []string, poID string) ([]domain.ReceivingInspection, error) {
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		list := make([]domain.ReceivingInspection, 0)
 		for _, insp := range r.inspections {
-			if (warehouseID == "" || insp.WarehouseID == warehouseID) && (poID == "" || insp.POID == poID) {
+			if (warehouses == nil || slices.Contains(warehouses, insp.WarehouseID)) && (poID == "" || insp.POID == poID) {
 				list = append(list, *insp)
 			}
 		}
@@ -570,14 +574,16 @@ func (r *InventoryRepository) ListReceivingInspections(ctx context.Context, ware
 
 	var sb strings.Builder
 	sb.WriteString(`
-		SELECT inspection_id, po_id, warehouse_id, inspector_id, status, notes, created_at
+		SELECT inspection_id, po_id, warehouse_id, inspector_id, status, notes, created_at,
+		       (SELECT jsonb_agg(jsonb_build_object('id', l.id, 'inspectionId', l.inspection_id, 'skuId', l.sku_id, 'deliveredQty', l.delivered_qty, 'passedQty', l.passed_qty, 'damagedQty', l.damaged_qty, 'shortQty', l.short_qty) ORDER BY l.id)
+		        FROM receiving_inspection_lines l WHERE l.inspection_id = receiving_inspections.inspection_id)
 		FROM receiving_inspections WHERE 1=1
 	`)
 	args := []any{}
 	idx := 1
-	if warehouseID != "" {
-		sb.WriteString(fmt.Sprintf(" AND warehouse_id = $%d", idx))
-		args = append(args, warehouseID)
+	if warehouses != nil {
+		sb.WriteString(fmt.Sprintf(" AND warehouse_id = ANY($%d::text[])", idx))
+		args = append(args, warehouses)
 		idx++
 	}
 	if poID != "" {
@@ -596,7 +602,7 @@ func (r *InventoryRepository) ListReceivingInspections(ctx context.Context, ware
 	list := make([]domain.ReceivingInspection, 0)
 	for rows.Next() {
 		var insp domain.ReceivingInspection
-		if err := rows.Scan(&insp.InspectionID, &insp.POID, &insp.WarehouseID, &insp.InspectorID, &insp.Status, &insp.Notes, &insp.CreatedAt); err != nil {
+		if err := rows.Scan(&insp.InspectionID, &insp.POID, &insp.WarehouseID, &insp.InspectorID, &insp.Status, &insp.Notes, &insp.CreatedAt, &insp.Lines); err != nil {
 			return nil, dependency.Wrap(err)
 		}
 		list = append(list, insp)
@@ -806,13 +812,13 @@ func (r *InventoryRepository) GetSupplierReturn(ctx context.Context, returnID st
 }
 
 // ListSupplierReturns lists supplier returns by warehouse or supplier.
-func (r *InventoryRepository) ListSupplierReturns(ctx context.Context, warehouseID, supplierID string) ([]domain.SupplierReturn, error) {
+func (r *InventoryRepository) ListSupplierReturns(ctx context.Context, warehouses []string, supplierID string) ([]domain.SupplierReturn, error) {
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		list := make([]domain.SupplierReturn, 0)
 		for _, ret := range r.supplierReturns {
-			if (warehouseID == "" || ret.WarehouseID == warehouseID) && (supplierID == "" || ret.SupplierID == supplierID) {
+			if (warehouses == nil || slices.Contains(warehouses, ret.WarehouseID)) && (supplierID == "" || ret.SupplierID == supplierID) {
 				list = append(list, *ret)
 			}
 		}
@@ -823,16 +829,18 @@ func (r *InventoryRepository) ListSupplierReturns(ctx context.Context, warehouse
 	var sb strings.Builder
 	sb.WriteString(`
 		SELECT r.return_id, r.supplier_id, COALESCE(s.name, ''), r.warehouse_id, r.po_id, r.status,
-		       r.created_by, r.dispatched_by, r.dispatched_at, r.tracking_number, r.notes, r.created_at, r.updated_at
+		       r.created_by, r.dispatched_by, r.dispatched_at, r.tracking_number, r.notes, r.created_at, r.updated_at,
+		       (SELECT jsonb_agg(jsonb_build_object('id', l.id, 'returnId', l.return_id, 'skuId', l.sku_id, 'quantity', l.quantity, 'reason', l.reason) ORDER BY l.id)
+		        FROM supplier_return_lines l WHERE l.return_id = r.return_id)
 		FROM supplier_returns r
 		LEFT JOIN suppliers s ON r.supplier_id = s.supplier_id
 		WHERE 1=1
 	`)
 	args := []any{}
 	idx := 1
-	if warehouseID != "" {
-		sb.WriteString(fmt.Sprintf(" AND r.warehouse_id = $%d", idx))
-		args = append(args, warehouseID)
+	if warehouses != nil {
+		sb.WriteString(fmt.Sprintf(" AND r.warehouse_id = ANY($%d::text[])", idx))
+		args = append(args, warehouses)
 		idx++
 	}
 	if supplierID != "" {
@@ -853,7 +861,7 @@ func (r *InventoryRepository) ListSupplierReturns(ctx context.Context, warehouse
 		var ret domain.SupplierReturn
 		if err := rows.Scan(
 			&ret.ReturnID, &ret.SupplierID, &ret.SupplierName, &ret.WarehouseID, &ret.POID, &ret.Status,
-			&ret.CreatedBy, &ret.DispatchedBy, &ret.DispatchedAt, &ret.TrackingNumber, &ret.Notes, &ret.CreatedAt, &ret.UpdatedAt,
+			&ret.CreatedBy, &ret.DispatchedBy, &ret.DispatchedAt, &ret.TrackingNumber, &ret.Notes, &ret.CreatedAt, &ret.UpdatedAt, &ret.Lines,
 		); err != nil {
 			return nil, dependency.Wrap(err)
 		}
@@ -870,7 +878,7 @@ func (r *InventoryRepository) CreateStocktake(ctx context.Context, warehouseID, 
 	if warehouseID == "" {
 		warehouseID = domain.DefaultWarehouseID
 	}
-	id := fmt.Sprintf("STK-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+	id := "STK-" + rand.Text()
 	now := r.now().UTC()
 	stk := domain.Stocktake{
 		StocktakeID: id,
@@ -903,20 +911,16 @@ func (r *InventoryRepository) CreateStocktake(ctx context.Context, warehouseID, 
 // If counted < system (shortage), it immediately blocks sales for the discrepancy (I01)
 // by quarantining the shortage into unsellable stock while generating a maker != checker adjustment request.
 func (r *InventoryRepository) SubmitStocktakeCount(ctx context.Context, stocktakeID string, counts []domain.StocktakeLine) (domain.Stocktake, []domain.StockAdjustment, error) {
-	stk, ok, err := r.GetStocktake(ctx, stocktakeID)
-	if err != nil {
-		return domain.Stocktake{}, nil, err
-	}
-	if !ok {
-		return domain.Stocktake{}, nil, errors.New("stocktake session not found")
-	}
-	if stk.Status != "IN_PROGRESS" {
-		return domain.Stocktake{}, nil, errors.New("stocktake is not IN_PROGRESS")
+	counts = slices.Clone(counts)
+	slices.SortFunc(counts, func(a, b domain.StocktakeLine) int { return strings.Compare(a.SkuID, b.SkuID) })
+	for index, line := range counts {
+		if line.SkuID == "" || line.CountedOnHand < 0 || line.UnitCostVND < 0 ||
+			(index > 0 && counts[index-1].SkuID == line.SkuID) {
+			return domain.Stocktake{}, nil, domain.ErrInvalidLines
+		}
 	}
 
 	now := r.now().UTC()
-	stk.Status = "SUBMITTED"
-	stk.CompletedAt = &now
 
 	adjustments := make([]domain.StockAdjustment, 0)
 	processedLines := make([]domain.StocktakeLine, 0, len(counts))
@@ -924,6 +928,17 @@ func (r *InventoryRepository) SubmitStocktakeCount(ctx context.Context, stocktak
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+
+		current, ok := r.stocktakes[stocktakeID]
+		if !ok {
+			return domain.Stocktake{}, nil, domain.ErrStocktakeNotFound
+		}
+		if current.Status != "IN_PROGRESS" {
+			return domain.Stocktake{}, nil, domain.ErrStocktakeNotInProgress
+		}
+		stk := *current
+		stk.Status = "SUBMITTED"
+		stk.CompletedAt = &now
 
 		for _, c := range counts {
 			st, ok := r.engine.GetStock(stk.WarehouseID, c.SkuID)
@@ -939,7 +954,7 @@ func (r *InventoryRepository) SubmitStocktakeCount(ctx context.Context, stocktak
 			processedLines = append(processedLines, c)
 
 			if diff != 0 {
-				adjID := fmt.Sprintf("ADJ-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+				adjID := "ADJ-" + rand.Text()
 				adj := domain.StockAdjustment{
 					AdjustmentID:  adjID,
 					StocktakeID:   stocktakeID,
@@ -974,11 +989,31 @@ func (r *InventoryRepository) SubmitStocktakeCount(ctx context.Context, stocktak
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	var stk domain.Stocktake
+	err = tx.QueryRow(ctx, `
+		SELECT stocktake_id, warehouse_id, status, started_by, notes, created_at, completed_at
+		FROM stocktakes WHERE stocktake_id = $1 FOR UPDATE
+	`, stocktakeID).Scan(&stk.StocktakeID, &stk.WarehouseID, &stk.Status, &stk.StartedBy, &stk.Notes, &stk.CreatedAt, &stk.CompletedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Stocktake{}, nil, domain.ErrStocktakeNotFound
+	}
+	if err != nil {
+		return domain.Stocktake{}, nil, dependency.Wrap(err)
+	}
+	if stk.Status != "IN_PROGRESS" {
+		return domain.Stocktake{}, nil, domain.ErrStocktakeNotInProgress
+	}
+	stk.Status = "SUBMITTED"
+	stk.CompletedAt = &now
+
 	for _, c := range counts {
 		var sysOnHand int64
-		_ = tx.QueryRow(ctx, `
-			SELECT COALESCE(on_hand, 0) FROM stock_items WHERE sku_id = $1 AND warehouse_id = $2
+		err = tx.QueryRow(ctx, `
+			SELECT on_hand FROM stock_items WHERE sku_id = $1 AND warehouse_id = $2 FOR UPDATE
 		`, c.SkuID, stk.WarehouseID).Scan(&sysOnHand)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return domain.Stocktake{}, nil, dependency.Wrap(err)
+		}
 
 		diff := c.CountedOnHand - sysOnHand
 		diffAmount := diff * c.UnitCostVND
@@ -996,7 +1031,7 @@ func (r *InventoryRepository) SubmitStocktakeCount(ctx context.Context, stocktak
 		}
 
 		if diff != 0 {
-			adjID := fmt.Sprintf("ADJ-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+			adjID := "ADJ-" + rand.Text()
 			adj := domain.StockAdjustment{
 				AdjustmentID:  adjID,
 				StocktakeID:   stocktakeID,
@@ -1035,11 +1070,15 @@ func (r *InventoryRepository) SubmitStocktakeCount(ctx context.Context, stocktak
 		}
 	}
 
-	_, err = tx.Exec(ctx, `
-		UPDATE stocktakes SET status = $1, completed_at = $2 WHERE stocktake_id = $3
+	updated, err := tx.Exec(ctx, `
+		UPDATE stocktakes SET status = $1, completed_at = $2 WHERE stocktake_id = $3 AND status = 'IN_PROGRESS'
 	`, stk.Status, stk.CompletedAt, stocktakeID)
 	if err != nil {
 		return domain.Stocktake{}, nil, dependency.Wrap(err)
+	}
+
+	if updated.RowsAffected() == 0 {
+		return domain.Stocktake{}, nil, domain.ErrStocktakeNotInProgress
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1057,10 +1096,19 @@ func (r *InventoryRepository) DecideStockAdjustment(ctx context.Context, adjustm
 		defer r.mu.Unlock()
 		adj, ok := r.adjustments[adjustmentID]
 		if !ok {
-			return domain.StockAdjustment{}, errors.New("adjustment not found")
+			return domain.StockAdjustment{}, domain.ErrAdjustmentNotFound
 		}
 		if err := domain.CanApproveAdjustment(*adj, approverID, approverRoles); err != nil {
 			return domain.StockAdjustment{}, err
+		}
+		if action == "APPROVE" {
+			if err := r.engine.ApplyAdjustment(adj.WarehouseID, adj.SkuID, adj.DiffQty, adj.DiffQty < 0); err != nil {
+				return domain.StockAdjustment{}, err
+			}
+		} else if adj.DiffQty < 0 {
+			if err := r.engine.ReleaseDiscrepancy(adj.WarehouseID, adj.SkuID, -adj.DiffQty); err != nil {
+				return domain.StockAdjustment{}, err
+			}
 		}
 		now := r.now().UTC()
 		adj.CheckerID = approverID
@@ -1070,7 +1118,6 @@ func (r *InventoryRepository) DecideStockAdjustment(ctx context.Context, adjustm
 		}
 		if action == "APPROVE" {
 			adj.Status = "APPROVED"
-			_ = r.engine.ApplyAdjustment(adj.WarehouseID, adj.SkuID, adj.DiffQty, adj.DiffQty < 0)
 			r.appendMovement(domain.Movement{
 				SkuID: adj.SkuID, WarehouseID: adj.WarehouseID, Type: domain.MovementAdjust, Qty: adj.DiffQty,
 				RefType: "ADJUSTMENT", RefID: adjustmentID, ActorID: approverID, Reason: adj.Reason,
@@ -1082,17 +1129,23 @@ func (r *InventoryRepository) DecideStockAdjustment(ctx context.Context, adjustm
 		return *adj, nil
 	}
 
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.StockAdjustment{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var adj domain.StockAdjustment
-	err := r.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT adjustment_id, stocktake_id, warehouse_id, sku_id, diff_qty, unit_cost_vnd, diff_amount_vnd,
 		       status, maker_id, checker_id, decided_at, reason, created_at
-		FROM stock_adjustments WHERE adjustment_id = $1
+		FROM stock_adjustments WHERE adjustment_id = $1 FOR UPDATE
 	`, adjustmentID).Scan(
 		&adj.AdjustmentID, &adj.StocktakeID, &adj.WarehouseID, &adj.SkuID, &adj.DiffQty, &adj.UnitCostVND, &adj.DiffAmountVND,
 		&adj.Status, &adj.MakerID, &adj.CheckerID, &adj.DecidedAt, &adj.Reason, &adj.CreatedAt,
 	)
 	if err == pgx.ErrNoRows {
-		return domain.StockAdjustment{}, errors.New("adjustment not found")
+		return domain.StockAdjustment{}, domain.ErrAdjustmentNotFound
 	}
 	if err != nil {
 		return domain.StockAdjustment{}, dependency.Wrap(err)
@@ -1108,12 +1161,6 @@ func (r *InventoryRepository) DecideStockAdjustment(ctx context.Context, adjustm
 	if note != "" {
 		adj.Reason = adj.Reason + " | " + note
 	}
-
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return domain.StockAdjustment{}, dependency.Wrap(err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 
 	if action == "APPROVE" {
 		adj.Status = "APPROVED"
@@ -1148,15 +1195,29 @@ func (r *InventoryRepository) DecideStockAdjustment(ctx context.Context, adjustm
 		}
 	} else {
 		adj.Status = "REJECTED"
+		if adj.DiffQty < 0 {
+			_, err = tx.Exec(ctx, `
+				UPDATE stock_items
+				SET unsellable = GREATEST(0, unsellable - $1), version = version + 1, updated_at = NOW()
+				WHERE sku_id = $2 AND warehouse_id = $3
+			`, -adj.DiffQty, adj.SkuID, adj.WarehouseID)
+			if err != nil {
+				return domain.StockAdjustment{}, dependency.Wrap(err)
+			}
+		}
 	}
 
-	_, err = tx.Exec(ctx, `
+	updated, err := tx.Exec(ctx, `
 		UPDATE stock_adjustments
 		SET status = $1, checker_id = $2, decided_at = $3, reason = $4
-		WHERE adjustment_id = $5
+		WHERE adjustment_id = $5 AND status = 'PENDING_APPROVAL'
 	`, adj.Status, adj.CheckerID, adj.DecidedAt, adj.Reason, adjustmentID)
 	if err != nil {
 		return domain.StockAdjustment{}, dependency.Wrap(err)
+	}
+
+	if updated.RowsAffected() == 0 {
+		return domain.StockAdjustment{}, domain.ErrAdjustmentNotPending
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -1164,6 +1225,24 @@ func (r *InventoryRepository) DecideStockAdjustment(ctx context.Context, adjustm
 	}
 
 	return adj, nil
+}
+
+// AdjustmentWarehouse returns the warehouse that owns an adjustment.
+func (r *InventoryRepository) AdjustmentWarehouse(ctx context.Context, adjustmentID string) (string, bool, error) {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if adj, ok := r.adjustments[adjustmentID]; ok {
+			return adj.WarehouseID, true, nil
+		}
+		return "", false, nil
+	}
+	var warehouse string
+	err := r.pool.QueryRow(ctx, "SELECT warehouse_id FROM stock_adjustments WHERE adjustment_id = $1", adjustmentID).Scan(&warehouse)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	return warehouse, err == nil, dependency.Wrap(err)
 }
 
 // GetStocktake retrieves a stocktake and its lines.
@@ -1215,13 +1294,13 @@ func (r *InventoryRepository) GetStocktake(ctx context.Context, stocktakeID stri
 }
 
 // ListStocktakes lists stocktakes by warehouse.
-func (r *InventoryRepository) ListStocktakes(ctx context.Context, warehouseID string) ([]domain.Stocktake, error) {
+func (r *InventoryRepository) ListStocktakes(ctx context.Context, warehouses []string) ([]domain.Stocktake, error) {
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		list := make([]domain.Stocktake, 0)
 		for _, s := range r.stocktakes {
-			if warehouseID == "" || s.WarehouseID == warehouseID {
+			if warehouses == nil || slices.Contains(warehouses, s.WarehouseID) {
 				list = append(list, *s)
 			}
 		}
@@ -1230,11 +1309,14 @@ func (r *InventoryRepository) ListStocktakes(ctx context.Context, warehouseID st
 	}
 
 	var sb strings.Builder
-	sb.WriteString(`SELECT stocktake_id, warehouse_id, status, started_by, notes, created_at, completed_at FROM stocktakes WHERE 1=1`)
+	sb.WriteString(`SELECT stocktake_id, warehouse_id, status, started_by, notes, created_at, completed_at,
+		       (SELECT jsonb_agg(jsonb_build_object('id', l.id, 'stocktakeId', l.stocktake_id, 'skuId', l.sku_id, 'systemOnHand', l.system_on_hand, 'countedOnHand', l.counted_on_hand, 'diffQty', l.diff_qty, 'unitCostVnd', l.unit_cost_vnd, 'diffAmountVnd', l.diff_amount_vnd) ORDER BY l.id)
+		        FROM stocktake_lines l WHERE l.stocktake_id = stocktakes.stocktake_id)
+		FROM stocktakes WHERE 1=1`)
 	args := []any{}
-	if warehouseID != "" {
-		sb.WriteString(" AND warehouse_id = $1")
-		args = append(args, warehouseID)
+	if warehouses != nil {
+		sb.WriteString(" AND warehouse_id = ANY($1::text[])")
+		args = append(args, warehouses)
 	}
 	sb.WriteString(" ORDER BY created_at DESC")
 
@@ -1247,7 +1329,7 @@ func (r *InventoryRepository) ListStocktakes(ctx context.Context, warehouseID st
 	list := make([]domain.Stocktake, 0)
 	for rows.Next() {
 		var s domain.Stocktake
-		if err := rows.Scan(&s.StocktakeID, &s.WarehouseID, &s.Status, &s.StartedBy, &s.Notes, &s.CreatedAt, &s.CompletedAt); err != nil {
+		if err := rows.Scan(&s.StocktakeID, &s.WarehouseID, &s.Status, &s.StartedBy, &s.Notes, &s.CreatedAt, &s.CompletedAt, &s.Lines); err != nil {
 			return nil, dependency.Wrap(err)
 		}
 		list = append(list, s)
@@ -1259,13 +1341,13 @@ func (r *InventoryRepository) ListStocktakes(ctx context.Context, warehouseID st
 }
 
 // ListStockAdjustments lists adjustments by warehouse and status.
-func (r *InventoryRepository) ListStockAdjustments(ctx context.Context, warehouseID, status string) ([]domain.StockAdjustment, error) {
+func (r *InventoryRepository) ListStockAdjustments(ctx context.Context, warehouses []string, status string) ([]domain.StockAdjustment, error) {
 	if r.pool == nil {
 		r.mu.Lock()
 		defer r.mu.Unlock()
 		list := make([]domain.StockAdjustment, 0)
 		for _, a := range r.adjustments {
-			if (warehouseID == "" || a.WarehouseID == warehouseID) && (status == "" || a.Status == status) {
+			if (warehouses == nil || slices.Contains(warehouses, a.WarehouseID)) && (status == "" || a.Status == status) {
 				list = append(list, *a)
 			}
 		}
@@ -1281,9 +1363,9 @@ func (r *InventoryRepository) ListStockAdjustments(ctx context.Context, warehous
 	`)
 	args := []any{}
 	idx := 1
-	if warehouseID != "" {
-		sb.WriteString(fmt.Sprintf(" AND warehouse_id = $%d", idx))
-		args = append(args, warehouseID)
+	if warehouses != nil {
+		sb.WriteString(fmt.Sprintf(" AND warehouse_id = ANY($%d::text[])", idx))
+		args = append(args, warehouses)
 		idx++
 	}
 	if status != "" {
