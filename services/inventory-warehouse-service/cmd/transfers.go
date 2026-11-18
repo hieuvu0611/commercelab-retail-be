@@ -132,7 +132,7 @@ func registerTransferRoutes(mux *http.ServeMux, repo *repository.InventoryReposi
 			dependency.WriteUnavailable(w, r, err)
 		case errors.Is(err, domain.ErrInsufficientStock):
 			response.Error(w, r, http.StatusConflict, "INSUFFICIENT_STOCK", err.Error(), nil)
-		case errors.Is(err, domain.ErrTransferInvalidState):
+		case errors.Is(err, domain.ErrTransferInvalidState), errors.Is(err, domain.ErrTransferInsufficientInTransit):
 			response.Error(w, r, http.StatusConflict, "TRANSFER_INVALID_STATE", err.Error(), nil)
 		case err != nil:
 			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)
@@ -169,7 +169,7 @@ func registerTransferRoutes(mux *http.ServeMux, repo *repository.InventoryReposi
 			dependency.WriteUnavailable(w, r, err)
 		case errors.Is(err, domain.ErrTransferReceiveMath), errors.Is(err, domain.ErrTransferInvalidInput):
 			validationError(w, r, err.Error())
-		case errors.Is(err, domain.ErrTransferInvalidState):
+		case errors.Is(err, domain.ErrTransferInvalidState), errors.Is(err, domain.ErrTransferInsufficientInTransit):
 			response.Error(w, r, http.StatusConflict, "TRANSFER_INVALID_STATE", err.Error(), nil)
 		case err != nil:
 			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error(), nil)

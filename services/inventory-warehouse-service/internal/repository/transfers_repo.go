@@ -423,7 +423,7 @@ func (r *InventoryRepository) ReceiveTransfer(ctx context.Context, transferID, a
 		if recLine.DamagedQty > 0 || recLine.MissingQty > 0 {
 			hasDiscrepancy = true
 		}
-		if _, err := tx.Exec(ctx, `
+		stockTag, err := tx.Exec(ctx, `
 			UPDATE inventory.stock_items
 			SET in_transit = in_transit - $1,
 			    on_hand = on_hand + $2,
@@ -431,15 +431,23 @@ func (r *InventoryRepository) ReceiveTransfer(ctx context.Context, transferID, a
 			    version = version + 1,
 			    updated_at = NOW()
 			WHERE sku_id = $4 AND warehouse_id = $5 AND in_transit >= $1
-		`, it.Quantity, recLine.ReceivedGoodQty+recLine.DamagedQty, recLine.DamagedQty, it.SkuID, toWH); err != nil {
+		`, it.Quantity, recLine.ReceivedGoodQty+recLine.DamagedQty, recLine.DamagedQty, it.SkuID, toWH)
+		if err != nil {
 			return nil, false, dependency.Wrap(err)
 		}
-		if _, err := tx.Exec(ctx, `
+		if stockTag.RowsAffected() != 1 {
+			return nil, false, domain.ErrTransferInsufficientInTransit
+		}
+		itemTag, err := tx.Exec(ctx, `
 			UPDATE inventory.warehouse_transfer_items
 			SET received_good_qty = $1, damaged_qty = $2, missing_qty = $3
 			WHERE transfer_id = $4 AND sku_id = $5
-		`, recLine.ReceivedGoodQty, recLine.DamagedQty, recLine.MissingQty, transferID, it.SkuID); err != nil {
+		`, recLine.ReceivedGoodQty, recLine.DamagedQty, recLine.MissingQty, transferID, it.SkuID)
+		if err != nil {
 			return nil, false, dependency.Wrap(err)
+		}
+		if itemTag.RowsAffected() != 1 {
+			return nil, false, domain.ErrTransferInvalidState
 		}
 		if recLine.ReceivedGoodQty > 0 {
 			if err := insertMovement(ctx, tx, domain.Movement{

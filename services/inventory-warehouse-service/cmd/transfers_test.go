@@ -145,3 +145,35 @@ func TestInterWarehouseTransferLifecycleAndSC09Discrepancy(t *testing.T) {
 		t.Fatalf("expected HN onHand=8, inTransit=0, got %+v", stHN)
 	}
 }
+
+func TestTransferInvalidStateReturnsConflict(t *testing.T) {
+	authtest.Configure(t)
+	repo := repository.NewInventoryRepository(nil)
+	srv := newTestServer(repo, false)
+	hcmMgr := auth.Identity{UserID: "staff-whm-hcm", Roles: []string{"WAREHOUSE_MGR"}, WarehouseScopes: []string{"WH-HCM-01"}}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/inventory/transfers",
+		strings.NewReader(`{"fromWarehouseId":"WH-HCM-01","toWarehouseId":"WH-HN-01","notes":"Un-dispatched","items":[{"skuId":"SKU-BALO-BLACK-20L","quantity":1}]}`))
+	createReq.Header.Set("Authorization", bearerFor(t, hcmMgr))
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	srv.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create transfer failed: %d %s", createRec.Code, createRec.Body.String())
+	}
+	var createResp struct {
+		Data domain.WarehouseTransfer `json:"data"`
+	}
+	_ = json.Unmarshal(createRec.Body.Bytes(), &createResp)
+
+	// Attempting to receive before dispatch must return 409 TRANSFER_INVALID_STATE.
+	recReq := httptest.NewRequest(http.MethodPost, "/api/v1/admin/inventory/transfers/"+createResp.Data.TransferID+"/receive",
+		strings.NewReader(`{"lines":[{"skuId":"SKU-BALO-BLACK-20L","receivedGoodQty":1,"damagedQty":0,"missingQty":0}]}`))
+	recReq.Header.Set("Authorization", bearerFor(t, hnStaff))
+	recReq.Header.Set("Content-Type", "application/json")
+	recRec := httptest.NewRecorder()
+	srv.ServeHTTP(recRec, recReq)
+	if recRec.Code != http.StatusConflict {
+		t.Fatalf("expected 409 for receiving non-in-transit transfer, got %d: %s", recRec.Code, recRec.Body.String())
+	}
+}

@@ -18,6 +18,7 @@ var (
 	ErrTransferInvalidState  = errors.New("warehouse transfer is not in a valid state for this action")
 	ErrTransferInvalidInput  = errors.New("invalid warehouse transfer input")
 	ErrTransferReceiveMath   = errors.New("received good + damaged + missing must equal dispatched quantity")
+	ErrTransferInsufficientInTransit = errors.New("insufficient in-transit stock or missing destination stock row")
 )
 
 type TransferItem struct {

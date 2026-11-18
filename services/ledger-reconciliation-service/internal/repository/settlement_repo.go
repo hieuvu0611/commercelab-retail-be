@@ -291,7 +291,7 @@ func (r *SettlementRepository) UpdateBatchStatus(ctx context.Context, batchID st
 }
 
 // MatchBatch processes lines in a settlement batch, evaluates against expected 1% fee,
-// updates line statuses, and records double-entry ledger postings via ledgerRepo.
+// updates line statuses, and records double-entry ledger postings atomically within a DB transaction.
 func (r *SettlementRepository) MatchBatch(
 	ctx context.Context,
 	batchID string,
@@ -317,6 +317,81 @@ func (r *SettlementRepository) MatchBatch(
 	hasDiscrepancy := false
 	entriesCreated := 0
 
+	if r.pool == nil {
+		for _, line := range lines {
+			res := domain.EvaluateSettlementLine(line, 1) // 1% simulated gateway fee
+			summary.TotalGrossVND += res.GrossAmountVND
+			summary.TotalFeeVND += res.CalculatedFeeVND
+			summary.TotalNetVND += res.ActualPayoutVND
+			summary.TotalDiscrepancyVND += res.DiscrepancyVND
+
+			if res.Status == "MATCHED" {
+				summary.MatchedLines++
+			} else {
+				summary.DiscrepancyLines++
+				hasDiscrepancy = true
+
+				if caseRepo != nil {
+					now := time.Now().UTC()
+					if err := caseRepo.CreateCase(ctx, domain.ReconciliationCase{
+						CaseID:            fmt.Sprintf("case_%s_%d", batchID, line.LineNumber),
+						BatchID:           batchID,
+						LineNumber:        line.LineNumber,
+						OrderID:           line.OrderID,
+						TransactionRef:    line.TransactionRef,
+						ExpectedPayoutVND: res.ExpectedPayoutVND,
+						ActualPayoutVND:   res.ActualPayoutVND,
+						DiscrepancyVND:    res.DiscrepancyVND,
+						CauseCategory:     "UNCLASSIFIED",
+						Status:            "OPEN",
+						CreatedAt:         now,
+						UpdatedAt:         now,
+					}); err != nil {
+						return domain.BatchMatchSummary{}, err
+					}
+				}
+			}
+
+			summary.Results = append(summary.Results, res)
+
+			if err := r.UpdateLineMatchStatus(ctx, batchID, line.LineNumber, res.Status); err != nil {
+				return domain.BatchMatchSummary{}, err
+			}
+
+			if ledgerRepo != nil {
+				entryID := fmt.Sprintf("je_match_%s_%d", batchID, line.LineNumber)
+				entry, err := domain.NewSettlementMatchedEntry(
+					entryID, line.OrderID, batchID,
+					line.GrossAmountVND, res.CalculatedFeeVND, line.NetAmountVND, res.DiscrepancyVND, actor,
+				)
+				if err != nil {
+					return domain.BatchMatchSummary{}, err
+				}
+				if _, err := ledgerRepo.RecordJournalEntry(ctx, entry); err != nil {
+					return domain.BatchMatchSummary{}, err
+				}
+				entriesCreated++
+			}
+		}
+
+		summary.JournalEntriesCreated = entriesCreated
+		batchStatus := "RECONCILED"
+		if hasDiscrepancy {
+			batchStatus = "PARTIALLY_RECONCILED"
+		}
+		summary.BatchStatus = batchStatus
+		if err := r.UpdateBatchStatus(ctx, batchID, batchStatus); err != nil {
+			return domain.BatchMatchSummary{}, err
+		}
+		return summary, nil
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return domain.BatchMatchSummary{}, dependency.Wrap(err)
+	}
+	defer tx.Rollback(ctx)
+
 	for _, line := range lines {
 		res := domain.EvaluateSettlementLine(line, 1) // 1% simulated gateway fee
 		summary.TotalGrossVND += res.GrossAmountVND
@@ -330,12 +405,10 @@ func (r *SettlementRepository) MatchBatch(
 			summary.DiscrepancyLines++
 			hasDiscrepancy = true
 
-			// Create or record open discrepancy case
 			if caseRepo != nil {
-				caseID := fmt.Sprintf("case_%s_%d", batchID, line.LineNumber)
 				now := time.Now().UTC()
-				_ = caseRepo.CreateCase(ctx, domain.ReconciliationCase{
-					CaseID:            caseID,
+				if err := createCaseWith(ctx, tx, domain.ReconciliationCase{
+					CaseID:            fmt.Sprintf("case_%s_%d", batchID, line.LineNumber),
 					BatchID:           batchID,
 					LineNumber:        line.LineNumber,
 					OrderID:           line.OrderID,
@@ -347,45 +420,59 @@ func (r *SettlementRepository) MatchBatch(
 					Status:            "OPEN",
 					CreatedAt:         now,
 					UpdatedAt:         now,
-				})
+				}); err != nil {
+					return domain.BatchMatchSummary{}, err
+				}
 			}
 		}
 
 		summary.Results = append(summary.Results, res)
 
-		// Update line status in database
-		_ = r.UpdateLineMatchStatus(ctx, batchID, line.LineNumber, res.Status)
+		if _, err := tx.Exec(ctx, `
+			UPDATE settlement_lines SET match_status = $3
+			WHERE batch_id = $1 AND line_number = $2
+		`, batchID, line.LineNumber, res.Status); err != nil {
+			return domain.BatchMatchSummary{}, dependency.Wrap(err)
+		}
 
-		// Post double-entry journal entry if ledgerRepo is provided
 		if ledgerRepo != nil {
 			entryID := fmt.Sprintf("je_match_%s_%d", batchID, line.LineNumber)
 			entry, err := domain.NewSettlementMatchedEntry(
-				entryID,
-				line.OrderID,
-				batchID,
-				line.GrossAmountVND,
-				res.CalculatedFeeVND,
-				line.NetAmountVND,
-				res.DiscrepancyVND,
-				actor,
+				entryID, line.OrderID, batchID,
+				line.GrossAmountVND, res.CalculatedFeeVND, line.NetAmountVND, res.DiscrepancyVND, actor,
 			)
-			if err == nil {
-				_, postErr := ledgerRepo.RecordJournalEntry(ctx, entry)
-				if postErr == nil {
-					entriesCreated++
-				}
+			if err != nil {
+				return domain.BatchMatchSummary{}, err
 			}
+			now := ledgerRepo.now().UTC()
+			if entry.CreatedAt.IsZero() {
+				entry.CreatedAt = now
+			}
+			if entry.PostedAt.IsZero() {
+				entry.PostedAt = now
+			}
+			if err := domain.ValidateJournalEntry(entry); err != nil {
+				return domain.BatchMatchSummary{}, err
+			}
+			if err := recordJournalEntryTx(ctx, tx, entry); err != nil {
+				return domain.BatchMatchSummary{}, err
+			}
+			entriesCreated++
 		}
 	}
 
 	summary.JournalEntriesCreated = entriesCreated
-
 	batchStatus := "RECONCILED"
 	if hasDiscrepancy {
 		batchStatus = "PARTIALLY_RECONCILED"
 	}
 	summary.BatchStatus = batchStatus
-	_ = r.UpdateBatchStatus(ctx, batchID, batchStatus)
+	if _, err := tx.Exec(ctx, `UPDATE settlement_batches SET status = $2 WHERE batch_id = $1`, batchID, batchStatus); err != nil {
+		return domain.BatchMatchSummary{}, dependency.Wrap(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.BatchMatchSummary{}, dependency.Wrap(err)
+	}
 
 	return summary, nil
 }

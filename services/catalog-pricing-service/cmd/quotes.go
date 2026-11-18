@@ -42,17 +42,30 @@ type quoteStore interface {
 	GetQuoteByID(ctx context.Context, quoteID string) (*domain.Quote, error)
 }
 
+type productLookup interface {
+	GetProduct(ctx context.Context, id string) (domain.ProductView, error)
+}
+
+type productCategoryLookup interface {
+	GetProductCategoryID(ctx context.Context, productID string) (string, error)
+}
+
 type quoteAPI struct {
 	store     quoteStore
 	cart      *cart.Service
 	pricer    cart.Pricer
 	vouchers  VoucherChecker
 	addresses AddressChecker
+	products  productLookup
 	now       func() time.Time
 }
 
-func registerQuoteRoutes(mux *http.ServeMux, store quoteStore, carts *cart.Service, pricer cart.Pricer, vouchers VoucherChecker, addresses AddressChecker) {
-	api := &quoteAPI{store: store, cart: carts, pricer: pricer, vouchers: vouchers, addresses: addresses, now: func() time.Time { return time.Now().UTC() }}
+func registerQuoteRoutes(mux *http.ServeMux, store quoteStore, carts *cart.Service, pricer cart.Pricer, vouchers VoucherChecker, addresses AddressChecker, products ...productLookup) {
+	var pl productLookup
+	if len(products) > 0 {
+		pl = products[0]
+	}
+	api := &quoteAPI{store: store, cart: carts, pricer: pricer, vouchers: vouchers, addresses: addresses, products: pl, now: func() time.Time { return time.Now().UTC() }}
 	mux.Handle("POST /api/v1/quotes", auth.RequireAuth(http.HandlerFunc(api.create)))
 	mux.Handle("GET /api/v1/quotes/{quoteId}", auth.RequireAuth(http.HandlerFunc(api.get)))
 }
@@ -99,7 +112,8 @@ func (a *quoteAPI) create(w http.ResponseWriter, r *http.Request) {
 	if eval, ok := a.vouchers.(PromotionEvaluator); ok {
 		evalLines := make([]peer.PromoEvalLine, len(lines))
 		for i, l := range lines {
-			evalLines[i] = peer.PromoEvalLine{SkuID: l.SkuID, Quantity: l.Quantity, UnitPriceVND: l.UnitPriceVND}
+			catID := a.categoryForSku(r.Context(), l.SkuID)
+			evalLines[i] = peer.PromoEvalLine{SkuID: l.SkuID, CategoryID: catID, Quantity: l.Quantity, UnitPriceVND: l.UnitPriceVND}
 		}
 		if res, err := eval.EvaluatePromotions(r.Context(), bearer, body.CampaignIDs, evalLines); err != nil {
 			if len(body.CampaignIDs) > 0 {
@@ -242,6 +256,24 @@ func (a *quoteAPI) staleSkus(ctx context.Context, q *domain.Quote) ([]string, er
 		}
 	}
 	return stale, nil
+}
+
+func (a *quoteAPI) categoryForSku(ctx context.Context, skuID string) string {
+	sp, err := a.pricer.GetSkuPrice(ctx, skuID)
+	if err != nil || sp.ProductID == "" {
+		return ""
+	}
+	if a.products != nil {
+		if pv, err := a.products.GetProduct(ctx, sp.ProductID); err == nil && pv.PrimaryCategoryID != "" {
+			return pv.PrimaryCategoryID
+		}
+	}
+	if cl, ok := a.store.(productCategoryLookup); ok {
+		if catID, err := cl.GetProductCategoryID(ctx, sp.ProductID); err == nil && catID != "" {
+			return catID
+		}
+	}
+	return ""
 }
 
 func newQuoteID() string {

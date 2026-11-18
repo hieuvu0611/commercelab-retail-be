@@ -11,6 +11,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/domain"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -39,21 +40,12 @@ func NewCaseRepository(pool *pgxpool.Pool) *CaseRepository {
 	}
 }
 
-// CreateCase persists a new reconciliation case (or ignores if already exists)
-func (r *CaseRepository) CreateCase(ctx context.Context, c domain.ReconciliationCase) error {
-	if r.pool == nil {
-		r.mu.Lock()
-		defer r.mu.Unlock()
+type caseExecer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
-		if _, exists := r.cases[c.CaseID]; exists {
-			return nil
-		}
-		cp := c
-		r.cases[c.CaseID] = &cp
-		return nil
-	}
-
-	_, err := r.pool.Exec(ctx, `
+func createCaseWith(ctx context.Context, exec caseExecer, c domain.ReconciliationCase) error {
+	_, err := exec.Exec(ctx, `
 		INSERT INTO ledger.reconciliation_cases (
 			case_id, batch_id, line_number, order_id, transaction_ref,
 			expected_payout_vnd, actual_payout_vnd, discrepancy_vnd,
@@ -69,6 +61,23 @@ func (r *CaseRepository) CreateCase(ctx context.Context, c domain.Reconciliation
 		return dependency.Wrap(err)
 	}
 	return nil
+}
+
+// CreateCase persists a new reconciliation case (or ignores if already exists)
+func (r *CaseRepository) CreateCase(ctx context.Context, c domain.ReconciliationCase) error {
+	if r.pool == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+
+		if _, exists := r.cases[c.CaseID]; exists {
+			return nil
+		}
+		cp := c
+		r.cases[c.CaseID] = &cp
+		return nil
+	}
+
+	return createCaseWith(ctx, r.pool, c)
 }
 
 // ListCases returns cases matching filter, sorted by created_at DESC

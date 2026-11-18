@@ -117,4 +117,21 @@ func TestCanApprovePO_P10_Thresholds(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
+
+	t.Run("high-impact PO and adjustment approved by OPS_MGR", func(t *testing.T) {
+		poHigh := poBase
+		poHigh.TotalAmountVND = 50_000_000
+		if err := CanApprovePO(poHigh, "checker-01", []string{"OPS_MGR"}); err != nil {
+			t.Errorf("unexpected PO error for OPS_MGR: %v", err)
+		}
+		adj := StockAdjustment{
+			MakerID:       "maker-01",
+			Status:        "PENDING_APPROVAL",
+			DiffQty:       -10,
+			DiffAmountVND: 3_000_000,
+		}
+		if err := CanApproveAdjustment(adj, "checker-01", []string{"OPS_MGR"}); err != nil {
+			t.Errorf("unexpected adjustment error for OPS_MGR: %v", err)
+		}
+	})
 }

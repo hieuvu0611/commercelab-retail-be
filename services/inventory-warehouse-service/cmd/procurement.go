@@ -29,13 +29,13 @@ func extractRoles(claims *auth.Claims) []string {
 // registerProcurementRoutes adds suppliers, PR, and PO management APIs (B02 Stage 2, P01, P10, SC09).
 func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRepository) {
 	staffOrMgr := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "WAREHOUSE_MGR", "WAREHOUSE_STAFF", "OPS_DIRECTOR", "FINANCE_MGR", "ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "WAREHOUSE_MGR", "WAREHOUSE_STAFF", "OPS_MGR", "OPS_DIRECTOR", "FINANCE_MGR", "ADMIN")(h))
 	}
 	procurementCreator := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "WAREHOUSE_MGR", "ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "WAREHOUSE_MGR", "OPS_MGR", "ADMIN")(h))
 	}
 	approver := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "OPS_DIRECTOR", "FINANCE_MGR", "ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole("PROCUREMENT_MGR", "OPS_MGR", "OPS_DIRECTOR", "FINANCE_MGR", "ADMIN")(h))
 	}
 
 	// GET /api/v1/admin/procurement/suppliers
@@ -512,7 +512,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 
 	// POST /api/v1/admin/inventory/adjustments/{adjustmentId}/decide
 	adjustmentApprover := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_MGR", "SUPPLY_CHAIN_MGR", "FINANCE_MGR", "ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_MGR", "SUPPLY_CHAIN_MGR", "OPS_MGR", "FINANCE_MGR", "ADMIN")(h))
 	}
 	mux.Handle("POST /api/v1/admin/inventory/adjustments/{adjustmentId}/decide", adjustmentApprover(func(w http.ResponseWriter, r *http.Request) {
 		adjustmentID := r.PathValue("adjustmentId")

@@ -111,12 +111,28 @@ func (r *LedgerRepository) RecordJournalEntry(ctx context.Context, entry domain.
 	}
 	defer tx.Rollback(ctx)
 
-	_, err = tx.Exec(ctx, `
+	if err := recordJournalEntryTx(ctx, tx, entry); err != nil {
+		return domain.JournalEntry{}, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.JournalEntry{}, dependency.Wrap(err)
+	}
+
+	return entry, nil
+}
+
+func recordJournalEntryTx(ctx context.Context, tx pgx.Tx, entry domain.JournalEntry) error {
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO journal_entries (entry_id, event_type, reference_id, description, posted_at, created_by, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (entry_id) DO NOTHING
 	`, entry.EntryID, entry.EventType, entry.ReferenceID, entry.Description, entry.PostedAt, entry.CreatedBy, entry.CreatedAt)
 	if err != nil {
-		return domain.JournalEntry{}, dependency.Wrap(err)
+		return dependency.Wrap(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
 	}
 
 	for _, p := range entry.Postings {
@@ -125,7 +141,7 @@ func (r *LedgerRepository) RecordJournalEntry(ctx context.Context, entry domain.
 			VALUES ($1, $2, $3, $4, $5)
 		`, entry.EntryID, p.AccountCode, p.Direction, p.AmountVND, entry.CreatedAt)
 		if err != nil {
-			return domain.JournalEntry{}, dependency.Wrap(err)
+			return dependency.Wrap(err)
 		}
 
 		// Update account balance based on account type
@@ -147,18 +163,13 @@ func (r *LedgerRepository) RecordJournalEntry(ctx context.Context, entry domain.
 		}
 		res, err := tx.Exec(ctx, deltaSQL, p.AccountCode, p.AmountVND)
 		if err != nil {
-			return domain.JournalEntry{}, dependency.Wrap(err)
+			return dependency.Wrap(err)
 		}
 		if res.RowsAffected() == 0 {
-			return domain.JournalEntry{}, fmt.Errorf("%w: %s", ErrAccountNotFound, p.AccountCode)
+			return fmt.Errorf("%w: %s", ErrAccountNotFound, p.AccountCode)
 		}
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return domain.JournalEntry{}, dependency.Wrap(err)
-	}
-
-	return entry, nil
+	return nil
 }
 
 // ListJournalEntries returns all journal entries matching optional referenceID filter

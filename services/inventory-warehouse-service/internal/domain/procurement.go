@@ -107,7 +107,7 @@ func CanApprovePO(po PurchaseOrder, approverID string, approverRoles []string) e
 	}
 
 	isAdmin := hasRole("ADMIN")
-	isDirector := hasRole("OPS_DIRECTOR") || hasRole("FINANCE_MGR")
+	isDirector := hasRole("OPS_DIRECTOR") || hasRole("OPS_MGR") || hasRole("FINANCE_MGR")
 	isProcMgr := hasRole("PROCUREMENT_MGR")
 
 	if po.TotalAmountVND <= POProcurementManagerLimitVND {
@@ -252,7 +252,7 @@ func CanApproveAdjustment(adj StockAdjustment, approverID string, approverRoles 
 	}
 
 	isAdmin := hasRole("ADMIN")
-	isSupplyChain := hasRole("SUPPLY_CHAIN_MGR") || hasRole("FINANCE_MGR")
+	isSupplyChain := hasRole("SUPPLY_CHAIN_MGR") || hasRole("OPS_MGR") || hasRole("FINANCE_MGR")
 	isWarehouseMgr := hasRole("WAREHOUSE_MGR")
 
 	absQty := adj.DiffQty

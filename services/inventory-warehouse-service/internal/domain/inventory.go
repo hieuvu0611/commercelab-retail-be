@@ -422,7 +422,7 @@ func (e *LedgerEngine) ReceiveTransfer(toWH string, dispatched map[string]int64,
 	for _, line := range lines {
 		qty := dispatched[line.SkuID]
 		if st, ok := e.stocks[stockKey{line.SkuID, toWH}]; !ok || st.InTransit < qty {
-			return ErrTransferInvalidState
+			return ErrTransferInsufficientInTransit
 		}
 	}
 	for _, line := range lines {

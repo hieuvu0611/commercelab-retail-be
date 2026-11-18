@@ -101,7 +101,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 		}, nil)
 	})
 
-	registerQuoteRoutes(mux, repo, cartSvc, deps.Pricer, deps.Vouchers, deps.Addresses)
+	registerQuoteRoutes(mux, repo, cartSvc, deps.Pricer, deps.Vouchers, deps.Addresses, deps.Products)
 
 	return middleware.Chain(mux)
 }

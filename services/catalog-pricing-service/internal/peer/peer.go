@@ -82,6 +82,7 @@ func (v *Vouchers) Eligibility(ctx context.Context, bearer, code string) (Eligib
 
 type PromoEvalLine struct {
 	SkuID        string `json:"skuId"`
+	CategoryID   string `json:"categoryId,omitempty"`
 	Quantity     int64  `json:"quantity"`
 	UnitPriceVND int64  `json:"unitPriceVnd"`
 }
