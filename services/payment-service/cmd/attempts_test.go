@@ -475,13 +475,25 @@ func TestCODCollectAndCancelAllowStaffBearerAndAccumulateMultiParcel(t *testing.
 	}
 	// Parcel 1 collects 270,685 -> stays COD_PENDING while capturedAmountVnd tracks 270,685.
 	r1 := f.do(http.MethodPost, "/api/v1/payments/orders/O-COD-1/cod-collect",
-		map[string]string{"Authorization": "Bearer " + whStaff}, `{"collectedAmount":270685}`)
+		map[string]string{"Authorization": "Bearer " + whStaff}, `{"collectedAmount":270685,"shipmentId":"SHP-O-COD-1-1","totalParcels":2}`)
 	if got := decode[attemptResp](t, r1); r1.Code != http.StatusOK || got.Data.Status != "COD_PENDING" || got.Data.CapturedAmountVND != 270685 {
 		t.Fatalf("parcel 1 cod-collect = %d %+v", r1.Code, got)
 	}
+	missingKey := f.do(http.MethodPost, "/api/v1/payments/orders/O-COD-1/cod-collect",
+		map[string]string{"Authorization": "Bearer " + whStaff}, `{"collectedAmount":270685}`)
+	if missingKey.Code != http.StatusBadRequest {
+		t.Fatalf("collection without stable key = %d", missingKey.Code)
+	}
+	replay := f.do(http.MethodPost, "/api/v1/payments/orders/O-COD-1/cod-collect",
+		map[string]string{"Authorization": "Bearer " + whStaff},
+		`{"eventId":"different-event","collectedAmount":270685,"shipmentId":"SHP-O-COD-1-1","totalParcels":2}`)
+	if got := decode[attemptResp](t, replay); replay.Code != http.StatusOK || got.Data.CapturedAmountVND != 270685 {
+		t.Fatalf("parcel 1 replay = %d %+v", replay.Code, got)
+	}
+
 	// Parcel 2 collects 489,315 -> total reaches 760,000 and transitions to COLLECTED.
 	r2 := f.do(http.MethodPost, "/api/v1/payments/orders/O-COD-1/cod-collect",
-		map[string]string{"Authorization": "Bearer " + whStaff}, `{"collectedAmount":489315}`)
+		map[string]string{"Authorization": "Bearer " + whStaff}, `{"collectedAmount":489315,"shipmentId":"SHP-O-COD-1-2","totalParcels":2}`)
 	if got := decode[attemptResp](t, r2); r2.Code != http.StatusOK || got.Data.Status != "COLLECTED" || got.Data.CapturedAmountVND != 760000 {
 		t.Fatalf("parcel 2 cod-collect = %d %+v", r2.Code, got)
 	}

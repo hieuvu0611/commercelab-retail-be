@@ -121,6 +121,9 @@ func Apply(a Attempt, o Outcome, amountVND int64, now time.Time) (Attempt, Chang
 			}
 			return a, Change{CapturedVND: delta}, nil
 		case OutcomeFailed, OutcomeCODCancelled:
+			if a.CapturedAmountVND > 0 {
+				return a, Change{}, ErrCODAlreadyCollected
+			}
 			a.Status, a.OutcomeAt = StatusCODCancelled, &now
 			return a, Change{}, nil
 		default:
@@ -209,6 +212,9 @@ func CloseFor(a Attempt, now time.Time, reason string) (Attempt, Change, error) 
 		a.Status, a.OutcomeAt = StatusExpired30m, &now
 		return a, Change{}, nil
 	case StatusCODPending:
+		if a.CapturedAmountVND > 0 {
+			return a, Change{}, ErrCODAlreadyCollected
+		}
 		a.Status, a.OutcomeAt = StatusCODCancelled, &now
 		return a, Change{}, nil
 	case StatusCaptured:

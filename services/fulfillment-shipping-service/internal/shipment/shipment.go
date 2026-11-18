@@ -50,21 +50,22 @@ type Item struct {
 
 // Shipment is one parcel of an order. Version grows with every change (optimistic locking).
 type Shipment struct {
-	ShipmentID   string     `json:"shipmentId"`
-	OrderID      string     `json:"orderId"`
-	UserID       string     `json:"-"`
+	ShipmentID         string     `json:"shipmentId"`
+	OrderID            string     `json:"orderId"`
+	UserID             string     `json:"-"`
 	WarehouseID        string     `json:"warehouseId"`
 	ParcelIndex        int        `json:"parcelIndex,omitempty"`
 	TotalParcels       int        `json:"totalParcels,omitempty"`
 	PaymentMethod      string     `json:"paymentMethod,omitempty"`
 	CodAmountToCollect int64      `json:"codAmountToCollect,omitempty"`
 	Status             Status     `json:"status"`
-	Items        []Item     `json:"items"`
-	Version      int64      `json:"version"`
-	HandedOverAt *time.Time `json:"handedOverAt,omitempty"`
-	DeliveredAt  *time.Time `json:"deliveredAt,omitempty"`
+	Items              []Item     `json:"items"`
+	Version            int64      `json:"version"`
+	HandedOverAt       *time.Time `json:"handedOverAt,omitempty"`
+	DeliveredAt        *time.Time `json:"deliveredAt,omitempty"`
 	// StopRequestedAt is when the customer's cancellation asked the warehouse to stop (SC06); nil when nobody did.
 	StopRequestedAt *time.Time `json:"stopRequestedAt,omitempty"`
+	StopConfirmedAt *time.Time `json:"-"`
 	// ReturnWindowEndsAt is DeliveredAt plus ReturnWindow (P07); nil until delivered.
 	ReturnWindowEndsAt *time.Time `json:"returnWindowEndsAt,omitempty"`
 	FailureReason      string     `json:"failureReason,omitempty"`
@@ -183,4 +184,15 @@ type Store interface {
 // MultiParcelStore is an optional extension of Store returning all parcels of an order.
 type MultiParcelStore interface {
 	ListByOrder(ctx context.Context, orderID string) ([]Shipment, error)
+}
+
+// StopUpdate is one parcel transition in an atomic split-order stop.
+type StopUpdate struct {
+	Shipment        Shipment
+	ExpectedVersion int64
+	Events          []events.DomainEvent
+}
+
+type SplitStopStore interface {
+	SaveStopUpdates(ctx context.Context, updates []StopUpdate) error
 }

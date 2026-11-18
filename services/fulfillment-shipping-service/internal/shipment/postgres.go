@@ -19,7 +19,7 @@ type PostgresStore struct{ pool *pgxpool.Pool }
 
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
-const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, parcel_index, total_parcels, payment_method, cod_amount_to_collect, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, stop_requested_at, created_at, updated_at`
+const shipmentColumns = `shipment_id, order_id, user_id, warehouse_id, parcel_index, total_parcels, payment_method, cod_amount_to_collect, status, version, handed_over_at, delivered_at, return_window_ends_at, failure_reason, stop_requested_at, stop_confirmed_at, created_at, updated_at`
 
 type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -29,7 +29,7 @@ type querier interface {
 func load(ctx context.Context, q querier, where string, arg string) (Shipment, error) {
 	var s Shipment
 	err := q.QueryRow(ctx, `SELECT `+shipmentColumns+` FROM fulfillment.shipments WHERE `+where+` = $1 ORDER BY parcel_index, shipment_id LIMIT 1`, arg).
-		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.ParcelIndex, &s.TotalParcels, &s.PaymentMethod, &s.CodAmountToCollect, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.StopRequestedAt, &s.CreatedAt, &s.UpdatedAt)
+		Scan(&s.ShipmentID, &s.OrderID, &s.UserID, &s.WarehouseID, &s.ParcelIndex, &s.TotalParcels, &s.PaymentMethod, &s.CodAmountToCollect, &s.Status, &s.Version, &s.HandedOverAt, &s.DeliveredAt, &s.ReturnWindowEndsAt, &s.FailureReason, &s.StopRequestedAt, &s.StopConfirmedAt, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Shipment{}, ErrNotFound
 	}
@@ -193,12 +193,33 @@ func (p *PostgresStore) SaveCarrierEvent(ctx context.Context, s Shipment, expect
 }
 
 func (p *PostgresStore) SaveWith(ctx context.Context, s Shipment, expectedVersion int64, o SaveOptions) error {
-	carrierEventID, ev := o.CarrierEventID, o.Events
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return dependency.Wrap(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := saveShipmentWith(ctx, tx, s, expectedVersion, o); err != nil {
+		return err
+	}
+	return dependency.Wrap(tx.Commit(ctx))
+}
+
+func (p *PostgresStore) SaveStopUpdates(ctx context.Context, updates []StopUpdate) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, update := range updates {
+		if err := saveShipmentWith(ctx, tx, update.Shipment, update.ExpectedVersion, SaveOptions{Events: update.Events}); err != nil {
+			return err
+		}
+	}
+	return dependency.Wrap(tx.Commit(ctx))
+}
+
+func saveShipmentWith(ctx context.Context, tx pgx.Tx, s Shipment, expectedVersion int64, o SaveOptions) error {
+	carrierEventID, ev := o.CarrierEventID, o.Events
 	if carrierEventID != "" {
 		// The primary key makes a concurrent copy of the same notice wait here and then see 0 rows.
 		tag, err := tx.Exec(ctx, `INSERT INTO fulfillment.carrier_events (event_id, shipment_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, carrierEventID, s.ShipmentID)
@@ -210,8 +231,8 @@ func (p *PostgresStore) SaveWith(ctx context.Context, s Shipment, expectedVersio
 		}
 	}
 	tag, err := tx.Exec(ctx, `UPDATE fulfillment.shipments SET status = $3, version = $4, updated_at = $5, handed_over_at = $6,
-		delivered_at = $7, return_window_ends_at = $8, failure_reason = $9, stop_requested_at = $10 WHERE shipment_id = $1 AND version = $2`,
-		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt, s.HandedOverAt, s.DeliveredAt, s.ReturnWindowEndsAt, s.FailureReason, s.StopRequestedAt)
+		delivered_at = $7, return_window_ends_at = $8, failure_reason = $9, stop_requested_at = $10, stop_confirmed_at = $11 WHERE shipment_id = $1 AND version = $2`,
+		s.ShipmentID, expectedVersion, s.Status, s.Version, s.UpdatedAt, s.HandedOverAt, s.DeliveredAt, s.ReturnWindowEndsAt, s.FailureReason, s.StopRequestedAt, s.StopConfirmedAt)
 	if err != nil {
 		return dependency.Wrap(err)
 	}
@@ -243,7 +264,7 @@ func (p *PostgresStore) SaveWith(ctx context.Context, s Shipment, expectedVersio
 			return dependency.Wrap(err)
 		}
 	}
-	return dependency.Wrap(tx.Commit(ctx))
+	return nil
 }
 
 func (p *PostgresStore) ListCases(ctx context.Context, f CaseFilter) ([]Case, int, error) {

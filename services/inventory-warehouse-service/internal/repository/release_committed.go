@@ -101,11 +101,13 @@ func (r *InventoryRepository) releaseCommittedInMemory(orderID, warehouseID, act
 		return &cp, nil
 	}
 	for _, rec := range matched {
+		if rec.Status != "RELEASED" && rec.Status != "COMMITTED" {
+			return nil, domain.ErrInvalidReservationState
+		}
+	}
+	for _, rec := range matched {
 		if rec.Status == "RELEASED" {
 			continue
-		}
-		if rec.Status != "COMMITTED" {
-			return nil, domain.ErrInvalidReservationState
 		}
 		if err := r.engine.ReleaseCommitted(rec.WarehouseID, rec.Lines); err != nil {
 			return nil, err

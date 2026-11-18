@@ -140,6 +140,57 @@ func (s *PostgresStore) Apply(ctx context.Context, attemptID string, o Outcome, 
 	return next, ch, dependency.Wrap(tx.Commit(ctx))
 }
 
+func (s *PostgresStore) ApplyCODParcel(ctx context.Context, attemptID string, parcel CODParcel) (Attempt, Change, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Attempt{}, Change{}, dependency.Wrap(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	cur, err := scanAttempt(tx.QueryRow(ctx, `SELECT `+attemptColumns+` FROM payments.payment_attempts WHERE attempt_id = $1 FOR UPDATE`, attemptID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Attempt{}, Change{}, ErrNotFound
+	}
+	if err != nil {
+		return Attempt{}, Change{}, dependency.Wrap(err)
+	}
+	var recorded, total int
+	err = tx.QueryRow(ctx, `SELECT count(*), COALESCE(max(total_parcels), 0)
+		FROM payments.cod_parcel_outcomes WHERE attempt_id = $1`, attemptID).Scan(&recorded, &total)
+	if err != nil {
+		return cur, Change{}, dependency.Wrap(err)
+	}
+	if recorded != 0 && total != parcel.TotalParcels {
+		return cur, Change{}, ErrIdempotencyConflict
+	}
+	var previous *CODParcel
+	stored := CODParcel{ShipmentID: parcel.ShipmentID, TotalParcels: total}
+	err = tx.QueryRow(ctx, `SELECT collected, amount_vnd FROM payments.cod_parcel_outcomes
+		WHERE attempt_id = $1 AND shipment_id = $2`, attemptID, parcel.ShipmentID).Scan(&stored.Collected, &stored.AmountVND)
+	switch {
+	case err == nil:
+		previous = &stored
+	case errors.Is(err, pgx.ErrNoRows):
+		recorded++
+	default:
+		return cur, Change{}, dependency.Wrap(err)
+	}
+	next, change, err := applyCODParcel(cur, parcel, previous, recorded, s.now())
+	if err != nil || change.Replay {
+		return next, change, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO payments.cod_parcel_outcomes (attempt_id, shipment_id, total_parcels, collected, amount_vnd)
+		VALUES ($1, $2, $3, $4, $5) ON CONFLICT (attempt_id, shipment_id)
+		DO UPDATE SET collected = EXCLUDED.collected, amount_vnd = EXCLUDED.amount_vnd`,
+		attemptID, parcel.ShipmentID, parcel.TotalParcels, parcel.Collected, parcel.AmountVND); err != nil {
+		return cur, Change{}, dependency.Wrap(err)
+	}
+	if err := persist(ctx, tx, cur, next, change); err != nil {
+		return cur, Change{}, err
+	}
+	return next, change, dependency.Wrap(tx.Commit(ctx))
+}
+
 // Close implements Store.
 func (s *PostgresStore) Close(ctx context.Context, attemptID string) (Attempt, Change, error) {
 	return s.CloseFor(ctx, attemptID, ReasonLateCapture)

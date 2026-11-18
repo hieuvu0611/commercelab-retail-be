@@ -60,3 +60,29 @@ func (s Shipment) ConfirmStop(now time.Time) (Shipment, error) {
 	}
 	return s.with(StatusStoppedForCancel, append([]Item(nil), s.Items...), now), nil
 }
+
+// PrepareSplitStop records readiness without stopping the parcel or changing committed stock.
+func (s Shipment) PrepareSplitStop(now time.Time, confirm bool) Shipment {
+	pending := s.Status == StatusPendingPick || s.Status == StatusPickBlocked
+	if s.StopRequestedAt != nil && (s.StopConfirmedAt != nil || (!pending && !confirm)) {
+		return s
+	}
+	at := now.UTC()
+	next := s.with(s.Status, s.Items, now)
+	if next.StopRequestedAt == nil {
+		next.StopRequestedAt = &at
+	}
+	if pending || confirm {
+		next.StopConfirmedAt = &at
+	}
+	return next
+}
+
+func (s Shipment) ClearSplitStop(now time.Time) Shipment {
+	if s.StopRequestedAt == nil && s.StopConfirmedAt == nil {
+		return s
+	}
+	next := s.with(s.Status, s.Items, now)
+	next.StopRequestedAt, next.StopConfirmedAt = nil, nil
+	return next
+}

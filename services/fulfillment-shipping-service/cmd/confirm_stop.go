@@ -33,6 +33,24 @@ func confirmStop(d Deps) func(http.ResponseWriter, *http.Request, shipment.Shipm
 		if !versionGuard(w, r, s, req.Version) {
 			return
 		}
+		if s.TotalParcels > 1 {
+			if _, err := s.ConfirmStop(d.now()); err != nil {
+				writeStepError(w, r, err)
+				return
+			}
+			next, outcome, err := stopSplitOrder(r, d, s.OrderID, s.ShipmentID)
+			switch {
+			case err != nil:
+				writeStoreError(w, r, err)
+			case outcome == shipment.StopTooLate:
+				writeStopStockError(w, r, inventory.ErrStockLeft)
+			case outcome == shipment.StopRequested:
+				response.JSON(w, http.StatusOK, "Stop recorded; waiting for remaining parcels", viewOf(next), nil)
+			default:
+				response.JSON(w, http.StatusOK, "Shipment stopped", viewOf(next), nil)
+			}
+			return
+		}
 		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		for attempt := 0; attempt < maxStopRetries; attempt++ {
 			next, err := s.ConfirmStop(d.now())

@@ -258,30 +258,31 @@ func (s *Service) closeLost(ctx context.Context, o orders.Order, from saga.State
 
 // recordCapture stores the captured and refundable amounts the report carries.
 func (s *Service) recordCapture(ctx context.Context, o orders.Order, r PaymentReport) (orders.Order, error) {
-	if r.Status == payCODPending && r.CapturedVND > 0 {
-		if err := s.Orders.RecordCapture(ctx, o.OrderID, r.CapturedVND, 0); err != nil {
-			return o, err
-		}
-		o.CapturedVND = r.CapturedVND
-		return o, nil
-	}
-	if r.Status == payCODCollected {
+	if r.Status == payCODPending || r.Status == payCODCollected {
 		captured := r.CapturedVND
-		if captured <= 0 {
+		if r.Status == payCODCollected && captured <= 0 {
 			captured = o.TotalPayableVND
 		}
-		if err := s.Orders.RecordRefund(ctx, o.OrderID, 0, 0, payCODCollected); err != nil {
-			return o, err
+		if captured > o.CapturedVND {
+			if err := s.Orders.RecordCapture(ctx, o.OrderID, captured, o.RefundPendingVND); err != nil {
+				return o, err
+			}
+			o.CapturedVND = captured
 		}
-		if err := s.Orders.RecordCapture(ctx, o.OrderID, captured, 0); err != nil {
-			return o, err
+		if r.Status == payCODCollected && o.PaymentStatus != payCODCollected &&
+			o.PaymentStatus != PayRefundPending && !refundSettled(o.PaymentStatus) {
+			if err := s.Orders.RecordRefund(ctx, o.OrderID, o.RefundedVND, o.RefundPendingVND, payCODCollected); err != nil {
+				return o, err
+			}
+			o.PaymentStatus = payCODCollected
 		}
-		o.PaymentStatus = payCODCollected
-		o.CapturedVND = captured
 		return o, nil
 	}
 	if r.Status == payCODCancelled {
-		if err := s.Orders.RecordRefund(ctx, o.OrderID, 0, 0, payCODCancelled); err != nil {
+		if o.CapturedVND > 0 {
+			return o, nil
+		}
+		if err := s.Orders.RecordRefund(ctx, o.OrderID, o.RefundedVND, o.RefundPendingVND, payCODCancelled); err != nil {
 			return o, err
 		}
 		o.PaymentStatus = payCODCancelled

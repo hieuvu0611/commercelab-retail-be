@@ -36,13 +36,13 @@ func NewQuotes(catalogURL string, c *svcclient.Client) *Quotes { return &Quotes{
 type quoteView struct {
 	IsStale bool `json:"isStale"`
 	Quote   struct {
-		QuoteID         string    `json:"quoteId"`
-		UserID          string    `json:"userId"`
-		AddressID       string    `json:"addressId"`
-		VoucherCode     string    `json:"voucherCode"`
-		SubtotalVND     int64     `json:"subtotalVnd"`
-		DiscountVND     int64     `json:"discountVnd"`
-		ShippingFeeVND  int64     `json:"shippingFeeVnd"`
+		QuoteID          string                    `json:"quoteId"`
+		UserID           string                    `json:"userId"`
+		AddressID        string                    `json:"addressId"`
+		VoucherCode      string                    `json:"voucherCode"`
+		SubtotalVND      int64                     `json:"subtotalVnd"`
+		DiscountVND      int64                     `json:"discountVnd"`
+		ShippingFeeVND   int64                     `json:"shippingFeeVnd"`
 		TotalPayableVND  int64                     `json:"totalPayableVnd"`
 		ExpiresAt        time.Time                 `json:"expiresAt"`
 		AppliedCampaigns []orders.AppliedPromotion `json:"appliedCampaigns"`
@@ -338,7 +338,7 @@ func (f *Fulfillment) StopShipment(ctx context.Context, r checkout.StopRequest) 
 	}
 	_, err := f.client.Do(ctx, http.MethodPost, f.base+"/api/v1/shipments/internal/orders/"+url.PathEscape(r.OrderID)+"/stop",
 		svcclient.Options{Internal: true, IdempotencyKey: "stop-" + r.OrderID},
-		map[string]any{"userId": r.UserID, "warehouseId": r.WarehouseID, "items": items}, &out)
+		map[string]any{"userId": r.UserID, "warehouseId": r.WarehouseID, "items": items, "parcels": r.Parcels, "paymentMethod": r.PaymentMethod}, &out)
 	if err != nil {
 		return "", err
 	}

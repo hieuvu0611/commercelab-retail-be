@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -157,7 +158,10 @@ func getStaffOrder(svc *checkout.Service) http.HandlerFunc {
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if _, limited := warehouseScope(claims); limited && !auth.CanAccessWarehouse(claims, o.WarehouseID) {
+		if _, limited := warehouseScope(claims); limited && !auth.CanAccessWarehouse(claims, o.WarehouseID) &&
+			!slices.ContainsFunc(o.Parcels, func(parcel orders.Parcel) bool {
+				return auth.CanAccessWarehouse(claims, parcel.WarehouseID)
+			}) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}

@@ -42,7 +42,8 @@ type shipmentView struct {
 	Version            int64      `json:"version"`
 	Items              []itemView `json:"items"`
 	HandedOverAt       *time.Time `json:"handedOverAt,omitempty"`
-	StopRequestedAt    *time.Time `json:"stopRequestedAt,omitempty"`
+	StopRequestedAt    *time.Time `json:"stopRequestedAt"`
+	StopConfirmedAt    *time.Time `json:"stopConfirmedAt,omitempty"`
 	DeliveredAt        *time.Time `json:"deliveredAt,omitempty"`
 	ReturnWindowEndsAt *time.Time `json:"returnWindowEndsAt,omitempty"`
 	FailureReason      string     `json:"failureReason,omitempty"`
@@ -54,7 +55,7 @@ func viewOf(s shipment.Shipment) shipmentView {
 	v := shipmentView{ShipmentID: s.ShipmentID, OrderID: s.OrderID, WarehouseID: s.WarehouseID,
 		ParcelIndex: s.ParcelIndex, TotalParcels: s.TotalParcels,
 		PaymentMethod: s.PaymentMethod, CodAmountToCollect: s.CodAmountToCollect, Status: string(s.Status),
-		Version: s.Version, HandedOverAt: s.HandedOverAt, StopRequestedAt: s.StopRequestedAt, DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt, FailureReason: s.FailureReason, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
+		Version: s.Version, HandedOverAt: s.HandedOverAt, StopRequestedAt: s.StopRequestedAt, StopConfirmedAt: s.StopConfirmedAt, DeliveredAt: s.DeliveredAt, ReturnWindowEndsAt: s.ReturnWindowEndsAt, FailureReason: s.FailureReason, Items: make([]itemView, len(s.Items)), CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt}
 	for i, it := range s.Items {
 		v.Items[i] = itemView{SkuID: it.SkuID, Quantity: it.Quantity, PickedQuantity: it.PickedQuantity, DeliveredQuantity: it.DeliveredQuantity}
 	}
@@ -83,6 +84,7 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 	}
 	mux.Handle("GET /api/v1/admin/shipments", staff(listShipments(d)))
 	mux.Handle("GET /api/v1/shipments/internal", internalauth.Require(listShipments(d)))
+	mux.Handle("GET /api/v1/shipments/internal/orders/{orderId}", internalauth.Require(listOrderShipments(d)))
 	mux.Handle("GET /api/v1/admin/orders/{orderId}/shipments", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR", "CSKH", "SUPPORT_AGENT", "SUPPORT_LEAD", "FINANCE", "FINANCE_MGR")(listOrderShipments(d))))
 	mux.Handle("GET /api/v1/admin/fulfillment-cases", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD")(listCases(d))))
 	mux.Handle("GET /api/v1/admin/shipments/{shipmentId}", staff(withShipment(d, func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
@@ -342,7 +344,7 @@ func markDeliveredStaff(d Deps) func(http.ResponseWriter, *http.Request, shipmen
 			writeStepError(w, r, err)
 			return
 		}
-		opts := changeOptions(r.Context(), next, d)
+		opts := changeOptions(next, d)
 		if err := d.Shipments.SaveWith(r.Context(), next, s.Version, opts); err != nil {
 			writeStoreError(w, r, err)
 			return
@@ -381,7 +383,7 @@ func markDeliveryFailedStaff(d Deps) func(http.ResponseWriter, *http.Request, sh
 			writeStepError(w, r, err)
 			return
 		}
-		opts := changeOptions(r.Context(), next, d)
+		opts := changeOptions(next, d)
 		if err := d.Shipments.SaveWith(r.Context(), next, s.Version, opts); err != nil {
 			writeStoreError(w, r, err)
 			return

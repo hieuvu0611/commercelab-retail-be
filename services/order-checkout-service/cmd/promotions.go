@@ -20,7 +20,7 @@ func registerPromotionRoutes(mux *http.ServeMux, store promotion.Store) {
 		return
 	}
 	adminGuard := func(h http.HandlerFunc) http.Handler {
-		return auth.RequireAuth(auth.RequireRole(RoleMarketing, "OPS_MGR", "SUPER_ADMIN", "ACCESS_ADMIN")(h))
+		return auth.RequireAuth(auth.RequireRole(RoleMarketing, "OPS_MGR", "SUPER_ADMIN")(h))
 	}
 
 	// Storefront: list active campaigns (public) and evaluate eligible campaigns (auth)

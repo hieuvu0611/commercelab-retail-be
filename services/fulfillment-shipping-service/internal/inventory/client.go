@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
@@ -64,6 +65,17 @@ func (c *Client) ReleaseCommitted(ctx context.Context, bearer, orderID, warehous
 			}
 		}
 		return ErrRejected
+	}
+	return err
+}
+
+// ReleaseOrderCommitted arbitrates a split stop against handover of any parcel in one inventory transaction.
+func (c *Client) ReleaseOrderCommitted(ctx context.Context, orderID string) error {
+	_, err := c.c.Do(ctx, http.MethodPost, c.base+"/api/v1/inventory/reservations/"+url.PathEscape(orderID)+"/release-committed",
+		svcclient.Options{Internal: true, IdempotencyKey: "release-committed-" + orderID}, nil, nil)
+	var apiErr *svcclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict && apiErr.Code == "RELEASE_COMMITTED_FAILED" {
+		return ErrStockLeft
 	}
 	return err
 }

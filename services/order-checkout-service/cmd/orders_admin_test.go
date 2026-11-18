@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 )
 
 func scopedBearer(t *testing.T, user string, roles []string, warehouses ...string) string {
@@ -123,6 +125,26 @@ func TestWarehouseManagerSeesOnlyTheirWarehouses(t *testing.T) {
 	// ?warehouse= narrows further and may not leave the scope.
 	if rec := f.get(t, hcm, "/api/v1/admin/orders?warehouse=WH-HN-01"); rec.Code != http.StatusForbidden {
 		t.Errorf("warehouse outside the scope = %d", rec.Code)
+	}
+}
+
+func TestWarehouseManagerCanReadSplitOrderOnlyWithParcelScope(t *testing.T) {
+	f := newOrderFixture(t)
+	order := orders.Order{
+		OrderID: "O-SPLIT-SCOPE", UserID: "buyer", WarehouseID: "MULTI",
+		Parcels: []orders.Parcel{
+			{ParcelSeq: 1, WarehouseID: "WH-HCM-01"},
+			{ParcelSeq: 2, WarehouseID: "WH-HN-01"},
+		},
+	}
+	if _, _, err := f.orders.Create(context.Background(), "split", "hash", order); err != nil {
+		t.Fatal(err)
+	}
+	for warehouse, want := range map[string]int{"WH-HCM-01": 200, "WH-HN-01": 200, "WH-OUTSIDE": 403} {
+		token := scopedBearer(t, "warehouse-manager", []string{"WAREHOUSE_MGR"}, warehouse)
+		if got := f.get(t, token, "/api/v1/admin/orders/"+order.OrderID); got.Code != want {
+			t.Errorf("warehouse %s: %d, want %d", warehouse, got.Code, want)
+		}
 	}
 }
 

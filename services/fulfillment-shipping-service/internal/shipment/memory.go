@@ -143,6 +143,26 @@ func (m *MemoryStore) SaveWith(_ context.Context, s Shipment, expectedVersion in
 	return nil
 }
 
+func (m *MemoryStore) SaveStopUpdates(_ context.Context, updates []StopUpdate) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, update := range updates {
+		current, ok := m.byID[update.Shipment.ShipmentID]
+		if !ok {
+			return ErrNotFound
+		}
+		if current.Version != update.ExpectedVersion {
+			return ErrStaleVersion
+		}
+	}
+	for _, update := range updates {
+		id := update.Shipment.ShipmentID
+		m.byID[id] = clone(update.Shipment)
+		m.events[id] = append(m.events[id], update.Events...)
+	}
+	return nil
+}
+
 func (m *MemoryStore) ListCases(_ context.Context, f CaseFilter) ([]Case, int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

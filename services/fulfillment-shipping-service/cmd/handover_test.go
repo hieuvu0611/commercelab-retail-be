@@ -36,6 +36,11 @@ func (f *fakeStock) ReleaseCommitted(_ context.Context, bearer, orderID, warehou
 	return f.releaseErr
 }
 
+func (f *fakeStock) ReleaseOrderCommitted(_ context.Context, orderID string) error {
+	f.released = append(f.released, orderID)
+	return f.releaseErr
+}
+
 func handoverEnv(t *testing.T, stock *fakeStock) *env {
 	t.Helper()
 	e := newEnv(t)

@@ -25,6 +25,7 @@ type MemoryStore struct {
 	obligations  map[string][]Obligation
 	reservations map[string]*memReservation
 	events       map[string]bool
+	codParcels   map[string]map[string]CODParcel
 	outbox       []events.DomainEvent
 	now          func() time.Time
 }
@@ -40,7 +41,7 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		byID: map[string]Attempt{}, byKey: map[string]string{}, byOrder: map[string]string{},
 		summaries: map[string]*Summary{}, obligations: map[string][]Obligation{},
-		reservations: map[string]*memReservation{}, events: map[string]bool{},
+		reservations: map[string]*memReservation{}, events: map[string]bool{}, codParcels: map[string]map[string]CODParcel{},
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -119,6 +120,40 @@ func (s *MemoryStore) Apply(_ context.Context, attemptID string, o Outcome, amou
 	}
 	s.store(cur, next, ch)
 	return next, ch, nil
+}
+
+func (s *MemoryStore) ApplyCODParcel(_ context.Context, attemptID string, parcel CODParcel) (Attempt, Change, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.byID[attemptID]
+	if !ok {
+		return Attempt{}, Change{}, ErrNotFound
+	}
+	parcels := s.codParcels[attemptID]
+	recorded := len(parcels)
+	var previous *CODParcel
+	if stored, found := parcels[parcel.ShipmentID]; found {
+		previous = &stored
+	} else {
+		recorded++
+	}
+	for _, stored := range parcels {
+		if stored.TotalParcels != parcel.TotalParcels {
+			return cur, Change{}, ErrIdempotencyConflict
+		}
+		break
+	}
+	next, change, err := applyCODParcel(cur, parcel, previous, recorded, s.now())
+	if err != nil || change.Replay {
+		return next, change, err
+	}
+	if parcels == nil {
+		parcels = make(map[string]CODParcel)
+		s.codParcels[attemptID] = parcels
+	}
+	parcels[parcel.ShipmentID] = parcel
+	s.store(cur, next, change)
+	return next, change, nil
 }
 
 // store saves the new attempt and its money effects. The caller holds the lock.

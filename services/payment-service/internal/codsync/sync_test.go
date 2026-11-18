@@ -99,3 +99,41 @@ func TestHandleCODCollectedAndCancelledEvents(t *testing.T) {
 		t.Fatalf("expected 3 order notifications, got %d", len(orders.calls))
 	}
 }
+
+func TestSplitCODSettlesActualCashAcrossOutOfOrderNotices(t *testing.T) {
+	for _, failureFirst := range []bool{false, true} {
+		ctx := context.Background()
+		store := attempt.NewMemoryStore()
+		h := Handler{Store: store}
+		_, _, err := store.Create(ctx, attempt.Attempt{
+			AttemptID: "PAY-SPLIT", OrderID: "SPLIT", UserID: "buyer", IdempotencyKey: "split",
+			AmountVND: 500000, PaymentMethod: "COD",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		delivered := events.DomainEvent{EventID: "collect", EventType: events.EventPaymentCODCollected, Payload: map[string]any{
+			"orderId": "SPLIT", "shipmentId": "SHP-SPLIT-1", "totalParcels": 2, "amountVnd": 270685,
+		}}
+		failed := events.DomainEvent{EventID: "failure", EventType: events.EventPaymentCODCancelled, Payload: map[string]any{
+			"orderId": "SPLIT", "shipmentId": "SHP-SPLIT-2", "totalParcels": 2,
+		}}
+		first, second := delivered, failed
+		if failureFirst {
+			first, second = failed, delivered
+		}
+		for _, notice := range []events.DomainEvent{first, first, second, second} {
+			if err := h.Handle(ctx, notice); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := store.Get(ctx, "PAY-SPLIT")
+		if err != nil || got.Status != attempt.StatusCOLLECTED || got.CapturedAmountVND != 270685 {
+			t.Fatalf("failureFirst=%t: got %+v, %v", failureFirst, got, err)
+		}
+		gross, _, err := store.Metrics(ctx, nil)
+		if err != nil || gross != 270685 {
+			t.Fatalf("gross=%d, err=%v", gross, err)
+		}
+	}
+}
