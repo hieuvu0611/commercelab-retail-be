@@ -240,5 +240,24 @@ describe('MakerCheckerPolicyService', () => {
         service.decideApproval('APP-UNKNOWN', 'checker', 'ADMIN', 'APPROVE'),
       ).rejects.toThrow(NotFoundException);
     });
+
+    it('evaluates full checkerRole array when multiple roles exist on token', async () => {
+      const created = await service.createApprovalRequest({
+        requestType: 'EXCEPTION_REFUND',
+        referenceId: 'RMA-HIGH-01',
+        amountVnd: 900_000,
+        makerUserId: 'staff-an',
+        reason: 'High value exception refund',
+      });
+
+      const approved = await service.decideApproval(
+        created.approvalId,
+        'fin-mgr',
+        ['SUPPORT_AGENT', 'FINANCE_MGR'],
+        'APPROVE',
+      );
+      expect(approved.status).toBe('APPROVED');
+      expect(approved.checkerRole).toBe('FINANCE_MGR');
+    });
   });
 });

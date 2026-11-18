@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { ReturnsRmaService } from '../returns.service';
 import { PaymentClient } from '../payment.client';
 import { MakerCheckerPolicyService } from '../../../common/guards/maker-checker.guard';
@@ -127,12 +127,21 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
     });
 
     // 1. Warehouse receives package
-    const received = service.receiveRma(rma.returnId, 'wh-staff-1');
+    const received = await service.receiveRma(rma.returnId, 'wh-staff-1');
     expect(received.status).toBe('RECEIVED');
     expect(received.items[0].receivedQuantity).toBe(1);
 
+    // Unbalanced QC must fail validation
+    await expect(
+      service.submitQcResult(
+        rma.returnId,
+        [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 2, failedQuantity: 0 }],
+        'qc-staff-1',
+      ),
+    ).rejects.toThrow(BadRequestException);
+
     // 2. Warehouse QC inspects and passes
-    const qcPassed = service.submitQcResult(
+    const qcPassed = await service.submitQcResult(
       rma.returnId,
       [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 1, failedQuantity: 0 }],
       'qc-staff-1',
@@ -163,8 +172,18 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
                 { skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', ordered: 1, delivered: 1 },
               ],
               parcels: [
-                { shipmentId: 'SHP-O-REAL-2P-1', deliveredAt: nowIso },
-                { shipmentId: 'SHP-O-REAL-2P-2', deliveredAt: nowIso },
+                {
+                  shipmentId: 'SHP-O-REAL-2P-1',
+                  warehouseId: 'WH-HCM-01',
+                  deliveredAt: nowIso,
+                  items: [{ skuId: 'SKU-CAMPUS-BACKPACK-BLACK-20L', deliveredQuantity: 3 }],
+                },
+                {
+                  shipmentId: 'SHP-O-REAL-2P-2',
+                  warehouseId: 'WH-HN-01',
+                  deliveredAt: nowIso,
+                  items: [{ skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', deliveredQuantity: 1 }],
+                },
               ],
             },
           }),
@@ -175,6 +194,7 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
         JSON.stringify({
           data: {
             orderId: 'O-REAL-2P',
+            customerId: 'user-lan',
             shippingFeeVnd: 0,
             totalPayableVnd: 1_163_750,
             payment: { capturedAmountVnd: 1_163_750 },
@@ -194,11 +214,14 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
           orderId: 'O-REAL-2P',
           reason: 'DAMAGED',
           lines: [{ skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', quantity: 1 }],
+          notes: 'Handle snapped on arrival',
         },
         'user-lan',
         'Bearer test-jwt',
       );
       expect(rma.status).toBe('REQUESTED');
+      expect(rma.warehouseId).toBe('WH-HN-01');
+      expect(rma.customerNote).toBe('Handle snapped on arrival');
       expect(rma.refundableAmountVnd).toBe(437_570);
       expect(rma.shippingRefundVnd).toBe(0);
       expect(paymentClient.getSummary('O-REAL-2P')?.capturedAmount).toBe(1_163_750);

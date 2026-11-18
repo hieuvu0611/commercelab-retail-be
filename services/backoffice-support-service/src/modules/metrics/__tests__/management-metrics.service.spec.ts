@@ -37,4 +37,27 @@ describe('ManagementMetricsService (P11-T05, SC12)', () => {
     expect(metrics.metadata.policyNotice).toContain('Critical Rule SC12');
     expect(metrics.metadata.source).toContain('PostgreSQL');
   });
+
+  it('queries payments.refund_obligations and IN_FULFILLMENT and propagates DB errors', async () => {
+    const queries: string[] = [];
+    const mockDb: any = {
+      query: jest.fn(async (sql: string) => {
+        queries.push(sql);
+        if (sql.includes('orders.orders')) return { rows: [{ total: '4', confirmed: '3' }] };
+        if (sql.includes('payments.payment_attempts')) return { rows: [{ collected: '1200000' }] };
+        return { rows: [{ refunded: '270000' }] };
+      }),
+    };
+    const dbMetrics = await new ManagementMetricsService(mockDb, exceptionCases).getMetrics('7D');
+    expect(dbMetrics.overview.totalOrders).toBe(4);
+    expect(dbMetrics.overview.totalRefundedVnd).toBe(270000);
+    expect(queries.some((q) => q.includes('payments.refund_obligations'))).toBe(true);
+    expect(queries.some((q) => q.includes('IN_FULFILLMENT'))).toBe(true);
+    expect(queries.some((q) => q.includes('payments.refunds'))).toBe(false);
+
+    const brokenDb: any = { query: jest.fn().mockRejectedValue(new Error('pg down')) };
+    await expect(new ManagementMetricsService(brokenDb, exceptionCases).getMetrics('TODAY')).rejects.toThrow(
+      'pg down',
+    );
+  });
 });

@@ -68,6 +68,22 @@ describe('Auth Guards', () => {
       });
     });
 
+    it('rejects Bearer verification when secret is missing outside APP_ENV=dev', () => {
+      const savedSecret = process.env.JWT_ACCESS_SECRET;
+      const savedEnv = process.env.APP_ENV;
+      delete process.env.JWT_ACCESS_SECRET;
+      delete process.env.APP_ENV;
+      try {
+        const token = jwt.sign({ sub: 'user-lan' }, 'dev-only-jwt-access-secret-never-use-in-production');
+        const ctx = mockContext({ headers: { authorization: `Bearer ${token}` } });
+        expect(() => guard.canActivate(ctx)).toThrow(UnauthorizedException);
+      } finally {
+        process.env.JWT_ACCESS_SECRET = savedSecret;
+        if (savedEnv === undefined) delete process.env.APP_ENV;
+        else process.env.APP_ENV = savedEnv;
+      }
+    });
+
     it('accepts valid X-Internal-Token', () => {
       const req: any = {
         headers: { 'x-internal-token': 'test-internal-token-secret-xyz' },
@@ -122,12 +138,18 @@ describe('Auth Guards', () => {
       guard = new WarehouseScopeGuard();
     });
 
-    it('allows when user has wildcard warehouse scope', () => {
+    it('allows when user has wildcard or ALL warehouse scope', () => {
       const ctx = mockContext({
         user: { roles: ['WAREHOUSE_STAFF'], warehouses: ['*'] },
         params: { warehouseId: 'WH-HN-01' },
       });
       expect(guard.canActivate(ctx)).toBe(true);
+
+      const allCtx = mockContext({
+        user: { roles: ['WAREHOUSE_MGR'], warehouses: ['ALL'] },
+        params: { warehouseId: 'WH-HN-01' },
+      });
+      expect(guard.canActivate(allCtx)).toBe(true);
     });
 
     it('allows when user has matching warehouse scope', () => {

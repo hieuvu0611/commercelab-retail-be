@@ -28,8 +28,8 @@ describe('Shipping Refund Rules & Approval Thresholds (P8-T05, P09, P11, P10)', 
       lines: [{ skuId: 'SKU-BALO-BLACK-20L', quantity: 1 }],
     });
 
-    service.receiveRma(rma.returnId, 'wh-staff');
-    service.submitQcResult(
+    await service.receiveRma(rma.returnId, 'wh-staff');
+    await service.submitQcResult(
       rma.returnId,
       [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 1, failedQuantity: 0 }],
       'qc-staff',
@@ -48,8 +48,8 @@ describe('Shipping Refund Rules & Approval Thresholds (P8-T05, P09, P11, P10)', 
       lines: [{ skuId: 'SKU-BALO-BLACK-20L', quantity: 2 }],
     });
 
-    service.receiveRma(rma.returnId, 'wh-staff');
-    service.submitQcResult(
+    await service.receiveRma(rma.returnId, 'wh-staff');
+    await service.submitQcResult(
       rma.returnId,
       [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 2, failedQuantity: 0 }],
       'qc-staff',

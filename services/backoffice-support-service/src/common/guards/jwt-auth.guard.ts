@@ -13,17 +13,55 @@ export interface AuthenticatedUser {
   isInternal?: boolean;
 }
 
-const DEFAULT_DEV_JWT_SECRET = 'dev-access-secret-at-least-32-bytes-long';
-const DEFAULT_INTERNAL_TOKEN = 'dev-internal-token-at-least-32-bytes-long';
+const DEFAULT_DEV_JWT_SECRET = 'dev-only-jwt-access-secret-never-use-in-production';
+const DEFAULT_DEV_INTERNAL_TOKEN = 'dev-only-internal-service-token-never-use';
+const MIN_SECRET_BYTES = 32;
+
+export function isDevEnv(): boolean {
+  return process.env.APP_ENV === 'dev';
+}
+
+export function resolveJwtAccessSecret(strictLength = false): string {
+  const secret = process.env.JWT_ACCESS_SECRET || '';
+  if (!secret && isDevEnv()) {
+    return DEFAULT_DEV_JWT_SECRET;
+  }
+  if (!secret) {
+    throw new Error('JWT_ACCESS_SECRET is required outside APP_ENV=dev');
+  }
+  if (strictLength && secret.length < MIN_SECRET_BYTES && !isDevEnv()) {
+    throw new Error(`JWT_ACCESS_SECRET must be at least ${MIN_SECRET_BYTES} bytes`);
+  }
+  return secret;
+}
+
+export function resolveInternalServiceToken(strictLength = false): string {
+  const token = process.env.INTERNAL_SERVICE_TOKEN || '';
+  if (!token && isDevEnv()) {
+    return DEFAULT_DEV_INTERNAL_TOKEN;
+  }
+  if (!token) {
+    throw new Error('INTERNAL_SERVICE_TOKEN is required outside APP_ENV=dev');
+  }
+  if (strictLength && token.length < MIN_SECRET_BYTES && !isDevEnv()) {
+    throw new Error(`INTERNAL_SERVICE_TOKEN must be at least ${MIN_SECRET_BYTES} bytes`);
+  }
+  return token;
+}
+
+export function validateAuthSecrets(): void {
+  resolveJwtAccessSecret(true);
+  resolveInternalServiceToken(true);
+}
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
   private getSecret(): string {
-    return process.env.JWT_ACCESS_SECRET || DEFAULT_DEV_JWT_SECRET;
+    return resolveJwtAccessSecret(false);
   }
 
   private getInternalToken(): string {
-    return process.env.INTERNAL_SERVICE_TOKEN || DEFAULT_INTERNAL_TOKEN;
+    return resolveInternalServiceToken(false);
   }
 
   canActivate(context: ExecutionContext): boolean {
@@ -32,14 +70,25 @@ export class JwtAuthGuard implements CanActivate {
     const internalHeader = req.headers['x-internal-token'];
 
     // 1. Allow internal service-to-service calls if internal token matches
-    if (internalHeader && internalHeader === this.getInternalToken()) {
-      req.user = {
-        userId: 'system:internal',
-        roles: ['ADMIN', 'INTERNAL_SERVICE'],
-        warehouses: ['*'],
-        isInternal: true,
-      };
-      return true;
+    if (internalHeader) {
+      let expectedInternal = '';
+      try {
+        expectedInternal = this.getInternalToken();
+      } catch {
+        throw new UnauthorizedException({
+          code: 'UNAUTHORIZED',
+          message: 'Internal authentication is not configured',
+        });
+      }
+      if (internalHeader === expectedInternal) {
+        req.user = {
+          userId: 'system:internal',
+          roles: ['ADMIN', 'INTERNAL_SERVICE'],
+          warehouses: ['*'],
+          isInternal: true,
+        };
+        return true;
+      }
     }
 
     // 2. Validate Bearer token
@@ -58,8 +107,18 @@ export class JwtAuthGuard implements CanActivate {
       });
     }
 
+    let secret: string;
     try {
-      const decoded = jwt.verify(token, this.getSecret()) as jwt.JwtPayload;
+      secret = this.getSecret();
+    } catch {
+      throw new UnauthorizedException({
+        code: 'UNAUTHORIZED',
+        message: 'JWT verification secret is not configured',
+      });
+    }
+
+    try {
+      const decoded = jwt.verify(token, secret) as jwt.JwtPayload;
       const roles: string[] = Array.isArray(decoded.roles)
         ? decoded.roles
         : typeof decoded.role === 'string'

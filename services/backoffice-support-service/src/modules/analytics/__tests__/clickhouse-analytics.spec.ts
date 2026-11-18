@@ -94,4 +94,33 @@ describe('ClickhouseAnalyticsService (SC12 OLAP)', () => {
     expect(dash.metadata.policyNotice).toContain('SC12');
     expect(dash.metadata.lastSyncedAt).toBeTruthy();
   });
+
+  it('paginates through all pages when metadata.pageCount > 1', async () => {
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/v1/orders/internal')) {
+        const page = url.includes('page=2') ? 2 : 1;
+        return new Response(
+          JSON.stringify({
+            data: [
+              { orderId: `O-${page}`, status: 'DELIVERED', paymentMethod: 'PREPAID', totalPayableVnd: 300000, discountVnd: 10000 },
+            ],
+            metadata: { page, pageCount: 2, limit: 100, total: 2 },
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/api/v1/shipments/internal')) {
+        return new Response(JSON.stringify({ data: [], metadata: { pageCount: 1 } }), { status: 200 });
+      }
+      if (url.includes('/api/v1/inventory/internal/stock')) {
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      }
+      return new Response('', { status: 200 });
+    }) as any;
+
+    const svc = new ClickhouseAnalyticsService();
+    const res = await svc.syncFromSources('Bearer test-token');
+    expect(res.ordersSynced).toBe(2);
+  });
 });

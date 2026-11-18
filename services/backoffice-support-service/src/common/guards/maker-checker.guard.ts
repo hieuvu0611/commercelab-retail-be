@@ -7,7 +7,7 @@ export interface ApprovalCandidate {
   requestType: ApprovalType;
   makerUserId: string;
   checkerUserId: string;
-  checkerRole: string;
+  checkerRole: string | string[];
   amountVnd: number;
   quantityDiff: number;
 }
@@ -37,6 +37,14 @@ export class MakerCheckerPolicyService {
 
   constructor(private readonly db?: DatabaseService) {}
 
+  private resolveQualifyingRole(
+    rolesInput: string | string[],
+    allowedRoles: readonly string[],
+  ): string | undefined {
+    const roles = Array.isArray(rolesInput) ? rolesInput : [rolesInput];
+    return roles.find((role) => role && allowedRoles.includes(role));
+  }
+
   /**
    * Thực thi Policy P10:
    * 1. Người tạo yêu cầu nhạy cảm KHÔNG ĐƯỢC tự duyệt (Maker != Checker).
@@ -44,7 +52,7 @@ export class MakerCheckerPolicyService {
    *    - EXCEPTION_REFUND <= 500.000đ: SUPPORT_LEAD / CSKH_LEAD / Quản lý.
    *    - EXCEPTION_REFUND > 500.000đ: Bắt buộc OPS_MGR, FINANCE_MGR hoặc ADMIN.
    */
-  validateApproval(input: ApprovalCandidate): void {
+  validateApproval(input: ApprovalCandidate): string {
     if (!input.makerUserId || !input.checkerUserId) {
       throw new BadRequestException('Thiếu thông tin người đề nghị (Maker) hoặc người duyệt (Checker)');
     }
@@ -56,34 +64,52 @@ export class MakerCheckerPolicyService {
 
     if (input.requestType === 'EXCEPTION_REFUND') {
       if (input.amountVnd <= 500_000) {
-        if (!SUPPORT_LEAD_ROLES.includes(input.checkerRole)) {
+        const matched = this.resolveQualifyingRole(input.checkerRole, SUPPORT_LEAD_ROLES);
+        if (!matched) {
           throw new ForbiddenException('Hoàn tiền ngoại lệ <= 500.000đ cần tối thiểu Support Lead phê duyệt');
         }
-      } else if (!MANAGER_ROLES.includes(input.checkerRole)) {
+        return matched;
+      }
+      const matched = this.resolveQualifyingRole(input.checkerRole, MANAGER_ROLES);
+      if (!matched) {
         throw new ForbiddenException('Hoàn tiền ngoại lệ > 500.000đ bắt buộc cần Quản lý (Ops/Finance) phê duyệt');
       }
+      return matched;
     }
 
     if (input.requestType === 'STOCK_ADJUSTMENT') {
       const withinWarehouseMgrLimit = Math.abs(input.quantityDiff) <= 5 && input.amountVnd <= 2_000_000;
       if (withinWarehouseMgrLimit) {
-        if (!['WAREHOUSE_MGR', 'SUPPLY_CHAIN_MGR', 'ADMIN'].includes(input.checkerRole)) {
+        const matched = this.resolveQualifyingRole(input.checkerRole, ['WAREHOUSE_MGR', 'SUPPLY_CHAIN_MGR', 'OPS_MGR', 'ADMIN']);
+        if (!matched) {
           throw new ForbiddenException('Điều chỉnh lệch kho cần tối thiểu WAREHOUSE_MGR phê duyệt');
         }
-      } else if (!['SUPPLY_CHAIN_MGR', 'ADMIN'].includes(input.checkerRole)) {
-        throw new ForbiddenException('Điều chỉnh lệch kho lớn cần SUPPLY_CHAIN_MGR hoặc ADMIN phê duyệt');
+        return matched;
       }
+      const matched = this.resolveQualifyingRole(input.checkerRole, ['SUPPLY_CHAIN_MGR', 'OPS_MGR', 'FINANCE_MGR', 'ADMIN']);
+      if (!matched) {
+        throw new ForbiddenException('Điều chỉnh lệch kho lớn cần SUPPLY_CHAIN_MGR, OPS_MGR, FINANCE_MGR hoặc ADMIN phê duyệt');
+      }
+      return matched;
     }
 
     if (input.requestType === 'PURCHASE_ORDER') {
       if (input.amountVnd <= 20_000_000) {
-        if (!['PROCUREMENT_MGR', 'OPS_DIRECTOR', 'FINANCE_MGR', 'ADMIN'].includes(input.checkerRole)) {
+        const matched = this.resolveQualifyingRole(input.checkerRole, ['PROCUREMENT_MGR', 'OPS_DIRECTOR', 'OPS_MGR', 'FINANCE_MGR', 'ADMIN']);
+        if (!matched) {
           throw new ForbiddenException('Đơn mua hàng PO cần tối thiểu PROCUREMENT_MGR phê duyệt');
         }
-      } else if (!['OPS_DIRECTOR', 'FINANCE_MGR', 'ADMIN'].includes(input.checkerRole)) {
+        return matched;
+      }
+      const matched = this.resolveQualifyingRole(input.checkerRole, ['OPS_DIRECTOR', 'OPS_MGR', 'FINANCE_MGR', 'ADMIN']);
+      if (!matched) {
         throw new ForbiddenException('Đơn mua hàng lớn > 20.000.000đ cần Ban giám đốc/Tài chính phê duyệt');
       }
+      return matched;
     }
+
+    const roles = Array.isArray(input.checkerRole) ? input.checkerRole : [input.checkerRole];
+    return roles[0] || '';
   }
 
   async createApprovalRequest(data: {
@@ -143,7 +169,7 @@ export class MakerCheckerPolicyService {
   async decideApproval(
     approvalId: string,
     checkerUserId: string,
-    checkerRole: string,
+    checkerRole: string | string[],
     action: 'APPROVE' | 'REJECT',
     note?: string,
   ): Promise<ApprovalRecord> {
@@ -156,7 +182,7 @@ export class MakerCheckerPolicyService {
     }
 
     // Policy P10 validation
-    this.validateApproval({
+    const matchedRole = this.validateApproval({
       requestType: record.requestType,
       makerUserId: record.makerUserId,
       checkerUserId,
@@ -168,7 +194,7 @@ export class MakerCheckerPolicyService {
     const nowIso = new Date().toISOString();
     record.status = action === 'APPROVE' ? 'APPROVED' : 'REJECTED';
     record.checkerUserId = checkerUserId;
-    record.checkerRole = checkerRole;
+    record.checkerRole = matchedRole;
     record.decisionNote = note || '';
     record.updatedAt = nowIso;
     if (note) {

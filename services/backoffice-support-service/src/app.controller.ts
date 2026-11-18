@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   NotFoundException,
   Param,
@@ -18,9 +19,31 @@ import { ClickhouseAnalyticsService } from './modules/analytics/clickhouse-analy
 import { CreateReturnRequestDto } from './modules/returns-rma/create-return.dto';
 import { ApiResult } from './common/http/api-response.interceptor';
 import { DatabaseService } from './database/database.service';
-import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { AuthenticatedUser, JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { Roles } from './common/guards/roles.decorator';
+import { canAccessWarehouse, WarehouseScopeGuard } from './common/guards/warehouse.guard';
+
+const BACKOFFICE_STAFF_ROLES = new Set([
+  'CSKH',
+  'CSKH_LEAD',
+  'SUPPORT_AGENT',
+  'SUPPORT_STAFF',
+  'SUPPORT_LEAD',
+  'WAREHOUSE_STAFF',
+  'WAREHOUSE_MGR',
+  'DELIVERY_COORD',
+  'FINANCE',
+  'FINANCE_STAFF',
+  'FINANCE_MGR',
+  'PROCUREMENT',
+  'PROCUREMENT_STAFF',
+  'PROCUREMENT_MGR',
+  'OPS_MGR',
+  'OPS_DIRECTOR',
+  'ACCESS_ADMIN',
+  'ADMIN',
+]);
 
 @Controller()
 export class AppController {
@@ -79,11 +102,21 @@ export class AppController {
     });
   }
 
+  private isBackofficeStaff(user?: AuthenticatedUser): boolean {
+    if (!user) return false;
+    if (user.isInternal) return true;
+    return (user.roles || []).some((role) => BACKOFFICE_STAFF_ROLES.has(role));
+  }
+
   @Get('/api/v1/returns/:returnId')
   @UseGuards(JwtAuthGuard)
-  async getReturnDetail(@Param('returnId') returnId: string) {
+  async getReturnDetail(@Req() req: any, @Param('returnId') returnId: string) {
     await this.returnsService.ensureHydrated();
     const item = this.returnsService.getReturn(returnId);
+    const user = req.user as AuthenticatedUser | undefined;
+    if (!this.isBackofficeStaff(user) && item.customerId !== user?.userId) {
+      throw new ForbiddenException('You do not have permission to view this return request');
+    }
     return new ApiResult(item, 'Return detail retrieved successfully');
   }
 
@@ -103,10 +136,20 @@ export class AppController {
 
   @Get('/api/v1/orders/:orderId/returns')
   @UseGuards(JwtAuthGuard)
-  async listOrderReturns(@Param('orderId') orderId: string) {
+  async listOrderReturns(@Req() req: any, @Param('orderId') orderId: string) {
     await this.returnsService.ensureHydrated();
-    const items = this.returnsService.listReturns({ orderId });
-    return new ApiResult(items, 'Order returns retrieved successfully');
+    const user = req.user as AuthenticatedUser | undefined;
+    const allForOrder = this.returnsService.listReturns({ orderId });
+    if (!this.isBackofficeStaff(user)) {
+      if (allForOrder.some((r) => r.customerId !== user?.userId)) {
+        throw new ForbiddenException('You do not have permission to view returns for this order');
+      }
+      return new ApiResult(
+        allForOrder.filter((r) => r.customerId === user?.userId),
+        'Order returns retrieved successfully',
+      );
+    }
+    return new ApiResult(allForOrder, 'Order returns retrieved successfully');
   }
 
   // ==========================================
@@ -114,15 +157,22 @@ export class AppController {
   // ==========================================
 
   @Get('/api/v1/backoffice/returns')
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, WarehouseScopeGuard)
   @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
   async listBackofficeReturns(
+    @Req() req: any,
     @Query('status') status?: string,
     @Query('orderId') orderId?: string,
     @Query('warehouseId') warehouseId?: string,
   ) {
     await this.returnsService.ensureHydrated();
-    const items = this.returnsService.listReturns({ status, orderId, warehouseId });
+    const user = req.user as AuthenticatedUser | undefined;
+    if (warehouseId && !canAccessWarehouse(user, warehouseId)) {
+      throw new ForbiddenException(`Warehouse scope does not grant access to ${warehouseId}`);
+    }
+    const items = this.returnsService
+      .listReturns({ status, orderId, warehouseId })
+      .filter((r) => canAccessWarehouse(user, r.warehouseId));
     return new ApiResult(items, 'Backoffice returns retrieved successfully', {
       total: items.length,
       page: 1,
@@ -132,11 +182,15 @@ export class AppController {
   }
 
   @Get('/api/v1/backoffice/returns/:rmaId')
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, WarehouseScopeGuard)
   @Roles('CSKH', 'SUPPORT_AGENT', 'SUPPORT_STAFF', 'SUPPORT_LEAD', 'WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
-  async getBackofficeReturnDetail(@Param('rmaId') rmaId: string) {
+  async getBackofficeReturnDetail(@Req() req: any, @Param('rmaId') rmaId: string) {
     await this.returnsService.ensureHydrated();
     const item = this.returnsService.getReturn(rmaId);
+    const user = req.user as AuthenticatedUser | undefined;
+    if (!canAccessWarehouse(user, item.warehouseId)) {
+      throw new ForbiddenException(`Warehouse scope does not grant access to ${item.warehouseId}`);
+    }
     return new ApiResult(item, 'Backoffice return detail retrieved successfully');
   }
 
@@ -152,18 +206,22 @@ export class AppController {
   }
 
   @Post('/api/v1/backoffice/returns/:rmaId/receive')
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, WarehouseScopeGuard)
   @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN')
   async receiveReturnParcel(@Req() req: any, @Param('rmaId') rmaId: string) {
     await this.returnsService.ensureHydrated();
+    const existing = this.returnsService.getReturn(rmaId);
+    if (!canAccessWarehouse(req.user, existing.warehouseId)) {
+      throw new ForbiddenException(`Warehouse scope does not grant access to ${existing.warehouseId}`);
+    }
     const actor = req.user?.userId || 'warehouse-staff';
-    const item = this.returnsService.receiveRma(rmaId, actor);
+    const item = await this.returnsService.receiveRma(rmaId, actor);
     await this.returnsService.syncRecord(item);
     return new ApiResult(item, 'Return parcel received by warehouse (SC07)');
   }
 
   @Post('/api/v1/backoffice/returns/:rmaId/qc')
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(JwtAuthGuard, RolesGuard, WarehouseScopeGuard)
   @Roles('WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN')
   async submitQcInspection(
     @Req() req: any,
@@ -171,8 +229,12 @@ export class AppController {
     @Body('results') results: Array<{ skuId: string; passedQuantity: number; failedQuantity: number }>,
   ) {
     await this.returnsService.ensureHydrated();
+    const existing = this.returnsService.getReturn(rmaId);
+    if (!canAccessWarehouse(req.user, existing.warehouseId)) {
+      throw new ForbiddenException(`Warehouse scope does not grant access to ${existing.warehouseId}`);
+    }
     const actor = req.user?.userId || 'qc-inspector';
-    const item = this.returnsService.submitQcResult(rmaId, results || [], actor);
+    const item = await this.returnsService.submitQcResult(rmaId, results || [], actor);
     await this.returnsService.syncRecord(item);
     return new ApiResult(item, 'QC inspection recorded successfully (SC07)');
   }
@@ -253,12 +315,12 @@ export class AppController {
     @Body('action') action: 'APPROVE' | 'REJECT',
     @Body('note') note?: string,
   ) {
-    const checkerUserId = req.user?.userId || 'approver';
-    const checkerRole = req.user?.roles?.[0] || 'ADMIN';
+    const checkerUserId = req.user?.userId || '';
+    const checkerRoles: string[] = Array.isArray(req.user?.roles) ? req.user.roles : [];
     const result = await this.makerChecker.decideApproval(
       id,
       checkerUserId,
-      checkerRole,
+      checkerRoles,
       action,
       note,
     );

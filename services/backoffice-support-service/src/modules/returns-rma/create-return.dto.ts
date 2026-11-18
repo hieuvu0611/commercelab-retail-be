@@ -1,4 +1,5 @@
 import {
+  ArrayMinSize,
   IsArray,
   IsIn,
   IsInt,
@@ -47,6 +48,7 @@ export class CreateReturnRequestDto {
   reason: string;
 
   @IsArray()
+  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => ReturnLineDto)
   lines: ReturnLineDto[];
@@ -57,8 +59,4 @@ export class CreateReturnRequestDto {
 
   @IsOptional()
   isExchange?: boolean;
-
-  @IsOptional()
-  @IsString()
-  deliveredAt?: string;
 }

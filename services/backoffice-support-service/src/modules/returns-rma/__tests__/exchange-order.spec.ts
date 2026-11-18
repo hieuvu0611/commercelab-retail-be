@@ -28,8 +28,8 @@ describe('Exchange Orders (P8-T06, B06)', () => {
       isExchange: true,
     });
 
-    service.receiveRma(rma.returnId, 'wh-staff');
-    service.submitQcResult(
+    await service.receiveRma(rma.returnId, 'wh-staff');
+    await service.submitQcResult(
       rma.returnId,
       [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 1, failedQuantity: 0 }],
       'qc-staff',

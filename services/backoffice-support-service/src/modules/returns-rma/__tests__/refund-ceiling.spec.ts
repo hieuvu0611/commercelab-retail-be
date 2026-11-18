@@ -54,8 +54,8 @@ describe('Refund Ceiling & Execution (P8-T04, I03, SC08)', () => {
       lines: [{ skuId: 'SKU-BALO-BLACK-20L', quantity: 1 }],
     });
 
-    service.receiveRma(rma.returnId, 'wh-staff');
-    service.submitQcResult(
+    await service.receiveRma(rma.returnId, 'wh-staff');
+    await service.submitQcResult(
       rma.returnId,
       [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 1, failedQuantity: 0 }],
       'qc-staff',
@@ -69,6 +69,36 @@ describe('Refund Ceiling & Execution (P8-T04, I03, SC08)', () => {
 
     // Calling refund again on already refunded RMA must throw ConflictException
     await expect(service.disburseRefund(rma.returnId, 'finance-lead')).rejects.toThrow(
+      ConflictException,
+    );
+  });
+
+  it('rejects refund before QC and scales refund to QC-passed units only (SC07)', async () => {
+    const rma = await service.openRmaRequest({
+      orderId: 'O-001',
+      reason: 'DEFECTIVE',
+      lines: [{ skuId: 'SKU-BALO-BLACK-20L', quantity: 2 }],
+    });
+
+    await service.receiveRma(rma.returnId, 'wh-staff');
+    await expect(service.disburseRefund(rma.returnId, 'finance-lead')).rejects.toThrow(
+      ConflictException,
+    );
+
+    await service.submitQcResult(
+      rma.returnId,
+      [{ skuId: 'SKU-BALO-BLACK-20L', passedQuantity: 1, failedQuantity: 1 }],
+      'qc-staff',
+    );
+
+    const refunded = await service.disburseRefund(rma.returnId, 'finance-lead');
+    expect(refunded.status).toBe('REFUNDED');
+    expect(refunded.refund?.amountVnd).toBe(270_000);
+    expect(refunded.refundableAmountVnd).toBe(270_000);
+  });
+
+  it('does not fabricate a 660,000 VND summary for unknown orders', async () => {
+    await expect(paymentClient.reserveRefundCeiling('O-UNKNOWN', 50_000)).rejects.toThrow(
       ConflictException,
     );
   });

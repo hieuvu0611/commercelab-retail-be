@@ -144,19 +144,47 @@ export class ClickhouseAnalyticsService {
     this.schemaReady = true;
   }
 
-  private async fetchServiceList(url: string, authHeader?: string): Promise<any[]> {
+  private async fetchServiceList(
+    url: string,
+    authHeader?: string,
+    paginated = false,
+  ): Promise<any[]> {
     const internalToken = process.env.INTERNAL_SERVICE_TOKEN;
-    const res = await fetch(url, {
-      headers: {
-        ...(internalToken ? { 'X-Internal-Token': internalToken } : {}),
-        ...(authHeader ? { Authorization: authHeader } : {}),
-      },
-    });
-    if (!res.ok) {
-      throw new Error(`Upstream analytics fetch ${url} failed with ${res.status}`);
+    const headers = {
+      ...(internalToken ? { 'X-Internal-Token': internalToken } : {}),
+      ...(authHeader ? { Authorization: authHeader } : {}),
+    };
+
+    if (!paginated) {
+      const res = await fetch(url, { headers });
+      if (!res.ok) {
+        throw new Error(`Upstream analytics fetch ${url} failed with ${res.status}`);
+      }
+      const json = (await res.json()) as { data?: any[] };
+      return Array.isArray(json?.data) ? json.data : [];
     }
-    const json = (await res.json()) as { data?: any[] };
-    return Array.isArray(json?.data) ? json.data : [];
+
+    const out: any[] = [];
+    let page = 1;
+    let pageCount = 1;
+    do {
+      const sep = url.includes('?') ? '&' : '?';
+      const pagedUrl = `${url}${sep}limit=100&page=${page}`;
+      const res = await fetch(pagedUrl, { headers });
+      if (!res.ok) {
+        throw new Error(`Upstream analytics fetch ${pagedUrl} failed with ${res.status}`);
+      }
+      const json = (await res.json()) as {
+        data?: any[];
+        metadata?: { pageCount?: number };
+      };
+      const rows = Array.isArray(json?.data) ? json.data : [];
+      out.push(...rows);
+      pageCount = Math.max(1, Number(json?.metadata?.pageCount || 1));
+      page++;
+    } while (page <= pageCount && page <= 1000);
+
+    return out;
   }
 
   private toClickhouseDateTime(iso?: string): string {
@@ -171,9 +199,9 @@ export class ClickhouseAnalyticsService {
     const nowIso = this.toClickhouseDateTime();
 
     const [orders, shipments, stockRows] = await Promise.all([
-      this.fetchServiceList(`${cfg.orderUrl}/api/v1/orders/internal?limit=100`, authHeader),
-      this.fetchServiceList(`${cfg.fulfillmentUrl}/api/v1/shipments/internal?limit=100`, authHeader),
-      this.fetchServiceList(`${cfg.inventoryUrl}/api/v1/inventory/internal/stock`, authHeader),
+      this.fetchServiceList(`${cfg.orderUrl}/api/v1/orders/internal`, authHeader, true),
+      this.fetchServiceList(`${cfg.fulfillmentUrl}/api/v1/shipments/internal`, authHeader, true),
+      this.fetchServiceList(`${cfg.inventoryUrl}/api/v1/inventory/internal/stock`, authHeader, false),
     ]);
 
     await this.execClickhouse('TRUNCATE TABLE IF EXISTS order_facts');

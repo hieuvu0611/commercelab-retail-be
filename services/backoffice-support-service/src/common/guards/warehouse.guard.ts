@@ -6,6 +6,24 @@ import {
 } from '@nestjs/common';
 import { AuthenticatedUser } from './jwt-auth.guard';
 
+export function hasAllWarehouseScope(user?: AuthenticatedUser): boolean {
+  if (!user) return false;
+  return (
+    user.roles.includes('ADMIN') ||
+    user.roles.includes('OPS_MGR') ||
+    user.isInternal === true ||
+    user.warehouses.includes('*') ||
+    user.warehouses.includes('ALL')
+  );
+}
+
+export function canAccessWarehouse(user: AuthenticatedUser | undefined, warehouseId?: string): boolean {
+  if (!user) return false;
+  if (!warehouseId) return true;
+  if (hasAllWarehouseScope(user)) return true;
+  return user.warehouses.includes(warehouseId);
+}
+
 @Injectable()
 export class WarehouseScopeGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
@@ -19,7 +37,7 @@ export class WarehouseScopeGuard implements CanActivate {
       });
     }
 
-    if (user.roles.includes('ADMIN') || user.warehouses.includes('*') || user.isInternal) {
+    if (hasAllWarehouseScope(user)) {
       return true;
     }
 
@@ -27,7 +45,7 @@ export class WarehouseScopeGuard implements CanActivate {
       req.params?.warehouseId || req.query?.warehouseId || req.body?.warehouseId;
 
     if (!targetWarehouse) {
-      // If no specific warehouse requested on route, allow
+      // Handler will verify entity warehouseId when loading by resource id
       return true;
     }
 
