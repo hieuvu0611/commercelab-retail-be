@@ -191,27 +191,33 @@ export class MakerCheckerPolicyService {
       quantityDiff: record.quantityDiff,
     });
 
-    const nowIso = new Date().toISOString();
-    record.status = action === 'APPROVE' ? 'APPROVED' : 'REJECTED';
-    record.checkerUserId = checkerUserId;
-    record.checkerRole = matchedRole;
-    record.decisionNote = note || '';
-    record.updatedAt = nowIso;
-    if (note) {
-      record.reason = `${record.reason} | Note: ${note}`;
-    }
+    const decided: ApprovalRecord = {
+      ...record,
+      status: action === 'APPROVE' ? 'APPROVED' : 'REJECTED',
+      checkerUserId,
+      checkerRole: matchedRole,
+      decisionNote: note || '',
+      updatedAt: new Date().toISOString(),
+      reason: note ? `${record.reason} | Note: ${note}` : record.reason,
+    };
 
     if (this.db) {
-      await this.db.query(
+      const result = await this.db.query(
         `UPDATE support.approval_requests
          SET status = $1, checker_user_id = $2, decision_note = $3, updated_at = $4
-         WHERE approval_id = $5`,
-        [record.status, checkerUserId, record.decisionNote, record.updatedAt, approvalId],
+         WHERE approval_id = $5 AND status = 'PENDING'
+         RETURNING approval_id`,
+        [decided.status, checkerUserId, decided.decisionNote, decided.updatedAt, approvalId],
       );
+      if (result.rows.length === 0) {
+        throw new ConflictException('Approval request already processed');
+      }
+    } else if (this.approvals.get(approvalId)?.status !== 'PENDING') {
+      throw new ConflictException('Approval request already processed');
     }
-    this.approvals.set(approvalId, record);
+    this.approvals.set(approvalId, decided);
 
-    return record;
+    return decided;
   }
 
   private mapRow(row: any): ApprovalRecord {

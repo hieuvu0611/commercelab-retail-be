@@ -504,7 +504,7 @@ export class AppController {
 
   @Get('/api/v1/backoffice/analytics/olap')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'MARKETING', 'ADMIN')
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'MARKETING', 'ADMIN')
   async getOlapAnalytics(@Query('period') period?: string) {
     const data = await this.clickhouseAnalytics.getOlapDashboard(period || '30D');
     return new ApiResult(data, 'ClickHouse OLAP analytics retrieved successfully');
@@ -512,7 +512,7 @@ export class AppController {
 
   @Post('/api/v1/backoffice/analytics/sync')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ACCESS_ADMIN', 'ADMIN')
+  @Roles('SUPPORT_LEAD', 'WAREHOUSE_MGR', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'ADMIN')
   async syncOlapAnalytics(@Req() req: any) {
     const authHeader = req.headers?.authorization;
     const data = await this.clickhouseAnalytics.syncFromSources(authHeader);

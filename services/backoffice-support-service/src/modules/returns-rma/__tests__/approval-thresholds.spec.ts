@@ -12,7 +12,9 @@ describe('Shipping Refund Rules & Approval Thresholds (P8-T05, P09, P11, P10)', 
 
   beforeEach(() => {
     mockDb = {
-      query: jest.fn().mockResolvedValue({ rows: [] }),
+      query: jest.fn().mockImplementation(async (sql: string, params: unknown[]) => ({
+        rows: sql.includes('RETURNING approval_id') ? [{ approval_id: params[4] }] : [],
+      })),
       ping: jest.fn().mockResolvedValue(true),
     };
     paymentClient = new PaymentClient();

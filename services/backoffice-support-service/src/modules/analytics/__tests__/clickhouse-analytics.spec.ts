@@ -84,10 +84,16 @@ describe('ClickhouseAnalyticsService (SC12 OLAP)', () => {
     expect(syncRes.ordersSynced).toBe(2);
     expect(syncRes.shipmentsSynced).toBe(2);
     expect(syncRes.inventoryRowsSynced).toBe(1);
-    expect(chCalls.some((c) => c.includes('INSERT INTO order_facts'))).toBe(true);
+    expect(chCalls.some((c) => c.includes('INSERT INTO order_facts_stage_'))).toBe(true);
+    expect(chCalls.some((c) => c.includes('EXCHANGE TABLES order_facts AND order_facts_stage_'))).toBe(true);
+    expect(chCalls.some((c) => c.includes('TRUNCATE TABLE'))).toBe(false);
 
     const dash = await svc.getOlapDashboard('30D');
     expect(dash.kpis.totalOrders).toBe(2);
+    expect(chCalls.some((c) => c.includes("'IN_FULFILLMENT'"))).toBe(true);
+    expect(chCalls.filter((c) => c.includes('INTERVAL 30 DAY'))).toHaveLength(3);
+    await svc.getOlapDashboard('7D');
+    expect(chCalls.filter((c) => c.includes('INTERVAL 7 DAY'))).toHaveLength(3);
     expect(dash.kpis.grossGmvVnd).toBe(1110000);
     expect(dash.byWarehouse[0].warehouseId).toBe('WH-HCM-01');
     expect(dash.metadata.source).toBe('ClickHouse OLAP');

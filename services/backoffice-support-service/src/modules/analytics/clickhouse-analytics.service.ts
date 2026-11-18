@@ -1,4 +1,5 @@
-import { Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 
 export interface OlapKpis {
@@ -47,6 +48,8 @@ export interface OlapDashboardResponse {
 @Injectable()
 export class ClickhouseAnalyticsService {
   private schemaReady = false;
+  private readonly logger = new Logger(ClickhouseAnalyticsService.name);
+  private currentSync?: ReturnType<ClickhouseAnalyticsService['publishSnapshot']>;
 
   constructor(@Optional() private readonly db?: DatabaseService) {}
 
@@ -120,6 +123,7 @@ export class ClickhouseAnalyticsService {
         warehouse_id String,
         status String,
         cod_amount_vnd Int64,
+        created_at DateTime64(3, 'UTC'),
         synced_at DateTime64(3, 'UTC')
       ) ENGINE = MergeTree() ORDER BY (shipment_id)
     `);
@@ -141,6 +145,7 @@ export class ClickhouseAnalyticsService {
         inventory_rows Int64
       ) ENGINE = MergeTree() ORDER BY (synced_at)
     `);
+    await this.execClickhouse("ALTER TABLE shipment_facts ADD COLUMN IF NOT EXISTS created_at DateTime64(3, 'UTC') DEFAULT synced_at");
     this.schemaReady = true;
   }
 
@@ -193,10 +198,16 @@ export class ClickhouseAnalyticsService {
     return safe.toISOString().replace('T', ' ').replace('Z', '');
   }
 
-  async syncFromSources(authHeader?: string) {
+  syncFromSources(authHeader?: string) {
+    this.currentSync ??= this.publishSnapshot(authHeader).finally(() => {
+      this.currentSync = undefined;
+    });
+    return this.currentSync;
+  }
+
+  private async publishSnapshot(authHeader?: string) {
     await this.ensureSchema();
     const cfg = this.config();
-    const nowIso = this.toClickhouseDateTime();
 
     const [orders, shipments, stockRows] = await Promise.all([
       this.fetchServiceList(`${cfg.orderUrl}/api/v1/orders/internal`, authHeader, true),
@@ -204,57 +215,77 @@ export class ClickhouseAnalyticsService {
       this.fetchServiceList(`${cfg.inventoryUrl}/api/v1/inventory/internal/stock`, authHeader, false),
     ]);
 
-    await this.execClickhouse('TRUNCATE TABLE IF EXISTS order_facts');
-    await this.execClickhouse('TRUNCATE TABLE IF EXISTS shipment_facts');
-    await this.execClickhouse('TRUNCATE TABLE IF EXISTS warehouse_inventory_facts');
+    const nowIso = this.toClickhouseDateTime();
+    const tables = ['order_facts', 'shipment_facts', 'warehouse_inventory_facts'];
+    const suffix = randomUUID().replace(/-/g, '');
+    const staging = tables.map((table) => `${table}_stage_${suffix}`);
+    try {
+      for (const [index, table] of tables.entries()) {
+        await this.execClickhouse(`CREATE TABLE ${staging[index]} AS ${table}`);
+      }
 
-    if (orders.length > 0) {
-      const ndjson = orders
-        .map((o) =>
-          JSON.stringify({
-            order_id: String(o.orderId || ''),
-            status: String(o.status || ''),
-            payment_method: String(o.paymentMethod || 'PREPAID'),
-            warehouse_id: String(o.warehouseId || 'WH-HCM-01'),
-            total_payable_vnd: Number(o.totalPayableVnd || 0),
-            discount_vnd: Number(o.discountVnd || 0),
-            created_at: this.toClickhouseDateTime(o.createdAt),
-            synced_at: nowIso,
-          }),
-        )
-        .join('\n');
-      await this.execClickhouse('INSERT INTO order_facts FORMAT JSONEachRow', ndjson);
-    }
+      if (orders.length > 0) {
+        const ndjson = orders
+          .map((o) =>
+            JSON.stringify({
+              order_id: String(o.orderId || ''),
+              status: String(o.status || ''),
+              payment_method: String(o.paymentMethod || 'PREPAID'),
+              warehouse_id: String(o.warehouseId || 'WH-HCM-01'),
+              total_payable_vnd: Number(o.totalPayableVnd || 0),
+              discount_vnd: Number(o.discountVnd || 0),
+              created_at: this.toClickhouseDateTime(o.createdAt),
+              synced_at: nowIso,
+            }),
+          )
+          .join('\n');
+        await this.execClickhouse(`INSERT INTO ${staging[0]} FORMAT JSONEachRow`, ndjson);
+      }
 
-    if (shipments.length > 0) {
-      const ndjson = shipments
-        .map((s) =>
-          JSON.stringify({
-            shipment_id: String(s.shipmentId || ''),
-            order_id: String(s.orderId || ''),
-            warehouse_id: String(s.warehouseId || 'WH-HCM-01'),
-            status: String(s.status || ''),
-            cod_amount_vnd: Number(s.codAmountToCollect || 0),
-            synced_at: nowIso,
-          }),
-        )
-        .join('\n');
-      await this.execClickhouse('INSERT INTO shipment_facts FORMAT JSONEachRow', ndjson);
-    }
+      if (shipments.length > 0) {
+        const ndjson = shipments
+          .map((s) =>
+            JSON.stringify({
+              shipment_id: String(s.shipmentId || ''),
+              order_id: String(s.orderId || ''),
+              warehouse_id: String(s.warehouseId || 'WH-HCM-01'),
+              status: String(s.status || ''),
+              cod_amount_vnd: Number(s.codAmountToCollect || 0),
+              created_at: this.toClickhouseDateTime(s.createdAt),
+              synced_at: nowIso,
+            }),
+          )
+          .join('\n');
+        await this.execClickhouse(`INSERT INTO ${staging[1]} FORMAT JSONEachRow`, ndjson);
+      }
 
-    if (stockRows.length > 0) {
-      const ndjson = stockRows
-        .map((st) =>
-          JSON.stringify({
-            sku_id: String(st.skuId || ''),
-            warehouse_id: String(st.warehouseId || 'WH-HCM-01'),
-            available_qty: Number(st.availableQty ?? st.available ?? 0),
-            reserved_qty: Number(st.reservedQty ?? st.reserved ?? 0),
-            synced_at: nowIso,
-          }),
-        )
-        .join('\n');
-      await this.execClickhouse('INSERT INTO warehouse_inventory_facts FORMAT JSONEachRow', ndjson);
+      if (stockRows.length > 0) {
+        const ndjson = stockRows
+          .map((st) =>
+            JSON.stringify({
+              sku_id: String(st.skuId || ''),
+              warehouse_id: String(st.warehouseId || 'WH-HCM-01'),
+              available_qty: Number(st.availableQty ?? st.available ?? 0),
+              reserved_qty: Number(st.reservedQty ?? st.reserved ?? 0),
+              synced_at: nowIso,
+            }),
+          )
+          .join('\n');
+        await this.execClickhouse(`INSERT INTO ${staging[2]} FORMAT JSONEachRow`, ndjson);
+      }
+
+      for (const [index, table] of tables.entries()) {
+        await this.execClickhouse(`EXCHANGE TABLES ${table} AND ${staging[index]}`);
+      }
+    } finally {
+      const cleanup = await Promise.allSettled(
+        staging.map((table) => this.execClickhouse(`DROP TABLE IF EXISTS ${table} SYNC`)),
+      );
+      for (const [index, result] of cleanup.entries()) {
+        if (result.status === 'rejected') {
+          this.logger.warn(`Could not remove ClickHouse staging table ${staging[index]}: ${String(result.reason)}`);
+        }
+      }
     }
 
     await this.execClickhouse(
@@ -278,7 +309,7 @@ export class ClickhouseAnalyticsService {
   }
 
   private async queryJsonRows<T = Record<string, any>>(sql: string): Promise<T[]> {
-    const raw = await this.execClickhouse(`${sql} FORMAT JSON`);
+    const raw = await this.execClickhouse(`${sql} SETTINGS max_threads = 1 FORMAT JSON`);
     const parsed = JSON.parse(raw) as { data?: T[] };
     return Array.isArray(parsed?.data) ? parsed.data : [];
   }
@@ -287,46 +318,56 @@ export class ClickhouseAnalyticsService {
     await this.ensureSchema();
     const cfg = this.config();
 
-    const [orderAggRows, statusRows, shipWhRows, invWhRows, watermarkRows] = await Promise.all([
-      this.queryJsonRows(`
+    const periodStart = {
+      TODAY: "toStartOfDay(now('UTC'))",
+      '7D': "now('UTC') - INTERVAL 7 DAY",
+      '30D': "now('UTC') - INTERVAL 30 DAY",
+    };
+    const normalized = period.toUpperCase();
+    const selected = normalized === 'TODAY' || normalized === '7D' ? normalized : '30D';
+    const timeFilter = `WHERE created_at >= ${periodStart[selected]}`;
+
+    const orderAggRows = await this.queryJsonRows(`
         SELECT
           count() AS totalOrders,
-          countIf(status IN ('CONFIRMED', 'FULFILLING', 'PARTIALLY_DELIVERED', 'DELIVERED')) AS confirmedOrders,
+          countIf(status IN ('CONFIRMED', 'IN_FULFILLMENT', 'PARTIALLY_DELIVERED', 'DELIVERED')) AS confirmedOrders,
           countIf(status = 'DELIVERED') AS deliveredOrders,
           sum(total_payable_vnd) AS grossGmvVnd,
           sum(discount_vnd) AS totalDiscountVnd,
           countIf(payment_method = 'COD') AS codOrders,
           countIf(payment_method != 'COD') AS prepaidOrders
         FROM order_facts
-      `),
-      this.queryJsonRows(`
+        ${timeFilter}
+      `);
+    const statusRows = await this.queryJsonRows(`
         SELECT status, count() AS orders, sum(total_payable_vnd) AS gmvVnd
         FROM order_facts
+        ${timeFilter}
         GROUP BY status
         ORDER BY orders DESC
-      `),
-      this.queryJsonRows(`
+      `);
+    const shipWhRows = await this.queryJsonRows(`
         SELECT
           warehouse_id AS warehouseId,
           count() AS shipments,
           countIf(status = 'DELIVERED') AS delivered,
           sum(cod_amount_vnd) AS codToCollectVnd
         FROM shipment_facts
+        ${timeFilter}
         GROUP BY warehouse_id
-      `),
-      this.queryJsonRows(`
+      `);
+    const invWhRows = await this.queryJsonRows(`
         SELECT
           warehouse_id AS warehouseId,
           sum(available_qty) AS availableUnits,
           sum(reserved_qty) AS reservedUnits
         FROM warehouse_inventory_facts
         GROUP BY warehouse_id
-      `),
-      this.queryJsonRows(`
+      `);
+    const watermarkRows = await this.queryJsonRows(`
         SELECT toString(max(synced_at)) AS lastSyncedAt
         FROM sync_watermarks
-      `),
-    ]);
+      `);
 
     let openCases = 0;
     let totalRma = 0;
@@ -401,7 +442,7 @@ export class ClickhouseAnalyticsService {
       metadata: {
         source: 'ClickHouse OLAP',
         database: cfg.db,
-        period,
+        period: selected,
         lastSyncedAt: lastSyncedIso,
         lagSeconds,
         isStaleWarning: lagSeconds === null || lagSeconds > 300,

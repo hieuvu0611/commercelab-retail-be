@@ -73,11 +73,13 @@ export interface ReturnCaseRecord {
   }>;
 }
 
+const DEFAULT_RETURN_WAREHOUSE = 'WH-HCM-01';
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class ReturnsRmaService implements OnModuleInit {
   private readonly ceilings = new Map<string, OrderLineCeiling>();
+  private readonly orderedQuantities = new Map<string, number>();
   private readonly returnCases = new Map<string, ReturnCaseRecord>();
   private hydrated = false;
 
@@ -223,10 +225,10 @@ export class ReturnsRmaService implements OnModuleInit {
     orderId: string,
     authHeader?: string,
     callerCustomerId?: string,
-  ): Promise<void> {
+  ): Promise<Map<number, string>> {
     const orderUrl = process.env.ORDER_SERVICE_URL?.replace(/\/$/, '');
     const fulfillmentUrl = process.env.FULFILLMENT_SERVICE_URL?.replace(/\/$/, '');
-    if (!orderUrl || !fulfillmentUrl) return;
+    if (!orderUrl || !fulfillmentUrl) return new Map();
 
     const headers: Record<string, string> = {};
     if (authHeader) {
@@ -235,7 +237,9 @@ export class ReturnsRmaService implements OnModuleInit {
 
     const [orderRes, trackingRes] = await Promise.all([
       fetch(`${orderUrl}/api/v1/orders/${encodeURIComponent(orderId)}`, { headers }),
-      fetch(`${fulfillmentUrl}/api/v1/orders/${encodeURIComponent(orderId)}/tracking`, { headers }),
+      fetch(`${fulfillmentUrl}/api/v1/shipments/internal/orders/${encodeURIComponent(orderId)}`, {
+        headers: { 'X-Internal-Token': resolveInternalServiceToken(false) },
+      }),
     ]);
 
     if (orderRes.status === 404 || orderRes.status === 403 || trackingRes.status === 404 || trackingRes.status === 403) {
@@ -261,95 +265,78 @@ export class ReturnsRmaService implements OnModuleInit {
         }>;
       };
     };
-    const trackingJson = (await trackingRes.json()) as {
-      data?: {
+    const { data: parcels } = (await trackingRes.json()) as {
+      data?: Array<{
+        parcelIndex?: number;
+        warehouseId: string;
         deliveredAt?: string;
-        quantities?: Array<{ skuId?: string; delivered?: number }>;
-        parcels?: Array<{
-          warehouseId?: string;
-          deliveredAt?: string;
-          items?: Array<{ skuId?: string; deliveredQuantity?: number; quantity?: number }>;
-        }>;
-      };
+        returnWindowEndsAt?: string;
+        items: Array<{ skuId: string; deliveredQuantity: number }>;
+      }>;
     };
 
     const orderData = orderJson.data;
-    const trackingData = trackingJson.data;
-    if (!orderData?.items || !trackingData) {
-      throw new NotFoundException(`Dữ liệu đơn hàng ${orderId} không đầy đủ`);
+    if (!orderData?.items || !Array.isArray(parcels)) {
+      throw new ServiceUnavailableException(`Incomplete order or shipment data for order ${orderId}`);
+    }
+    const orderOwner = orderData.customerId || orderData.userId || callerCustomerId;
+    if (callerCustomerId && orderOwner !== callerCustomerId) {
+      throw new ForbiddenException('The order belongs to a different customer');
     }
 
-    const orderOwner = orderData.customerId || orderData.userId;
-    if (callerCustomerId && orderOwner && orderOwner !== callerCustomerId) {
-      throw new ForbiddenException('Bạn không có quyền thao tác trả hàng trên đơn hàng này');
-    }
-
-    const deliveredBySku = new Map<string, number>();
-    for (const q of trackingData.quantities || []) {
-      if (q.skuId) {
-        deliveredBySku.set(q.skuId, Number(q.delivered || 0));
-      }
-    }
-
-    const parcelMetaBySku = new Map<string, { warehouseId?: string; deliveredAt?: string }>();
-    for (const parcel of trackingData.parcels || []) {
-      for (const pItem of parcel.items || []) {
-        if (!pItem.skuId) continue;
-        parcelMetaBySku.set(pItem.skuId, {
-          warehouseId: parcel.warehouseId || orderData.warehouseId,
-          deliveredAt: parcel.deliveredAt || trackingData.deliveredAt,
+    const ordered = new Map(orderData.items.map((item) => [item.skuId, item]));
+    this.orderedQuantities.set(orderId, orderData.items.reduce((total, item) => total + (item.quantity ?? 0), 0));
+    const activeCeilings = new Map<string, OrderLineCeiling>();
+    const parcelWarehouses = new Map<number, string>();
+    for (const parcel of parcels) {
+      if (!parcel.deliveredAt || !parcel.warehouseId) continue;
+      const deliveredAt = Date.parse(parcel.deliveredAt);
+      const endsAt = parcel.returnWindowEndsAt
+        ? Date.parse(parcel.returnWindowEndsAt)
+        : deliveredAt + SEVEN_DAYS_MS;
+      if (!Number.isFinite(endsAt) || Date.now() > endsAt) continue;
+      if (parcel.parcelIndex !== undefined) parcelWarehouses.set(parcel.parcelIndex, parcel.warehouseId);
+      for (const item of parcel.items) {
+        const orderLine = ordered.get(item.skuId);
+        if (!orderLine || item.deliveredQuantity <= 0) continue;
+        const key = this.ceilingKey(orderId, item.skuId, parcel.warehouseId);
+        const current = activeCeilings.get(key);
+        if (current) {
+          current.deliveredQty += item.deliveredQuantity;
+          continue;
+        }
+        activeCeilings.set(key, {
+          orderId,
+          skuId: item.skuId,
+          customerId: orderOwner,
+          warehouseId: parcel.warehouseId,
+          deliveredQty: item.deliveredQuantity,
+          returnedAcceptedQty: 0,
+          returnOpenQty: 0,
+          allocatedUnitPaidVnd: Number(orderLine.allocatedUnitPaidVnd ?? 0),
+          shippingFeeVnd: Number(orderData.shippingFeeVnd ?? 0),
+          deliveredAt: parcel.deliveredAt,
         });
       }
     }
 
-    const acceptedQtyBySku = new Map<string, number>();
-    const openQtyBySku = new Map<string, number>();
     for (const existing of this.returnCases.values()) {
-      if (existing.orderId !== orderId || existing.status === 'REJECTED') continue;
-      for (const it of existing.items) {
+      if (existing.orderId !== orderId || ['REJECTED', 'QC_FAILED'].includes(existing.status)) continue;
+      for (const item of existing.items) {
+        const ceiling = activeCeilings.get(this.ceilingKey(orderId, item.skuId, existing.warehouseId));
+        if (!ceiling) continue;
         if (existing.status === 'REFUNDED') {
-          acceptedQtyBySku.set(
-            it.skuId,
-            (acceptedQtyBySku.get(it.skuId) || 0) + (it.qcPassedQuantity || it.quantity),
-          );
+          ceiling.returnedAcceptedQty += item.qcPassedQuantity ?? item.quantity;
         } else {
-          openQtyBySku.set(it.skuId, (openQtyBySku.get(it.skuId) || 0) + it.quantity);
+          ceiling.returnOpenQty += item.quantity;
         }
       }
     }
 
-    const parcelDelivered = (trackingData.parcels || [])
-      .map((p) => p.deliveredAt)
-      .filter((d): d is string => Boolean(d))
-      .sort()
-      .pop();
-    const defaultDeliveredAt = trackingData.deliveredAt || parcelDelivered;
-    const defaultWarehouseId =
-      trackingData.parcels?.[0]?.warehouseId || orderData.warehouseId || 'WH-HCM-01';
-    const shippingFeeVnd = Number(orderData.shippingFeeVnd ?? 0);
-
-    for (const it of orderData.items) {
-      if (!it.skuId) continue;
-      const deliveredQty = deliveredBySku.get(it.skuId) ?? 0;
-      if (deliveredQty <= 0) continue;
-      const skuMeta = parcelMetaBySku.get(it.skuId);
-      const deliveredAt = skuMeta?.deliveredAt || defaultDeliveredAt;
-      if (!deliveredAt) {
-        throw new ConflictException(`Kiện hàng cho SKU ${it.skuId} chưa có thời điểm giao thành công`);
-      }
-      this.seedCeiling({
-        orderId,
-        skuId: it.skuId,
-        customerId: orderOwner,
-        warehouseId: skuMeta?.warehouseId || defaultWarehouseId,
-        deliveredQty,
-        returnedAcceptedQty: acceptedQtyBySku.get(it.skuId) || 0,
-        returnOpenQty: openQtyBySku.get(it.skuId) || 0,
-        allocatedUnitPaidVnd: Number(it.allocatedUnitPaidVnd ?? 0),
-        shippingFeeVnd,
-        deliveredAt,
-      });
+    for (const [key, ceiling] of this.ceilings) {
+      if (ceiling.orderId === orderId) this.ceilings.delete(key);
     }
+    for (const ceiling of activeCeilings.values()) this.seedCeiling(ceiling);
 
     const captured = Number(orderData.payment?.capturedAmountVnd ?? orderData.totalPayableVnd ?? 0);
     if (captured > 0 && !this.paymentClient.getSummary(orderId)) {
@@ -359,15 +346,20 @@ export class ReturnsRmaService implements OnModuleInit {
         refundPending: 0,
       });
     }
+    return parcelWarehouses;
+  }
+
+  private ceilingKey(orderId: string, skuId: string, warehouseId = DEFAULT_RETURN_WAREHOUSE): string {
+    return JSON.stringify([orderId, skuId, warehouseId]);
   }
 
   seedCeiling(ceiling: OrderLineCeiling): void {
-    const key = `${ceiling.orderId}|${ceiling.skuId}`;
-    this.ceilings.set(key, { ...ceiling });
+    const warehouseId = ceiling.warehouseId || DEFAULT_RETURN_WAREHOUSE;
+    this.ceilings.set(this.ceilingKey(ceiling.orderId, ceiling.skuId, warehouseId), { ...ceiling, warehouseId });
   }
 
-  getCeiling(orderId: string, skuId: string): OrderLineCeiling | undefined {
-    return this.ceilings.get(`${orderId}|${skuId}`);
+  getCeiling(orderId: string, skuId: string, warehouseId = DEFAULT_RETURN_WAREHOUSE): OrderLineCeiling | undefined {
+    return this.ceilings.get(this.ceilingKey(orderId, skuId, warehouseId));
   }
 
   /**
@@ -392,71 +384,53 @@ export class ReturnsRmaService implements OnModuleInit {
       throw new ConflictException('Yêu cầu trả hàng cần ít nhất 1 dòng sản phẩm');
     }
 
-    if (process.env.ORDER_SERVICE_URL && process.env.FULFILLMENT_SERVICE_URL) {
-      await this.hydrateCeilingsFromOrderServices(dto.orderId, authHeader, customerId);
+    const requestedBySku = new Map(dto.lines.map((line) => [line.skuId, line.quantity]));
+    if (requestedBySku.size !== dto.lines.length) {
+      throw new BadRequestException('Each SKU may appear only once in a return request');
     }
 
-    // 1. Kiểm tra thời hạn 7 ngày (P07)
-    const now = Date.now();
-    const resolvedWarehouses = new Set<string>();
+    const usesLiveShipments = Boolean(process.env.ORDER_SERVICE_URL && process.env.FULFILLMENT_SERVICE_URL);
+    const parcels = usesLiveShipments
+      ? await this.hydrateCeilingsFromOrderServices(dto.orderId, authHeader, customerId)
+      : new Map<number, string>();
+    const replay = this.returnCases.get(rmaId);
+    if (replay) return replay;
+    const requestedWarehouse = dto.parcelIndex !== undefined ? parcels.get(dto.parcelIndex) : undefined;
+    if (usesLiveShipments && dto.parcelIndex !== undefined && !requestedWarehouse) {
+      throw new ConflictException('The selected parcel has no eligible delivery');
+    }
+
+    const orderCeilings = Array.from(this.ceilings.values()).filter((ceiling) => ceiling.orderId === dto.orderId);
+    const candidates = new Set(requestedWarehouse
+      ? [requestedWarehouse]
+      : orderCeilings.map((ceiling) => ceiling.warehouseId || DEFAULT_RETURN_WAREHOUSE));
     for (const line of dto.lines) {
-      const key = `${dto.orderId}|${line.skuId}`;
-      const ceiling = this.ceilings.get(key);
-      if (!ceiling) {
-        throw new NotFoundException(`Không tìm thấy dòng hàng đã giao cho SKU ${line.skuId} của đơn ${dto.orderId}`);
+      if (!Number.isSafeInteger(line.quantity) || line.quantity < 1) {
+        throw new BadRequestException('Return quantities must be positive integers');
       }
-      if (ceiling.customerId && ceiling.customerId !== customerId) {
-        throw new ForbiddenException('Bạn không có quyền tạo yêu cầu trả hàng cho đơn hàng này');
+      const skuCeilings = orderCeilings.filter((ceiling) => ceiling.skuId === line.skuId);
+      if (skuCeilings.some((ceiling) => ceiling.customerId && ceiling.customerId !== customerId)) {
+        throw new ForbiddenException('The order belongs to a different customer');
       }
-      if (ceiling.warehouseId) {
-        resolvedWarehouses.add(ceiling.warehouseId);
-      }
-
-      const deliveredTime = new Date(ceiling.deliveredAt).getTime();
-      if (Number.isNaN(deliveredTime)) {
-        throw new ConflictException(`Không xác định được thời gian giao hàng của SKU ${line.skuId}`);
-      }
-
-      if (now - deliveredTime > SEVEN_DAYS_MS) {
-        throw new ConflictException(
-          `Quá hạn đổi trả: Đơn hàng đã giao quá 7 ngày theo quy định B06 (${new Date(deliveredTime).toLocaleDateString()})`,
-        );
-      }
-
-      // 2. Kiểm tra bất biến I07 (delivered >= accepted + open + requested)
-      const remainingReturnable =
-        ceiling.deliveredQty - ceiling.returnedAcceptedQty - ceiling.returnOpenQty;
-      if (line.quantity <= 0 || line.quantity > remainingReturnable) {
-        throw new ConflictException(
-          `Vi phạm bất biến I07: Số lượng yêu cầu trả (${line.quantity}) vượt hạn mức còn được trả (${remainingReturnable}) của SKU ${line.skuId}`,
-        );
+      for (const warehouse of candidates) {
+        const ceiling = this.getCeiling(dto.orderId, line.skuId, warehouse);
+        const withinWindow = ceiling && (usesLiveShipments || Date.now() - Date.parse(ceiling.deliveredAt) <= SEVEN_DAYS_MS);
+        if (!ceiling || !withinWindow || line.quantity > ceiling.deliveredQty - ceiling.returnedAcceptedQty - ceiling.returnOpenQty) {
+          candidates.delete(warehouse);
+        }
       }
     }
-
-    if (resolvedWarehouses.size > 1) {
-      throw new ConflictException(
-        'Vui lòng tạo yêu cầu trả hàng riêng cho từng kho xử lý của kiện hàng',
-      );
+    const warehouseId = Array.from(candidates).sort()[0];
+    if (!warehouseId) {
+      throw new ConflictException('Return quantities exceed eligible delivery at a single warehouse (I07)');
     }
-    const warehouseId = Array.from(resolvedWarehouses)[0] || 'WH-HCM-01';
 
-    // 3. Khóa số lượng vào returnOpenQty để chặn 2 yêu cầu trùng lặp
     let goodsRefundVnd = 0;
     const items: ReturnCaseLine[] = [];
-    let isFullOrderReturn = true;
-
     for (const line of dto.lines) {
-      const key = `${dto.orderId}|${line.skuId}`;
-      const ceiling = this.ceilings.get(key)!;
+      const ceiling = this.getCeiling(dto.orderId, line.skuId, warehouseId)!;
       ceiling.returnOpenQty += line.quantity;
-
-      const lineRefund = line.quantity * ceiling.allocatedUnitPaidVnd;
-      goodsRefundVnd += lineRefund;
-
-      if (line.quantity < ceiling.deliveredQty) {
-        isFullOrderReturn = false;
-      }
-
+      goodsRefundVnd += line.quantity * ceiling.allocatedUnitPaidVnd;
       items.push({
         skuId: line.skuId,
         skuName: line.skuName || line.skuId,
@@ -468,17 +442,9 @@ export class ReturnsRmaService implements OnModuleInit {
       });
     }
 
-    const orderCeilings = Array.from(this.ceilings.values()).filter(
-      (c) => c.orderId === dto.orderId,
-    );
-    const requestedBySku = new Map(dto.lines.map((l) => [l.skuId, l.quantity]));
-    if (
-      orderCeilings.some(
-        (c) => (requestedBySku.get(c.skuId) || 0) < c.deliveredQty,
-      )
-    ) {
-      isFullOrderReturn = false;
-    }
+    const orderedQuantity = this.orderedQuantities.get(dto.orderId)
+      ?? orderCeilings.reduce((total, ceiling) => total + ceiling.deliveredQty, 0);
+    const isFullOrderReturn = items.reduce((total, item) => total + item.quantity, 0) === orderedQuantity;
 
     // 4. Tính toán phí vận chuyển hoàn (P09 vs P11)
     const isSellerError = [
@@ -492,7 +458,7 @@ export class ReturnsRmaService implements OnModuleInit {
     let shippingRefundVnd = 0;
     // P11: Lỗi do cửa hàng và trả toàn bộ đơn hàng -> hoàn lại cả phí ship (30.000đ)
     if (isSellerError && isFullOrderReturn) {
-      const firstCeiling = this.ceilings.get(`${dto.orderId}|${dto.lines[0].skuId}`);
+      const firstCeiling = this.getCeiling(dto.orderId, dto.lines[0].skuId, warehouseId);
       shippingRefundVnd = firstCeiling?.shippingFeeVnd || 0;
     }
 
@@ -861,7 +827,7 @@ export class ReturnsRmaService implements OnModuleInit {
     } else {
       record.status = 'QC_FAILED';
       for (const item of record.items) {
-        const ceiling = this.ceilings.get(`${record.orderId}|${item.skuId}`);
+        const ceiling = this.getCeiling(record.orderId, item.skuId, record.warehouseId);
         if (ceiling) {
           ceiling.returnOpenQty = Math.max(0, ceiling.returnOpenQty - item.quantity);
         }
@@ -887,8 +853,7 @@ export class ReturnsRmaService implements OnModuleInit {
 
     // Nhả lại returnOpenQty
     for (const item of record.items) {
-      const key = `${record.orderId}|${item.skuId}`;
-      const ceiling = this.ceilings.get(key);
+      const ceiling = this.getCeiling(record.orderId, item.skuId, record.warehouseId);
       if (ceiling) {
         ceiling.returnOpenQty = Math.max(0, ceiling.returnOpenQty - item.quantity);
       }
@@ -966,7 +931,7 @@ export class ReturnsRmaService implements OnModuleInit {
     await this.paymentClient.executeRefundPayout(record.orderId, amountVnd, record.returnId);
 
     for (const item of record.items) {
-      const ceiling = this.ceilings.get(`${record.orderId}|${item.skuId}`);
+      const ceiling = this.getCeiling(record.orderId, item.skuId, record.warehouseId);
       if (ceiling) {
         ceiling.returnedAcceptedQty += item.qcPassedQuantity;
         ceiling.returnOpenQty = Math.max(0, ceiling.returnOpenQty - item.quantity);

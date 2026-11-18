@@ -41,6 +41,14 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
     expect(ceiling?.returnOpenQty).toBe(1);
   });
 
+  it('rejects duplicate SKU lines before reserving a return ceiling', async () => {
+    const line = { skuId: 'SKU-BALO-BLACK-20L', quantity: 2 };
+    await expect(service.openRmaRequest({
+      orderId: 'O-001', reason: 'DAMAGED', lines: [line, line],
+    })).rejects.toThrow(BadRequestException);
+    expect(service.getCeiling('O-001', line.skuId)?.returnOpenQty).toBe(0);
+  });
+
   it('strictly enforces I07: rejects return quantity exceeding delivered ceiling', async () => {
     // Ceiling delivered is 2, asking for 3 must fail
     await expect(
@@ -155,40 +163,24 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
     const prevOrderUrl = process.env.ORDER_SERVICE_URL;
     const prevFulfillmentUrl = process.env.FULFILLMENT_SERVICE_URL;
     const prevFetch = global.fetch;
+    const prevInternalToken = process.env.INTERNAL_SERVICE_TOKEN;
+    process.env.INTERNAL_SERVICE_TOKEN = "test-internal-token";
     process.env.ORDER_SERVICE_URL = 'http://orders.test:8083';
     process.env.FULFILLMENT_SERVICE_URL = 'http://fulfillment.test:8085';
 
     const nowIso = new Date().toISOString();
     global.fetch = jest.fn(async (url: any) => {
       const target = String(url);
-      if (target.includes('/api/v1/orders/O-REAL-2P/tracking')) {
-        return new Response(
-          JSON.stringify({
-            data: {
-              orderId: 'O-REAL-2P',
-              status: 'DELIVERED',
-              quantities: [
-                { skuId: 'SKU-CAMPUS-BACKPACK-BLACK-20L', ordered: 3, delivered: 3 },
-                { skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', ordered: 1, delivered: 1 },
-              ],
-              parcels: [
-                {
-                  shipmentId: 'SHP-O-REAL-2P-1',
-                  warehouseId: 'WH-HCM-01',
-                  deliveredAt: nowIso,
-                  items: [{ skuId: 'SKU-CAMPUS-BACKPACK-BLACK-20L', deliveredQuantity: 3 }],
-                },
-                {
-                  shipmentId: 'SHP-O-REAL-2P-2',
-                  warehouseId: 'WH-HN-01',
-                  deliveredAt: nowIso,
-                  items: [{ skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', deliveredQuantity: 1 }],
-                },
-              ],
-            },
-          }),
-          { status: 200 },
-        );
+      if (target.includes('/api/v1/shipments/internal/orders/O-REAL-2P')) {
+        return Response.json({ data: [
+          { warehouseId: 'WH-HCM-01', deliveredAt: nowIso, items: [
+            { skuId: 'SKU-CAMPUS-BACKPACK-BLACK-20L', deliveredQuantity: 3 },
+            { skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', deliveredQuantity: 1 },
+          ] },
+          { warehouseId: 'WH-HN-01', deliveredAt: nowIso, items: [
+            { skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', deliveredQuantity: 1 },
+          ] },
+        ] });
       }
       return new Response(
         JSON.stringify({
@@ -200,7 +192,7 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
             payment: { capturedAmountVnd: 1_163_750 },
             items: [
               { skuId: 'SKU-CAMPUS-BACKPACK-BLACK-20L', skuName: 'Campus', quantity: 3, allocatedUnitPaidVnd: 242_060 },
-              { skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', skuName: 'Commuter', quantity: 1, allocatedUnitPaidVnd: 437_570 },
+              { skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', skuName: 'Commuter', quantity: 2, allocatedUnitPaidVnd: 437_570 },
             ],
           },
         }),
@@ -220,13 +212,20 @@ describe('ReturnsRmaService (P8-T02, B06, I07, SC07)', () => {
         'Bearer test-jwt',
       );
       expect(rma.status).toBe('REQUESTED');
-      expect(rma.warehouseId).toBe('WH-HN-01');
+      expect(rma.warehouseId).toBe('WH-HCM-01');
+      const second = await service.openRmaRequest({
+        orderId: 'O-REAL-2P', reason: 'DAMAGED',
+        lines: [{ skuId: 'SKU-COMMUTER-BACKPACK-GREY-28L', quantity: 1 }],
+      }, 'user-lan', 'Bearer test-jwt');
+      expect(second.warehouseId).toBe('WH-HN-01');
       expect(rma.customerNote).toBe('Handle snapped on arrival');
       expect(rma.refundableAmountVnd).toBe(437_570);
       expect(rma.shippingRefundVnd).toBe(0);
       expect(paymentClient.getSummary('O-REAL-2P')?.capturedAmount).toBe(1_163_750);
     } finally {
       global.fetch = prevFetch;
+      if (prevInternalToken === undefined) delete process.env.INTERNAL_SERVICE_TOKEN;
+      else process.env.INTERNAL_SERVICE_TOKEN = prevInternalToken;
       if (prevOrderUrl === undefined) delete process.env.ORDER_SERVICE_URL;
       else process.env.ORDER_SERVICE_URL = prevOrderUrl;
       if (prevFulfillmentUrl === undefined) delete process.env.FULFILLMENT_SERVICE_URL;

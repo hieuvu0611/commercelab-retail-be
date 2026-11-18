@@ -44,6 +44,11 @@ export class CreateReturnRequestDto {
   @IsNotEmpty()
   orderId: string;
 
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  parcelIndex?: number;
+
   @IsIn(VALID_REASONS)
   reason: string;
 
