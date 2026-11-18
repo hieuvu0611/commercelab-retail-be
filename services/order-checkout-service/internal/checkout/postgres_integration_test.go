@@ -129,7 +129,7 @@ func TestConcurrentCancelsOnPostgresAreOneCancellation(t *testing.T) {
 				Addresses: &fakeAddresses{}, Snapshots: snapshot.NewMemoryStore(), Fulfillment: ful, WarehouseID: "WH-HCM-01"}).
 				WithClock(func() time.Time { return now })
 		}
-		o, _, err := build().Place(ctx, Principal{UserID: user, Bearer: "tok"}, "key-"+code, "Q-1")
+		o, _, err := build().Place(ctx, Principal{UserID: user, Bearer: "tok"}, "key-"+code, "Q-1", "")
 		if err != nil || o.Status != string(saga.StateReserved) {
 			t.Fatalf("place = %+v %v", o, err)
 		}
@@ -212,7 +212,7 @@ func TestConcurrentSettlesOnPostgresAreOneOutcome_SC06(t *testing.T) {
 				Addresses: &fakeAddresses{}, Snapshots: snapshot.NewMemoryStore(), Fulfillment: ful, WarehouseID: "WH-HCM-01"}).
 				WithClock(func() time.Time { return now })
 		}
-		o, _, err := build().Place(ctx, Principal{UserID: user, Bearer: "tok"}, "key-"+code, "Q-1")
+		o, _, err := build().Place(ctx, Principal{UserID: user, Bearer: "tok"}, "key-"+code, "Q-1", "")
 		if err != nil {
 			t.Fatal(err)
 		}

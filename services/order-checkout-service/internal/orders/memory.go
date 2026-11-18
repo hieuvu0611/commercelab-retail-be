@@ -17,11 +17,13 @@ type memEntry struct {
 
 // MemoryStore is the dev/test store used when Postgres is absent (ALLOW_MEMORY_FALLBACK=true).
 type MemoryStore struct {
-	mu     sync.Mutex
-	keys   map[memKey]memEntry
-	orders map[string]Order
-	outbox []events.DomainEvent
-	now    func() time.Time
+	mu       sync.Mutex
+	keys     map[memKey]memEntry
+	orders   map[string]Order
+	orderSeq map[string]uint64
+	seq      uint64
+	outbox   []events.DomainEvent
+	now      func() time.Time
 }
 
 // Outbox returns the events written so far, oldest first (tests).
@@ -32,7 +34,12 @@ func (s *MemoryStore) Outbox() []events.DomainEvent {
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{keys: map[memKey]memEntry{}, orders: map[string]Order{}, now: func() time.Time { return time.Now().UTC() }}
+	return &MemoryStore{
+		keys:     map[memKey]memEntry{},
+		orders:   map[string]Order{},
+		orderSeq: map[string]uint64{},
+		now:      func() time.Time { return time.Now().UTC() },
+	}
 }
 
 // WithClock replaces the clock that stamps created and updated times (tests).
@@ -77,8 +84,10 @@ func (s *MemoryStore) Create(_ context.Context, key, hash string, o Order, ev ..
 			return Order{}, false, ErrCODVelocityLimit
 		}
 	}
+	s.seq++
 	s.keys[k] = memEntry{hash: hash, orderID: o.OrderID}
 	s.orders[o.OrderID] = clone(o)
+	s.orderSeq[o.OrderID] = s.seq
 	s.outbox = append(s.outbox, ev...)
 	return clone(o), false, nil
 }
@@ -123,6 +132,9 @@ func (s *MemoryStore) Query(_ context.Context, f Filter) ([]Order, int, error) {
 	sort.Slice(out, func(i, j int) bool {
 		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
 			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		if s.orderSeq[out[i].OrderID] != s.orderSeq[out[j].OrderID] {
+			return s.orderSeq[out[i].OrderID] > s.orderSeq[out[j].OrderID]
 		}
 		return out[i].OrderID > out[j].OrderID
 	})
