@@ -38,6 +38,37 @@ describe('ManagementMetricsService (P11-T05, SC12)', () => {
     expect(metrics.metadata.source).toContain('PostgreSQL');
   });
 
+  it('filters terminal shipments by their update time for the selected period', async () => {
+    const environment = jest.replaceProperty(process, 'env', {
+      ...process.env,
+      ORDER_SERVICE_URL: 'http://orders',
+      PAYMENT_SERVICE_URL: 'http://payments',
+      FULFILLMENT_SERVICE_URL: 'http://fulfillment',
+      INVENTORY_SERVICE_URL: '',
+      INTERNAL_SERVICE_TOKEN: 'test-token',
+    });
+    const upstream = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const address = new URL(String(url));
+      const data = {
+        orders: [],
+        payments: { grossCollectedVnd: 690_000, totalRefundedVnd: 270_000 },
+        fulfillment: [
+          { status: 'DELIVERED', updatedAt: new Date().toISOString() },
+          { status: 'RETURN_TO_SENDER', updatedAt: '2000-01-01T00:00:00.000Z' },
+          { status: 'IN_TRANSIT', updatedAt: new Date().toISOString() },
+        ],
+      }[address.hostname];
+      return new Response(JSON.stringify({ data }));
+    });
+    try {
+      expect((await service.getMetrics('7D')).overview.onTimeDeliveryRate).toBe(100);
+      expect((await service.getMetrics('ALL')).overview.onTimeDeliveryRate).toBe(50);
+    } finally {
+      upstream.mockRestore();
+      environment.restore();
+    }
+  });
+
   it('queries payments.refund_obligations and IN_FULFILLMENT and propagates DB errors', async () => {
     const queries: string[] = [];
     const mockDb: any = {

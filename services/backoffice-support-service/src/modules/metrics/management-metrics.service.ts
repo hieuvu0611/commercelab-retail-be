@@ -150,7 +150,8 @@ export class ManagementMetricsService {
 
       if (shipments.length > 0) {
         const terminal = shipments.filter((s) =>
-          ['DELIVERED', 'DELIVERY_FAILED', 'RETURN_TO_SENDER'].includes(s.status),
+          ['DELIVERED', 'DELIVERY_FAILED', 'RETURN_TO_SENDER'].includes(s.status) &&
+          (!since || new Date(s.updatedAt) >= since),
         );
         const delivered = terminal.filter((s) => s.status === 'DELIVERED').length;
         onTimeDeliveryRate =
@@ -184,6 +185,7 @@ export class ManagementMetricsService {
         [sinceIso],
       );
       totalRefunded = Number(refRes.rows?.[0]?.refunded || 0);
+
     } else {
       // Isolated unit test without DB or HTTP upstreams
       totalOrders = 120;
