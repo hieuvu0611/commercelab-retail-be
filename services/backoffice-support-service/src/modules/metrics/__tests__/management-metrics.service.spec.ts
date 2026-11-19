@@ -1,3 +1,4 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import { ExceptionCasesService } from '../../exception-cases/exception-cases.service';
 import { ManagementMetricsService } from '../management-metrics.service';
 
@@ -38,6 +39,40 @@ describe('ManagementMetricsService (P11-T05, SC12)', () => {
     expect(metrics.metadata.source).toContain('PostgreSQL');
   });
 
+  it('aggregates period metrics including zero totals over HTTP without cross-schema SQL', async () => {
+    const environment = jest.replaceProperty(process, 'env', {
+      ...process.env,
+      ORDER_SERVICE_URL: 'http://orders',
+      PAYMENT_SERVICE_URL: 'http://payments',
+      FULFILLMENT_SERVICE_URL: 'http://fulfillment',
+      INVENTORY_SERVICE_URL: 'http://inventory',
+      INTERNAL_SERVICE_TOKEN: 'test-token',
+    });
+    const upstream = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      const address = new URL(String(url));
+      const data = {
+        orders: [{ orderId: 'O-1', status: 'CONFIRMED', createdAt: new Date().toISOString() }],
+        payments: { grossCollectedVnd: 0, totalRefundedVnd: 0 },
+        fulfillment: [],
+        inventory: [{ availableQty: 15, reservedQty: 2 }],
+      }[address.hostname];
+      return new Response(JSON.stringify({ data }));
+    });
+    const mockDb: any = { query: jest.fn() };
+    try {
+      const result = await new ManagementMetricsService(mockDb, exceptionCases).getMetrics('TODAY');
+      expect(result.overview.grossCollectedVnd).toBe(0);
+      expect(result.overview.totalRefundedVnd).toBe(0);
+      expect(result.overview.netCollectionVnd).toBe(0);
+      expect(result.overview.availableInventoryUnits).toBe(15);
+      expect(result.overview.reservedInventoryUnits).toBe(2);
+      expect(mockDb.query).not.toHaveBeenCalled();
+    } finally {
+      upstream.mockRestore();
+      environment.restore();
+    }
+  });
+
   it('filters terminal shipments by their update time for the selected period', async () => {
     const environment = jest.replaceProperty(process, 'env', {
       ...process.env,
@@ -69,26 +104,44 @@ describe('ManagementMetricsService (P11-T05, SC12)', () => {
     }
   });
 
-  it('queries payments.refund_obligations and IN_FULFILLMENT and propagates DB errors', async () => {
-    const queries: string[] = [];
-    const mockDb: any = {
-      query: jest.fn(async (sql: string) => {
-        queries.push(sql);
-        if (sql.includes('orders.orders')) return { rows: [{ total: '4', confirmed: '3' }] };
-        if (sql.includes('payments.payment_attempts')) return { rows: [{ collected: '1200000' }] };
-        return { rows: [{ refunded: '270000' }] };
-      }),
-    };
-    const dbMetrics = await new ManagementMetricsService(mockDb, exceptionCases).getMetrics('7D');
-    expect(dbMetrics.overview.totalOrders).toBe(4);
-    expect(dbMetrics.overview.totalRefundedVnd).toBe(270000);
-    expect(queries.some((q) => q.includes('payments.refund_obligations'))).toBe(true);
-    expect(queries.some((q) => q.includes('IN_FULFILLMENT'))).toBe(true);
-    expect(queries.some((q) => q.includes('payments.refunds'))).toBe(false);
+  it('rejects missing service URLs with 503 instead of querying orders/payments schemas directly', async () => {
+    const environment = jest.replaceProperty(process, 'env', {
+      ...process.env,
+      ORDER_SERVICE_URL: '',
+      PAYMENT_SERVICE_URL: '',
+    });
+    const mockDb: any = { query: jest.fn() };
+    try {
+      await expect(new ManagementMetricsService(mockDb, exceptionCases).getMetrics('7D')).rejects.toThrow(
+        ServiceUnavailableException,
+      );
+      expect(mockDb.query).not.toHaveBeenCalled();
+    } finally {
+      environment.restore();
+    }
+  });
 
-    const brokenDb: any = { query: jest.fn().mockRejectedValue(new Error('pg down')) };
-    await expect(new ManagementMetricsService(brokenDb, exceptionCases).getMetrics('TODAY')).rejects.toThrow(
-      'pg down',
-    );
+  it('surfaces 503 ServiceUnavailableException when an upstream HTTP dependency fails or is unreachable', async () => {
+    const environment = jest.replaceProperty(process, 'env', {
+      ...process.env,
+      ORDER_SERVICE_URL: 'http://orders',
+      PAYMENT_SERVICE_URL: 'http://payments',
+      FULFILLMENT_SERVICE_URL: '',
+      INVENTORY_SERVICE_URL: '',
+      INTERNAL_SERVICE_TOKEN: 'test-token',
+    });
+    const upstream = jest.spyOn(globalThis, 'fetch').mockImplementation(async (url) => {
+      if (String(url).includes('payments')) {
+        throw new Error('connect ECONNREFUSED 127.0.0.1:8084');
+      }
+      return new Response(JSON.stringify({ data: [] }));
+    });
+    try {
+      await expect(service.getMetrics('TODAY')).rejects.toThrow('Upstream payment metrics unavailable');
+      await expect(service.getMetrics('TODAY')).rejects.not.toThrow('127.0.0.1');
+    } finally {
+      upstream.mockRestore();
+      environment.restore();
+    }
   });
 });

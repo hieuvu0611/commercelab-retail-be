@@ -1,9 +1,12 @@
 package middleware
 
 import (
+	"bytes"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
@@ -71,5 +74,38 @@ func TestCorrelationIDIsAvailableInTheRequestContext(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if got == "" || got != rec.Header().Get("X-Correlation-ID") {
 		t.Fatalf("generated id %q does not match header %q", got, rec.Header().Get("X-Correlation-ID"))
+	}
+}
+
+func TestAccessLogIncludesCorrelationIDAndSkipsHealthyProbes(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prevOut)
+
+	handler := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/boom" {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/health", nil)
+	healthReq.Header.Set("X-Correlation-ID", "probe-1")
+	handler.ServeHTTP(httptest.NewRecorder(), healthReq)
+	if buf.Len() != 0 {
+		t.Fatalf("expected healthy /health probe to be skipped, got %q", buf.String())
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/boom?token=secret", nil)
+	req.Header.Set("X-Correlation-ID", "trace-stg-42")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+	logged := buf.String()
+	if !strings.Contains(logged, "correlationId=trace-stg-42") || !strings.Contains(logged, "status=409") || !strings.Contains(logged, "path=/boom") {
+		t.Fatalf("expected structured access log line, got %q", logged)
+	}
+	if strings.Contains(logged, "secret") {
+		t.Fatalf("expected query params to be omitted from access log, got %q", logged)
 	}
 }

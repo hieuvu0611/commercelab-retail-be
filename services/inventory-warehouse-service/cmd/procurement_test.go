@@ -70,10 +70,24 @@ func TestProcurementAPI(t *testing.T) {
 			t.Errorf("expected 403 Forbidden for self-approval, got %d (%s)", rec.Code, rec.Body.String())
 		}
 
-		// Other manager (opsDirector) approves
-		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/procurement/orders/%s/approve", poID), "", &opsDirector)
+		// Other manager without explicit warehouseScopes (matching iam-auth-service JWT for OPS_MGR/OPS_DIRECTOR) approves
+		opsMgrToken := auth.Identity{UserID: "mgr-ops", Roles: []string{"OPS_MGR"}}
+		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/procurement/orders/%s/approve", poID), "", &opsMgrToken)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK for approval, got %d (%s)", rec.Code, rec.Body.String())
+			t.Fatalf("expected 200 OK for OPS_MGR approval without warehouseScopes, got %d (%s)", rec.Code, rec.Body.String())
+		}
+
+		// Scoped warehouse staff from another warehouse is still denied access
+		otherWhStaff := auth.Identity{UserID: "wh-hn-01", Roles: []string{"WAREHOUSE_STAFF"}, WarehouseScopes: []string{"WH-HN-01"}}
+		rec = call(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/admin/procurement/orders/%s", poID), "", &otherWhStaff)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 for cross-warehouse WAREHOUSE_STAFF, got %d (%s)", rec.Code, rec.Body.String())
+		}
+
+		// OPS_MGR without explicit warehouseScopes can list and inspect the PO
+		rec = call(t, srv, http.MethodGet, "/api/v1/admin/procurement/orders", "", &opsMgrToken)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for OPS_MGR listing POs, got %d (%s)", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -455,6 +469,60 @@ func TestProcurementAPI(t *testing.T) {
 		rec = call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/adjustments/%s/decide", largeAdjID), `{"action":"APPROVE","note":"Approved by supply chain lead"}`, &scMgr)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("supply chain approval failed: %s", rec.Body.String())
+		}
+	})
+
+	t.Run("mixed-role scoped warehouse user cannot mutate another warehouse", func(t *testing.T) {
+		hnMgr := auth.Identity{UserID: "mgr-hn-01", Roles: []string{"WAREHOUSE_MGR"}, WarehouseScopes: []string{"WH-HN-01"}}
+		opsApprover := auth.Identity{UserID: "ops-all-01", Roles: []string{"OPS_MGR"}}
+		mixedFinWh := auth.Identity{UserID: "mixed-fin-hcm", Roles: []string{"FINANCE_MGR", "WAREHOUSE_MGR"}, WarehouseScopes: []string{"WH-HCM-01"}}
+		mixedOpsWh := auth.Identity{UserID: "mixed-ops-hcm", Roles: []string{"OPS_MGR", "WAREHOUSE_STAFF"}, WarehouseScopes: []string{"WH-HCM-01"}}
+
+		// Seed an approved WH-HN-01 PO and a WH-HN-01 stocktake
+		rec := call(t, srv, http.MethodPost, "/api/v1/admin/procurement/orders", `{
+			"poId": "PO-HN-MIX-01",
+			"supplierId": "SUP-MIX",
+			"warehouseId": "WH-HN-01",
+			"lines": [{"skuId": "SKU-BALO-BLACK-20L", "orderedQty": 5, "unitCostVnd": 100000}]
+		}`, &hnMgr)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create HN PO = %d %s", rec.Code, rec.Body.String())
+		}
+		if rec := call(t, srv, http.MethodPost, "/api/v1/admin/procurement/orders/PO-HN-MIX-01/approve", `{}`, &opsApprover); rec.Code != http.StatusOK {
+			t.Fatalf("approve HN PO = %d %s", rec.Code, rec.Body.String())
+		}
+		rec = call(t, srv, http.MethodPost, "/api/v1/admin/inventory/stocktakes", `{"warehouseId":"WH-HN-01"}`, &hnMgr)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create HN stocktake = %d %s", rec.Code, rec.Body.String())
+		}
+		var hnStk struct {
+			Data struct {
+				StocktakeID string `json:"stocktakeId"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &hnStk)
+
+		// Mixed FINANCE_MGR + WAREHOUSE_MGR@WH-HCM-01 must be denied on WH-HN-01 receiving, RTV, and stocktake
+		if rec := call(t, srv, http.MethodPost, "/api/v1/admin/inventory/receiving/inspections", `{
+			"poId": "PO-HN-MIX-01",
+			"lines": [{"skuId": "SKU-BALO-BLACK-20L", "receivedQty": 5, "passedQty": 5, "damagedQty": 0}]
+		}`, &mixedFinWh); rec.Code != http.StatusForbidden {
+			t.Fatalf("mixed FINANCE_MGR+WH_MGR@HCM receiving on HN = %d, want 403", rec.Code)
+		}
+		if rec := call(t, srv, http.MethodPost, "/api/v1/admin/inventory/supplier-returns", `{
+			"supplierId": "SUP-MIX",
+			"warehouseId": "WH-HN-01",
+			"lines": [{"skuId": "SKU-BALO-BLACK-20L", "quantity": 1}]
+		}`, &mixedFinWh); rec.Code != http.StatusForbidden {
+			t.Fatalf("mixed FINANCE_MGR+WH_MGR@HCM create RTV on HN = %d, want 403", rec.Code)
+		}
+		if rec := call(t, srv, http.MethodPost, "/api/v1/admin/inventory/stocktakes", `{"warehouseId":"WH-HN-01"}`, &mixedOpsWh); rec.Code != http.StatusForbidden {
+			t.Fatalf("mixed OPS_MGR+WH_STAFF@HCM create stocktake on HN = %d, want 403", rec.Code)
+		}
+		if rec := call(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/admin/inventory/stocktakes/%s/count", hnStk.Data.StocktakeID), `{
+			"lines": [{"skuId": "SKU-BALO-BLACK-20L", "countedOnHand": 5, "unitCostVnd": 100000}]
+		}`, &mixedOpsWh); rec.Code != http.StatusForbidden {
+			t.Fatalf("mixed OPS_MGR+WH_STAFF@HCM count stocktake on HN = %d, want 403", rec.Code)
 		}
 	})
 }

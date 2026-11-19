@@ -18,7 +18,7 @@ import (
 // CreateSupplier adds a new supplier record.
 func (r *InventoryRepository) CreateSupplier(ctx context.Context, s domain.Supplier) (domain.Supplier, error) {
 	if s.SupplierID == "" {
-		s.SupplierID = fmt.Sprintf("SUP-%d", time.Now().UnixNano()%1000000)
+		s.SupplierID = "SUP-" + rand.Text()
 	}
 	now := r.now().UTC()
 	s.CreatedAt = now
@@ -112,7 +112,7 @@ func (r *InventoryRepository) CreatePurchaseOrder(ctx context.Context, po domain
 	}
 	po.TotalAmountVND = total
 	if po.POID == "" {
-		po.POID = fmt.Sprintf("PO-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+		po.POID = fmt.Sprintf("PO-%s-%s", time.Now().Format("20060102"), rand.Text()[:12])
 	}
 	if po.WarehouseID == "" {
 		po.WarehouseID = domain.DefaultWarehouseID
@@ -456,7 +456,7 @@ func (r *InventoryRepository) RecordReceivingInspection(ctx context.Context, poI
 		validatedLines = append(validatedLines, l)
 	}
 
-	inspectionID := fmt.Sprintf("INSP-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+	inspectionID := fmt.Sprintf("INSP-%s-%s", time.Now().Format("20060102"), rand.Text()[:12])
 	now := r.now().UTC()
 	insp := domain.ReceivingInspection{
 		InspectionID: inspectionID,
@@ -674,7 +674,7 @@ func (r *InventoryRepository) CreateSupplierReturn(ctx context.Context, ret doma
 		}
 	}
 	if ret.ReturnID == "" {
-		ret.ReturnID = fmt.Sprintf("RTV-%s-%04d", time.Now().Format("20060102"), time.Now().UnixNano()%10000)
+		ret.ReturnID = fmt.Sprintf("RTV-%s-%s", time.Now().Format("20060102"), rand.Text()[:12])
 	}
 	if ret.WarehouseID == "" {
 		ret.WarehouseID = domain.DefaultWarehouseID

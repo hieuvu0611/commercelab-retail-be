@@ -77,3 +77,22 @@ test('returns a common error for malformed JSON', async () => {
   assert.equal(body.code, 'INVALID_REQUEST');
   assert.ok(body.correlationId);
 });
+
+test('surfaces 503 SERVICE_UNAVAILABLE message when metrics upstreams are unconfigured', async () => {
+  const staffToken = jwt.sign(
+    { sub: 'ops-foundation', roles: ['OPS_MGR'], warehouses: ['ALL'] },
+    process.env.JWT_ACCESS_SECRET,
+  );
+  const res = await fetch(`${base}/api/v1/backoffice/metrics?period=TODAY`, {
+    headers: {
+      authorization: `Bearer ${staffToken}`,
+      'x-correlation-id': 'req-metrics-503',
+    },
+  });
+  const body = await res.json();
+  assert.equal(res.status, 503);
+  assert.equal(body.code, 'SERVICE_UNAVAILABLE');
+  assert.equal(body.message, 'Upstream metrics services are not configured');
+  assert.ok(!body.message.includes('ORDER_SERVICE_URL'));
+  assert.equal(body.correlationId, 'req-metrics-503');
+});

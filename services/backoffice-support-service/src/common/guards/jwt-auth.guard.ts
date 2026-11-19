@@ -125,14 +125,19 @@ export class JwtAuthGuard implements CanActivate {
         ? [decoded.role]
         : [];
 
-      const warehouses: string[] = Array.isArray(decoded.warehouses)
+      const rawWarehouses = Array.isArray(decoded.warehouseScopes)
+        ? decoded.warehouseScopes
+        : Array.isArray(decoded.warehouses)
         ? decoded.warehouses
         : typeof decoded.warehouse === 'string'
         ? [decoded.warehouse]
         : [];
+      const warehouses: string[] = rawWarehouses.filter(
+        (w): w is string => typeof w === 'string' && w.length > 0,
+      );
 
       req.user = {
-        userId: decoded.sub || decoded.userId || 'anonymous',
+        userId: decoded.userId || decoded.sub || 'anonymous',
         roles,
         warehouses,
         isInternal: false,

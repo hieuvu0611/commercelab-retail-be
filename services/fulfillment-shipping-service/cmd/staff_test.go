@@ -215,13 +215,59 @@ func TestListOrderShipmentsRespectsWarehouseScopeAndStaffDeliverActions(t *testi
 		t.Fatalf("expected 2 parcels for ALL scope, got %+v", allParcels)
 	}
 
+	// Delivery coordinator and ops manager without explicit warehouseScopes (matching iam-auth-service JWTs) see both parcels
+	deliveryCoord := auth.Identity{UserID: "staff-delivery-coord", Roles: []string{"DELIVERY_COORD"}}
+	coordParcels := decode[[]shipmentView](t, e.call(t, "GET", "/api/v1/admin/orders/O-SPLIT/shipments", "", &deliveryCoord))
+	if len(coordParcels) != 2 {
+		t.Fatalf("expected 2 parcels for DELIVERY_COORD without warehouseScopes, got %+v", coordParcels)
+	}
+
 	// Staff marks parcel 1 delivered and parcel 2 failed
-	d1 := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-1/deliver", `{}`, &hcmStaff)
+	d1 := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-1/deliver", `{}`, &deliveryCoord)
 	if v := decode[shipmentView](t, d1); d1.Code != 200 || v.Status != "DELIVERED" {
-		t.Fatalf("deliver parcel 1 = %d %+v", d1.Code, v)
+		t.Fatalf("deliver parcel 1 as DELIVERY_COORD = %d %+v", d1.Code, v)
 	}
 	f2 := e.call(t, "POST", "/api/v1/admin/shipments/SHP-O-SPLIT-2/delivery-failed", `{"reason":"Recipient unreachable"}`, &hnStaff)
 	if v := decode[shipmentView](t, f2); f2.Code != 200 || v.Status != "DELIVERY_FAILED" {
 		t.Fatalf("fail parcel 2 = %d %+v", f2.Code, v)
+	}
+}
+
+func TestMixedRoleScopedWarehouseStaffCannotBypassOtherWarehouse(t *testing.T) {
+	authtest.Configure(t)
+	store := shipment.NewMemoryStore()
+	hnPick, err := shipment.NewParcel("O-HN-MIX", "user-1", "WH-HN-01", "PREPAID", 100000, 1, 1,
+		[]shipment.Item{{SkuID: "SKU-A", Quantity: 1}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Create(context.Background(), hnPick, "evt-hn-pick"); err != nil {
+		t.Fatal(err)
+	}
+	hnDeliver, err := shipment.NewParcel("O-HN-DEL", "user-1", "WH-HN-01", "COD", 100000, 1, 1,
+		[]shipment.Item{{SkuID: "SKU-A", Quantity: 1}}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hnDeliver, _ = hnDeliver.Scan("SKU-A", 1, time.Now())
+	hnDeliver, _ = hnDeliver.Pack(time.Now())
+	hnDeliver, _ = hnDeliver.Handover(time.Now())
+	if _, _, err := store.Create(context.Background(), hnDeliver, "evt-hn-del"); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &env{srv: NewServer(Deps{Shipments: store, Timeline: timeline.NewMemory()}), store: store, tl: timeline.NewMemory()}
+
+	mixedCSKH := auth.Identity{UserID: "staff-mixed-cskh", Roles: []string{"CSKH", "WAREHOUSE_STAFF"}, WarehouseScopes: []string{"WH-HCM-01"}}
+	mixedOps := auth.Identity{UserID: "staff-mixed-ops", Roles: []string{"OPS_MGR", "WAREHOUSE_STAFF"}, WarehouseScopes: []string{"WH-HCM-01"}}
+
+	if rec := e.call(t, "POST", "/api/v1/admin/shipments/"+hnPick.ShipmentID+"/scan", `{"skuId":"SKU-A","quantity":1}`, &mixedCSKH); rec.Code != http.StatusForbidden {
+		t.Fatalf("mixed CSKH+WAREHOUSE_STAFF@HCM scan on HN = %d, want 403", rec.Code)
+	}
+	if rec := e.call(t, "POST", "/api/v1/admin/shipments/"+hnPick.ShipmentID+"/scan", `{"skuId":"SKU-A","quantity":1}`, &mixedOps); rec.Code != http.StatusForbidden {
+		t.Fatalf("mixed OPS_MGR+WAREHOUSE_STAFF@HCM scan on HN = %d, want 403", rec.Code)
+	}
+	if rec := e.call(t, "POST", "/api/v1/admin/shipments/"+hnDeliver.ShipmentID+"/deliver", `{}`, &mixedOps); rec.Code != http.StatusForbidden {
+		t.Fatalf("mixed OPS_MGR+WAREHOUSE_STAFF@HCM deliver on HN = %d, want 403", rec.Code)
 	}
 }

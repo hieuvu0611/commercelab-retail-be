@@ -87,19 +87,20 @@ func registerStaffRoutes(mux *http.ServeMux, d Deps) {
 	mux.Handle("GET /api/v1/shipments/internal/orders/{orderId}", internalauth.Require(listOrderShipments(d)))
 	mux.Handle("GET /api/v1/admin/orders/{orderId}/shipments", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR", "CSKH", "SUPPORT_AGENT", "SUPPORT_LEAD", "FINANCE", "FINANCE_MGR")(listOrderShipments(d))))
 	mux.Handle("GET /api/v1/admin/fulfillment-cases", auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD")(listCases(d))))
-	mux.Handle("GET /api/v1/admin/shipments/{shipmentId}", staff(withShipment(d, func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
+	mux.Handle("GET /api/v1/admin/shipments/{shipmentId}", staff(withShipment(d, nil, func(w http.ResponseWriter, r *http.Request, s shipment.Shipment) {
 		response.JSON(w, http.StatusOK, "Shipment", viewOf(s), nil)
 	})))
-	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/scan", staff(withShipment(d, scanLine(d))))
-	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/pack", staff(withShipment(d, packParcel(d))))
-	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/report-shortage", staff(withShipment(d, reportShortage(d))))
-	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/handover", staff(withShipment(d, handoverParcel(d))))
-	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/confirm-stop", staff(withShipment(d, confirmStop(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/scan", staff(withShipment(d, nil, scanLine(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/pack", staff(withShipment(d, nil, packParcel(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/report-shortage", staff(withShipment(d, nil, reportShortage(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/handover", staff(withShipment(d, nil, handoverParcel(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/confirm-stop", staff(withShipment(d, nil, confirmStop(d))))
 	deliverStaff := func(h http.HandlerFunc) http.Handler {
 		return auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR", "DELIVERY_COORD", "OPS_MGR")(h))
 	}
-	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/deliver", deliverStaff(withShipment(d, markDeliveredStaff(d))))
-	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/delivery-failed", deliverStaff(withShipment(d, markDeliveryFailedStaff(d))))
+	deliverCrossRoles := []string{"DELIVERY_COORD", "OPS_MGR"}
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/deliver", deliverStaff(withShipment(d, deliverCrossRoles, markDeliveredStaff(d))))
+	mux.Handle("POST /api/v1/admin/shipments/{shipmentId}/delivery-failed", deliverStaff(withShipment(d, deliverCrossRoles, markDeliveryFailedStaff(d))))
 }
 
 func listShipments(d Deps) http.HandlerFunc {
@@ -172,8 +173,9 @@ func listOrderShipments(d Deps) http.HandlerFunc {
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
 		views := make([]shipmentView, 0, len(list))
+		orderShipmentsCrossRoles := []string{"DELIVERY_COORD", "OPS_MGR", "CSKH", "SUPPORT_AGENT", "SUPPORT_LEAD", "FINANCE", "FINANCE_MGR"}
 		for _, s := range list {
-			if claims == nil || auth.CanAccessWarehouse(claims, s.WarehouseID) {
+			if claims == nil || canAccessShipmentWarehouse(claims, s.WarehouseID, orderShipmentsCrossRoles...) {
 				views = append(views, viewOf(s))
 			}
 		}
@@ -181,8 +183,36 @@ func listOrderShipments(d Deps) http.HandlerFunc {
 	}
 }
 
+func hasScopedWarehouseRole(claims *auth.Claims) bool {
+	if claims == nil {
+		return false
+	}
+	if !claims.HasRole("WAREHOUSE_STAFF") && !claims.HasRole("WAREHOUSE_MGR") {
+		return false
+	}
+	return !auth.CanAccessWarehouse(claims, auth.AllWarehouses)
+}
+
+func canAccessShipmentWarehouse(claims *auth.Claims, warehouseID string, crossWarehouseRoles ...string) bool {
+	if claims == nil {
+		return false
+	}
+	if auth.CanAccessWarehouse(claims, warehouseID) {
+		return true
+	}
+	if hasScopedWarehouseRole(claims) {
+		return false
+	}
+	for _, role := range crossWarehouseRoles {
+		if claims.HasRole(role) {
+			return true
+		}
+	}
+	return false
+}
+
 // withShipment loads the shipment of the path and refuses callers whose token does not cover its warehouse.
-func withShipment(d Deps, next func(http.ResponseWriter, *http.Request, shipment.Shipment)) http.HandlerFunc {
+func withShipment(d Deps, crossWarehouseRoles []string, next func(http.ResponseWriter, *http.Request, shipment.Shipment)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s, err := d.Shipments.Get(r.Context(), r.PathValue("shipmentId"))
 		if errors.Is(err, shipment.ErrNotFound) {
@@ -194,7 +224,7 @@ func withShipment(d Deps, next func(http.ResponseWriter, *http.Request, shipment
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, s.WarehouseID) {
+		if !canAccessShipmentWarehouse(claims, s.WarehouseID, crossWarehouseRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
