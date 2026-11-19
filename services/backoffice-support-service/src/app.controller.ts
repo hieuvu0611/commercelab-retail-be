@@ -22,7 +22,11 @@ import { DatabaseService } from './database/database.service';
 import { AuthenticatedUser, JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { Roles } from './common/guards/roles.decorator';
-import { canAccessWarehouse, WarehouseScopeGuard } from './common/guards/warehouse.guard';
+import {
+  canAccessWarehouse,
+  WAREHOUSE_MUTATION_CROSS_ROLES,
+  WarehouseScopeGuard,
+} from './common/guards/warehouse.guard';
 
 const BACKOFFICE_STAFF_ROLES = new Set([
   'CSKH',
@@ -210,7 +214,7 @@ export class AppController {
   async receiveReturnParcel(@Req() req: any, @Param('rmaId') rmaId: string) {
     await this.returnsService.ensureHydrated();
     const existing = this.returnsService.getReturn(rmaId);
-    if (!canAccessWarehouse(req.user, existing.warehouseId)) {
+    if (!canAccessWarehouse(req.user, existing.warehouseId, WAREHOUSE_MUTATION_CROSS_ROLES)) {
       throw new ForbiddenException(`Warehouse scope does not grant access to ${existing.warehouseId}`);
     }
     const actor = req.user?.userId || 'warehouse-staff';
@@ -228,7 +232,7 @@ export class AppController {
   ) {
     await this.returnsService.ensureHydrated();
     const existing = this.returnsService.getReturn(rmaId);
-    if (!canAccessWarehouse(req.user, existing.warehouseId)) {
+    if (!canAccessWarehouse(req.user, existing.warehouseId, WAREHOUSE_MUTATION_CROSS_ROLES)) {
       throw new ForbiddenException(`Warehouse scope does not grant access to ${existing.warehouseId}`);
     }
     const actor = req.user?.userId || 'qc-inspector';

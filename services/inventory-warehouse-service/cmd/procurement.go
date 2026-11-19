@@ -26,35 +26,64 @@ func extractRoles(claims *auth.Claims) []string {
 	return nil
 }
 
-func hasCrossWarehouseProcurementAccess(claims *auth.Claims) bool {
+var (
+	whReceivingCrossRoles         = []string{"ADMIN"}
+	procurementCreatorCrossRoles  = []string{"PROCUREMENT_MGR", "OPS_MGR", "ADMIN"}
+	procurementApproverCrossRoles = []string{"PROCUREMENT_MGR", "OPS_MGR", "OPS_DIRECTOR", "FINANCE_MGR", "ADMIN"}
+	adjustmentApproverCrossRoles  = []string{"SUPPLY_CHAIN_MGR", "OPS_MGR", "FINANCE_MGR", "ADMIN"}
+	procurementReadCrossRoles     = []string{"PROCUREMENT_MGR", "OPS_MGR", "OPS_DIRECTOR", "FINANCE_MGR", "ADMIN"}
+)
+
+func hasScopedWarehouseRole(claims *auth.Claims) bool {
 	if claims == nil {
 		return false
 	}
+	isWarehouseRole := false
 	for _, r := range extractRoles(claims) {
-		switch r {
-		case "ADMIN", "OPS_MGR", "OPS_DIRECTOR", "FINANCE_MGR", "PROCUREMENT_MGR", "PROCUREMENT", "SUPPLY_CHAIN_MGR":
-			return true
+		if r == "WAREHOUSE_STAFF" || r == "WAREHOUSE_MGR" {
+			isWarehouseRole = true
+			break
+		}
+	}
+	if !isWarehouseRole {
+		return false
+	}
+	return !auth.CanAccessWarehouse(claims, auth.AllWarehouses)
+}
+
+func hasCrossWarehouseProcurementAccess(claims *auth.Claims, allowedRoles ...string) bool {
+	if claims == nil || hasScopedWarehouseRole(claims) {
+		return false
+	}
+	for _, r := range extractRoles(claims) {
+		for _, allowed := range allowedRoles {
+			if r == allowed {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func canAccessProcurementWarehouse(claims *auth.Claims, warehouseID string) bool {
+func canAccessProcurementWarehouse(claims *auth.Claims, warehouseID string, crossWarehouseRoles ...string) bool {
 	if warehouseID == "" {
 		return false
 	}
-	return hasCrossWarehouseProcurementAccess(claims) || auth.CanAccessWarehouse(claims, warehouseID)
+	if auth.CanAccessWarehouse(claims, warehouseID) {
+		return true
+	}
+	return hasCrossWarehouseProcurementAccess(claims, crossWarehouseRoles...)
 }
 
 // procurementWarehouseFilter uses nil for all warehouses and an empty slice for no access.
-func procurementWarehouseFilter(claims *auth.Claims, requested string) []string {
+func procurementWarehouseFilter(claims *auth.Claims, requested string, crossWarehouseRoles ...string) []string {
 	if requested != "" {
 		return []string{requested}
 	}
 	if claims == nil {
 		return []string{}
 	}
-	if hasCrossWarehouseProcurementAccess(claims) {
+	if hasCrossWarehouseProcurementAccess(claims, crossWarehouseRoles...) {
 		return nil
 	}
 	for _, scope := range claims.WarehouseScopes {
@@ -65,7 +94,7 @@ func procurementWarehouseFilter(claims *auth.Claims, requested string) []string 
 	return append([]string{}, claims.WarehouseScopes...)
 }
 
-func requireProcurementWarehouse(w http.ResponseWriter, r *http.Request, warehouseID string, found bool, err error) bool {
+func requireProcurementWarehouse(w http.ResponseWriter, r *http.Request, warehouseID string, found bool, err error, crossWarehouseRoles ...string) bool {
 	if dependency.IsUnavailable(err) {
 		dependency.WriteUnavailable(w, r, err)
 		return false
@@ -79,7 +108,7 @@ func requireProcurementWarehouse(w http.ResponseWriter, r *http.Request, warehou
 		return false
 	}
 	claims, _ := auth.ClaimsFrom(r.Context())
-	if !canAccessProcurementWarehouse(claims, warehouseID) {
+	if !canAccessProcurementWarehouse(claims, warehouseID, crossWarehouseRoles...) {
 		auth.ForbiddenWarehouse(w, r)
 		return false
 	}
@@ -151,11 +180,11 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		status := strings.TrimSpace(r.URL.Query().Get("status"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID, procurementReadCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListPurchaseOrders(r.Context(), procurementWarehouseFilter(claims, warehouseID), status)
+		list, err := repo.ListPurchaseOrders(r.Context(), procurementWarehouseFilter(claims, warehouseID, procurementReadCrossRoles...), status)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -184,7 +213,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !canAccessProcurementWarehouse(claims, po.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, po.WarehouseID, procurementReadCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -208,7 +237,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			req.WarehouseID = domain.DefaultWarehouseID
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !canAccessProcurementWarehouse(claims, req.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, req.WarehouseID, procurementCreatorCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -242,7 +271,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		roles := extractRoles(claims)
 
 		target, found, lookupErr := repo.GetPurchaseOrder(r.Context(), poID)
-		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr) {
+		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr, procurementApproverCrossRoles...) {
 			return
 		}
 		po, err := repo.ApprovePurchaseOrder(r.Context(), poID, claims.UserID, roles)
@@ -276,7 +305,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		target, found, lookupErr := repo.GetPurchaseOrder(r.Context(), poID)
-		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr) {
+		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr, procurementApproverCrossRoles...) {
 			return
 		}
 		po, err := repo.RejectPurchaseOrder(r.Context(), poID, claims.UserID, req.Reason)
@@ -312,7 +341,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
 		po, found, lookupErr := repo.GetPurchaseOrder(r.Context(), strings.TrimSpace(req.POID))
-		if !requireProcurementWarehouse(w, r, po.WarehouseID, found, lookupErr) {
+		if !requireProcurementWarehouse(w, r, po.WarehouseID, found, lookupErr, whReceivingCrossRoles...) {
 			return
 		}
 		insp, err := repo.RecordReceivingInspection(r.Context(), strings.TrimSpace(req.POID), claims.UserID, strings.TrimSpace(req.Notes), req.Lines)
@@ -336,11 +365,11 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		poID := strings.TrimSpace(r.URL.Query().Get("poId"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID, procurementReadCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListReceivingInspections(r.Context(), procurementWarehouseFilter(claims, warehouseID), poID)
+		list, err := repo.ListReceivingInspections(r.Context(), procurementWarehouseFilter(claims, warehouseID, procurementReadCrossRoles...), poID)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -370,7 +399,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			req.WarehouseID = domain.DefaultWarehouseID
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !canAccessProcurementWarehouse(claims, req.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, req.WarehouseID, whReceivingCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -404,7 +433,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		target, found, lookupErr := repo.GetSupplierReturn(r.Context(), returnID)
-		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr) {
+		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr, whReceivingCrossRoles...) {
 			return
 		}
 		ret, err := repo.DispatchSupplierReturn(r.Context(), returnID, claims.UserID, strings.TrimSpace(req.TrackingNumber))
@@ -428,11 +457,11 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		supplierID := strings.TrimSpace(r.URL.Query().Get("supplierId"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID, procurementReadCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListSupplierReturns(r.Context(), procurementWarehouseFilter(claims, warehouseID), supplierID)
+		list, err := repo.ListSupplierReturns(r.Context(), procurementWarehouseFilter(claims, warehouseID, procurementReadCrossRoles...), supplierID)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -461,7 +490,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !canAccessProcurementWarehouse(claims, ret.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, ret.WarehouseID, procurementReadCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -479,7 +508,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			req.WarehouseID = domain.DefaultWarehouseID
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !canAccessProcurementWarehouse(claims, req.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, req.WarehouseID, whReceivingCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -499,11 +528,11 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 	mux.Handle("GET /api/v1/admin/inventory/stocktakes", staffOrMgr(func(w http.ResponseWriter, r *http.Request) {
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID, procurementReadCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListStocktakes(r.Context(), procurementWarehouseFilter(claims, warehouseID))
+		list, err := repo.ListStocktakes(r.Context(), procurementWarehouseFilter(claims, warehouseID, procurementReadCrossRoles...))
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -532,7 +561,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if !canAccessProcurementWarehouse(claims, stk.WarehouseID) {
+		if !canAccessProcurementWarehouse(claims, stk.WarehouseID, procurementReadCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
@@ -551,7 +580,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 			return
 		}
 		target, found, lookupErr := repo.GetStocktake(r.Context(), stocktakeID)
-		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr) {
+		if !requireProcurementWarehouse(w, r, target.WarehouseID, found, lookupErr, whReceivingCrossRoles...) {
 			return
 		}
 		stk, adjustments, err := repo.SubmitStocktakeCount(r.Context(), stocktakeID, req.Lines)
@@ -578,11 +607,11 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		warehouseID := strings.TrimSpace(r.URL.Query().Get("warehouseId"))
 		status := strings.TrimSpace(r.URL.Query().Get("status"))
 		claims, _ := auth.ClaimsFrom(r.Context())
-		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID) {
+		if warehouseID != "" && !canAccessProcurementWarehouse(claims, warehouseID, procurementReadCrossRoles...) {
 			auth.ForbiddenWarehouse(w, r)
 			return
 		}
-		list, err := repo.ListStockAdjustments(r.Context(), procurementWarehouseFilter(claims, warehouseID), status)
+		list, err := repo.ListStockAdjustments(r.Context(), procurementWarehouseFilter(claims, warehouseID, procurementReadCrossRoles...), status)
 		if dependency.IsUnavailable(err) {
 			dependency.WriteUnavailable(w, r, err)
 			return
@@ -613,7 +642,7 @@ func registerProcurementRoutes(mux *http.ServeMux, repo *repository.InventoryRep
 		}
 
 		warehouseID, found, lookupErr := repo.AdjustmentWarehouse(r.Context(), adjustmentID)
-		if !requireProcurementWarehouse(w, r, warehouseID, found, lookupErr) {
+		if !requireProcurementWarehouse(w, r, warehouseID, found, lookupErr, adjustmentApproverCrossRoles...) {
 			return
 		}
 		adj, err := repo.DecideStockAdjustment(r.Context(), adjustmentID, claims.UserID, roles, req.Action, strings.TrimSpace(req.Note))

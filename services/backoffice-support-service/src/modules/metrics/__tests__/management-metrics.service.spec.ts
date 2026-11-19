@@ -137,9 +137,8 @@ describe('ManagementMetricsService (P11-T05, SC12)', () => {
       return new Response(JSON.stringify({ data: [] }));
     });
     try {
-      await expect(service.getMetrics('TODAY')).rejects.toThrow(
-        'Upstream payment metrics unreachable: connect ECONNREFUSED 127.0.0.1:8084',
-      );
+      await expect(service.getMetrics('TODAY')).rejects.toThrow('Upstream payment metrics unavailable');
+      await expect(service.getMetrics('TODAY')).rejects.not.toThrow('127.0.0.1');
     } finally {
       upstream.mockRestore();
       environment.restore();

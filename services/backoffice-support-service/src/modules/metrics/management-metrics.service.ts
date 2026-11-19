@@ -1,4 +1,4 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { ExceptionCasesService } from '../exception-cases/exception-cases.service';
 import { resolveInternalServiceToken } from '../../common/guards/jwt-auth.guard';
@@ -32,6 +32,8 @@ export interface ManagementMetricsResponse {
 
 @Injectable()
 export class ManagementMetricsService {
+  private readonly logger = new Logger(ManagementMetricsService.name);
+
   constructor(
     private readonly db?: DatabaseService,
     private readonly exceptionCases?: ExceptionCasesService,
@@ -54,10 +56,20 @@ export class ManagementMetricsService {
       res = await fetch(url, { headers });
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'network error';
-      throw new ServiceUnavailableException(`Upstream ${label} unreachable: ${detail}`);
+      this.logger.warn(`Upstream ${label} unreachable: ${detail}`);
+      throw new ServiceUnavailableException({
+        message: `Upstream ${label} unavailable`,
+        code: 'SERVICE_UNAVAILABLE',
+        expose: true,
+      });
     }
     if (!res.ok) {
-      throw new ServiceUnavailableException(`Upstream ${label} failed (${res.status})`);
+      this.logger.warn(`Upstream ${label} returned HTTP ${res.status}`);
+      throw new ServiceUnavailableException({
+        message: `Upstream ${label} unavailable`,
+        code: 'SERVICE_UNAVAILABLE',
+        expose: true,
+      });
     }
     return res.json();
   }
@@ -66,6 +78,7 @@ export class ManagementMetricsService {
     baseUrl: string,
     path: string,
     token: string,
+    label: string,
   ): Promise<any[]> {
     const out: any[] = [];
     let page = 1;
@@ -75,7 +88,7 @@ export class ManagementMetricsService {
       const json = (await this.fetchJson(
         `${baseUrl}${path}${sep}limit=100&page=${page}`,
         { 'X-Internal-Token': token },
-        `metrics endpoint ${path}`,
+        label,
       )) as {
         data?: any[];
         metadata?: { pageCount?: number };
@@ -113,23 +126,26 @@ export class ManagementMetricsService {
         token = process.env.INTERNAL_SERVICE_TOKEN || '';
       }
       if (!token) {
-        throw new ServiceUnavailableException(
-          'INTERNAL_SERVICE_TOKEN is required to aggregate metrics from services',
-        );
+        this.logger.warn('INTERNAL_SERVICE_TOKEN is required to aggregate metrics from services');
+        throw new ServiceUnavailableException({
+          message: 'Upstream metrics authentication is not configured',
+          code: 'SERVICE_UNAVAILABLE',
+          expose: true,
+        });
       }
 
       const [orders, payJson, shipments, stock] = await Promise.all([
-        this.fetchAllInternalPages(orderUrl, '/api/v1/orders/internal', token),
+        this.fetchAllInternalPages(orderUrl, '/api/v1/orders/internal', token, 'order metrics'),
         this.fetchJson(
           `${paymentUrl}/api/v1/payments/internal/metrics?period=${encodeURIComponent(period || 'TODAY')}`,
           { 'X-Internal-Token': token },
           'payment metrics',
         ) as Promise<{ data?: { grossCollectedVnd?: number; totalRefundedVnd?: number } }>,
         fulfillmentUrl
-          ? this.fetchAllInternalPages(fulfillmentUrl, '/api/v1/shipments/internal', token)
+          ? this.fetchAllInternalPages(fulfillmentUrl, '/api/v1/shipments/internal', token, 'fulfillment metrics')
           : Promise.resolve([]),
         inventoryUrl
-          ? this.fetchAllInternalPages(inventoryUrl, '/api/v1/inventory/internal/stock', token)
+          ? this.fetchAllInternalPages(inventoryUrl, '/api/v1/inventory/internal/stock', token, 'inventory metrics')
           : Promise.resolve([]),
       ]);
 
@@ -160,9 +176,14 @@ export class ManagementMetricsService {
       }
     } else if (this.db || process.env.DATABASE_URL_SUPPORT?.trim()) {
       // Cross-schema SQL queries from backoffice into orders/payments are disallowed (docs/04 §4.1); fail explicitly.
-      throw new ServiceUnavailableException(
+      this.logger.warn(
         'ORDER_SERVICE_URL and PAYMENT_SERVICE_URL must be configured to aggregate management metrics from owning services',
       );
+      throw new ServiceUnavailableException({
+        message: 'Upstream metrics services are not configured',
+        code: 'SERVICE_UNAVAILABLE',
+        expose: true,
+      });
     } else {
       // Isolated unit test without DB or HTTP upstreams
       totalOrders = 120;

@@ -3,7 +3,7 @@ import { Reflector } from '@nestjs/core';
 import * as jwt from 'jsonwebtoken';
 import { JwtAuthGuard } from '../jwt-auth.guard';
 import { RolesGuard } from '../roles.guard';
-import { WarehouseScopeGuard } from '../warehouse.guard';
+import { canAccessWarehouse, WAREHOUSE_MUTATION_CROSS_ROLES, WarehouseScopeGuard } from '../warehouse.guard';
 
 describe('Auth Guards', () => {
   const secret = 'test-secret-at-least-32-bytes-long-for-testing';
@@ -190,14 +190,40 @@ describe('Auth Guards', () => {
       expect(() => guard.canActivate(ctx)).toThrow(ForbiddenException);
     });
 
-    it('allows cross-warehouse support and finance roles without explicit warehouseScopes', () => {
+    it('allows cross-warehouse support and finance roles on read routes without explicit warehouseScopes', () => {
+      const readReflector = new Reflector();
+      jest
+        .spyOn(readReflector, 'getAllAndOverride')
+        .mockReturnValue(['SUPPORT_AGENT', 'CSKH', 'SUPPORT_LEAD', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR', 'WAREHOUSE_STAFF']);
+      const readGuard = new WarehouseScopeGuard(readReflector);
       for (const role of ['SUPPORT_AGENT', 'CSKH', 'SUPPORT_LEAD', 'FINANCE', 'FINANCE_MGR', 'OPS_MGR']) {
         const ctx = mockContext({
           user: { roles: [role], warehouses: [] },
           params: { warehouseId: 'WH-HCM-01' },
         });
-        expect(guard.canActivate(ctx)).toBe(true);
+        expect(readGuard.canActivate(ctx)).toBe(true);
       }
+    });
+
+    it('blocks mixed-role scoped warehouse staff from accessing another warehouse on mutation routes', () => {
+      const mutationReflector = new Reflector();
+      jest
+        .spyOn(mutationReflector, 'getAllAndOverride')
+        .mockReturnValue(['WAREHOUSE_STAFF', 'WAREHOUSE_MGR', 'OPS_MGR', 'ADMIN']);
+      const mutationGuard = new WarehouseScopeGuard(mutationReflector);
+
+      const mixedCskh = { userId: 'u-mix-1', roles: ['CSKH', 'WAREHOUSE_STAFF'], warehouses: ['WH-HCM-01'] };
+      const mixedOps = { userId: 'u-mix-2', roles: ['OPS_MGR', 'WAREHOUSE_STAFF'], warehouses: ['WH-HCM-01'] };
+
+      expect(() =>
+        mutationGuard.canActivate(mockContext({ user: mixedCskh, params: { warehouseId: 'WH-HN-01' } })),
+      ).toThrow(ForbiddenException);
+      expect(() =>
+        mutationGuard.canActivate(mockContext({ user: mixedOps, params: { warehouseId: 'WH-HN-01' } })),
+      ).toThrow(ForbiddenException);
+      expect(canAccessWarehouse(mixedCskh, 'WH-HN-01', WAREHOUSE_MUTATION_CROSS_ROLES)).toBe(false);
+      expect(canAccessWarehouse(mixedOps, 'WH-HN-01', WAREHOUSE_MUTATION_CROSS_ROLES)).toBe(false);
+      expect(canAccessWarehouse(mixedCskh, 'WH-HCM-01', WAREHOUSE_MUTATION_CROSS_ROLES)).toBe(true);
     });
   });
 });

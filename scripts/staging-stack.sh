@@ -51,6 +51,11 @@ if [[ -z "${PROJECT}" || -z "${STATE_DIR}" ]]; then
   exit 2
 fi
 
+if [[ ! "${PROJECT}" =~ ^commercelab-stg-[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+  echo "Refusing unsafe --project '${PROJECT}': must start with 'commercelab-stg-' to protect dev stacks" >&2
+  exit 2
+fi
+
 mkdir -p "${STATE_DIR}"
 ENV_FILE="${STATE_DIR}/.env"
 ENDPOINTS_FILE="${STATE_DIR}/endpoints.json"
