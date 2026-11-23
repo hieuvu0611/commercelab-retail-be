@@ -13,6 +13,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 )
 
 func newClient() *Client {
@@ -174,5 +175,27 @@ func TestResponseBodyIsCapped(t *testing.T) {
 	var out map[string]any
 	if _, err := newClient().Do(context.Background(), http.MethodGet, srv.URL, Options{}, nil, &out); err == nil {
 		t.Fatal("a 1.3 MiB body was accepted")
+	}
+}
+
+func TestForwardsTraceparentFromContext(t *testing.T) {
+	var seenTraceparent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenTraceparent = r.Header.Get("traceparent")
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+
+	want := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	sc, ok := telemetry.ParseTraceparent(want)
+	if !ok {
+		t.Fatal("failed to parse traceparent")
+	}
+	ctx := telemetry.WithSpanContext(context.Background(), sc)
+	if _, err := newClient().Do(ctx, http.MethodGet, srv.URL, Options{}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if seenTraceparent != want {
+		t.Fatalf("forwarded traceparent = %q, want %q", seenTraceparent, want)
 	}
 }

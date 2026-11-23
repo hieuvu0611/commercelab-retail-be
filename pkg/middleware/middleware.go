@@ -9,17 +9,18 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 )
 
 var validCorrelationID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
-// Chain installs common request context, structured access logging, panic recovery and CORS handling.
 func Chain(h http.Handler) http.Handler {
-	return CorrelationID(AccessLog(Recovery(CORS(h))))
+	return CorrelationID(Trace(AccessLog(Recovery(CORS(h)))))
 }
 
 type correlationKey struct{}
@@ -94,22 +95,60 @@ func (w *trackedWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return conn, rw, err
 }
 
-// AccessLog logs non-health HTTP requests and failed health checks with X-Correlation-ID.
+func Trace(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		if parent, ok := telemetry.ParseTraceparent(r.Header.Get("traceparent")); ok {
+			ctx = telemetry.WithSpanContext(ctx, parent)
+		}
+		normPath := telemetry.NormalizePath(r.URL.Path)
+		ctx, span := telemetry.DefaultTracer().StartSpan(
+			ctx,
+			r.Method+" "+normPath,
+			telemetry.SpanKindServer,
+			telemetry.Attr("http.method", r.Method),
+			telemetry.Attr("http.route", normPath),
+		)
+		tp := telemetry.FormatTraceparent(span.Context())
+		if tp != "" {
+			r.Header.Set("traceparent", tp)
+			w.Header().Set("traceparent", tp)
+		}
+		started := time.Now()
+		tracked := &trackedWriter{ResponseWriter: w, status: http.StatusOK}
+		defer func() {
+			duration := time.Since(started)
+			span.SetAttribute("http.status_code", strconv.Itoa(tracked.status))
+			if tracked.status >= http.StatusInternalServerError {
+				span.SetStatus(telemetry.StatusError, http.StatusText(tracked.status))
+			} else {
+				span.SetStatus(telemetry.StatusOK, "")
+			}
+			span.End()
+			if r.URL.Path != "/metrics" {
+				telemetry.DefaultRegistry().RecordHTTPRequest(r.Method, r.URL.Path, tracked.status, duration)
+			}
+		}()
+		next.ServeHTTP(tracked, r.WithContext(ctx))
+	})
+}
+
 func AccessLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		tracked := &trackedWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
-			if r.URL.Path == "/health" && tracked.status < http.StatusBadRequest {
+			if (r.URL.Path == "/health" || r.URL.Path == "/metrics") && tracked.status < http.StatusBadRequest {
 				return
 			}
 			log.Printf(
-				"http method=%s path=%s status=%d durationMs=%.2f correlationId=%s",
+				"http method=%s path=%s status=%d durationMs=%.2f correlationId=%s traceId=%s",
 				r.Method,
 				redact.Text(r.URL.Path),
 				tracked.status,
 				float64(time.Since(started).Microseconds())/1000.0,
 				CorrelationIDFrom(r.Context()),
+				telemetry.TraceIDFrom(r.Context()),
 			)
 		}()
 		next.ServeHTTP(tracked, r)
@@ -138,7 +177,7 @@ func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Correlation-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Correlation-ID, traceparent")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

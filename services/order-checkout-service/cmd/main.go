@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
@@ -18,6 +19,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/fulfillmentsync"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
@@ -39,6 +41,8 @@ type voucherStore interface {
 // NewServer builds the order service handler. checkoutSvc places orders; vouchers and admin serve the voucher APIs.
 func NewServer(checkoutSvc *checkout.Service, vouchers *voucher.Service, admin *voucher.Admin, promotions ...promotion.Store) http.Handler {
 	mux := http.NewServeMux()
+
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "order-checkout-service healthy", map[string]any{
@@ -65,6 +69,8 @@ const defaultSweepInterval = "30s"
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("order-checkout-service", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 
 	port := config.EnvOrDefault("ORDER_CHECKOUT_PORT", "8083")
 	pgURL := config.EnvOrDefault("DATABASE_URL_ORDERS", "postgres://order_svc_user:order_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=orders")
@@ -142,6 +148,7 @@ func main() {
 			log.Fatalf("[order-checkout-service] %v", err)
 		}
 	}
+	registerOrderSLOMetrics(telemetry.DefaultRegistry(), newPGXSLODB(pool))
 
 	// Shipment events move confirmed orders into fulfillment and on to delivered.
 	shipmentSync := &fulfillmentsync.Handler{Orders: orderStore, Cancels: checkoutSvc}

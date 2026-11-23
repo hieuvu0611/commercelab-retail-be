@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
@@ -19,6 +20,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/internal/stopalert"
 	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/migrations"
@@ -30,6 +32,7 @@ const consumerGroup = "notification-service"
 // NewServer constructs the HTTP handler for notification-service routes.
 func NewServer(dispatcher *domain.Dispatcher, hub *stopalert.Hub, keepAlive time.Duration) http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
 	registerStopAlertRoutes(mux, hub, keepAlive)
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -169,6 +172,8 @@ func NewServer(dispatcher *domain.Dispatcher, hub *stopalert.Hub, keepAlive time
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("notification-service", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 
 	port := config.EnvOrDefault("NOTIFICATION_PORT", "8089")
 	pgURL := config.EnvOrDefault("DATABASE_URL_NOTIFICATIONS", "postgres://notify_svc_user:notify_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=notifications")
