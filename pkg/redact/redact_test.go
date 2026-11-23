@@ -2,6 +2,7 @@ package redact
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -89,5 +90,109 @@ func TestWriterSanitizesStandardLogger(t *testing.T) {
 	}
 	if !strings.Contains(out, "l***@example.com") || !strings.Contains(out, "***67") || !strings.Contains(out, RedactedAddress) {
 		t.Fatalf("expected redacted placeholders in log: %s", out)
+	}
+}
+
+func TestTextRedactsVietnamesePhoneFormats(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "4-3-3 spaced", input: "contact 0912 345 678 now", want: "contact ***78 now"},
+		{name: "4-3-3 dotted", input: "contact 0912.345.678 now", want: "contact ***78 now"},
+		{name: "4-3-3 dashed", input: "contact 0912-345-678 now", want: "contact ***78 now"},
+		{name: "3-3-4 spaced", input: "contact 091 234 5678 now", want: "contact ***78 now"},
+		{name: "3-3-4 dotted", input: "contact 091.234.5678 now", want: "contact ***78 now"},
+		{name: "3-3-4 dashed", input: "contact 091-234-5678 now", want: "contact ***78 now"},
+		{name: "bare 84", input: "contact 84912345678 now", want: "contact ***78 now"},
+		{name: "paren +84 contiguous", input: "contact (+84) 912345678 now", want: "contact ***78 now"},
+		{name: "paren +84 spaced", input: "contact (+84) 912 345 678 now", want: "contact ***78 now"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Text(tc.input); got != tc.want {
+				t.Fatalf("Text(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTextRedactsBearerAndTokenKeys(t *testing.T) {
+	input := "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig refresh_token=rt-secret-123 access_token=at-secret-456 id_token=id-secret-789 token=tok-plain-000"
+	got := Text(input)
+
+	for _, secret := range []string{
+		"eyJhbGciOiJIUzI1NiJ9.payload.sig",
+		"rt-secret-123",
+		"at-secret-456",
+		"id-secret-789",
+		"tok-plain-000",
+	} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("output leaked %q: %s", secret, got)
+		}
+	}
+
+	want := "Authorization: Bearer [REDACTED] refresh_token=[REDACTED] access_token=[REDACTED] id_token=[REDACTED] token=[REDACTED]"
+	if got != want {
+		t.Fatalf("Text(...) = %q, want %q", got, want)
+	}
+}
+
+func TestTextRedactsGoStructPlusVOutput(t *testing.T) {
+	addr := struct {
+		Recipient string
+		Phone     string
+		Line1     string
+	}{
+		Recipient: "Lan Nguyen",
+		Phone:     "0912 345 678",
+		Line1:     "123 Le Loi",
+	}
+
+	got := Text(fmt.Sprintf("shipping=%+v", addr))
+	for _, secret := range []string{"Lan Nguyen", "Lan", "Nguyen", "0912 345 678", "123 Le Loi"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("struct %%+v leaked %q: %s", secret, got)
+		}
+	}
+	want := "shipping={Recipient:[REDACTED] Phone:***78 Line1:[REDACTED_ADDRESS]}"
+	if got != want {
+		t.Fatalf("Text(struct %%+v) = %q, want %q", got, want)
+	}
+
+	full := struct {
+		OrderID  string
+		Ward     string
+		District string
+		Province string
+		Address  string
+		Email    string
+		Password string
+	}{
+		OrderID:  "O-473dea925f53f858",
+		Ward:     "Ben Nghe",
+		District: "District 1",
+		Province: "Ho Chi Minh City",
+		Address:  "45 Nguyen Hue",
+		Email:    "lan.nguyen@example.com",
+		Password: "Dev-Passw0rd-2026",
+	}
+	gotFull := Text(fmt.Sprintf("%+v", full))
+	for _, secret := range []string{"Ben Nghe", "District 1", "Ho Chi Minh City", "45 Nguyen Hue", "lan.nguyen@example.com", "Dev-Passw0rd-2026"} {
+		if strings.Contains(gotFull, secret) {
+			t.Fatalf("full struct %%+v leaked %q: %s", secret, gotFull)
+		}
+	}
+	if !strings.Contains(gotFull, "OrderID:O-473dea925f53f858") ||
+		!strings.Contains(gotFull, "Email:l***@example.com") ||
+		!strings.Contains(gotFull, "Password:[REDACTED]") ||
+		!strings.Contains(gotFull, "Ward:[REDACTED_ADDRESS]") ||
+		!strings.Contains(gotFull, "District:[REDACTED_ADDRESS]") ||
+		!strings.Contains(gotFull, "Province:[REDACTED_ADDRESS]") ||
+		!strings.Contains(gotFull, "Address:[REDACTED_ADDRESS]") {
+		t.Fatalf("unexpected full struct redaction: %s", gotFull)
 	}
 }

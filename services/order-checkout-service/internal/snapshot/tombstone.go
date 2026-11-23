@@ -37,7 +37,25 @@ func (r *RedactingStore) Save(ctx context.Context, s Snapshot) error {
 			s.PIIRedactedAt = &ts
 		}
 	}
-	return r.inner.Save(ctx, s)
+	if err := r.inner.Save(ctx, s); err != nil {
+		return err
+	}
+	if !s.PIIRedacted && s.UserID != "" {
+		erased, erasedAt, err := r.checker.IsErased(ctx, s.UserID)
+		if err != nil {
+			return err
+		}
+		if erased {
+			ts := erasedAt.UTC()
+			if erasedAt.IsZero() {
+				ts = time.Now().UTC()
+			}
+			if _, err := r.inner.RedactUserPII(ctx, s.UserID, ts); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (r *RedactingStore) Get(ctx context.Context, orderID string) (Snapshot, bool, error) {
