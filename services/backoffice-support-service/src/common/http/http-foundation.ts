@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { NextFunction, Request, Response } from 'express';
 import { ApiExceptionFilter } from './api-exception.filter';
 import { ApiResponseInterceptor } from './api-response.interceptor';
+import { redactText } from '../privacy/pii-redactor';
 
 function collectErrors(errors: ValidationError[], prefix = ''): Record<string, string[]> {
   const result: Record<string, string[]> = {};
@@ -25,7 +26,7 @@ export function configureHttpFoundation(app: INestApplication): void {
       if (req.path === '/health' && res.statusCode < 400) return;
       const durationMs = (Number(process.hrtime.bigint() - started) / 1e6).toFixed(2);
       console.log(
-        `http method=${req.method} path=${req.path} status=${res.statusCode} durationMs=${durationMs} correlationId=${id}`,
+        `http method=${req.method} path=${redactText(req.path)} status=${res.statusCode} durationMs=${durationMs} correlationId=${id}`,
       );
     });
     next();

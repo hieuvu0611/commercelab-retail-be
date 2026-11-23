@@ -109,3 +109,35 @@ func TestAccessLogIncludesCorrelationIDAndSkipsHealthyProbes(t *testing.T) {
 		t.Fatalf("expected query params to be omitted from access log, got %q", logged)
 	}
 }
+
+func TestAccessLogAndRecoveryRedactPII(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prevOut)
+
+	handler := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "panic") {
+			panic(`lookup failed email=lan@example.com phone=0901234567 address="123 Le Loi"`)
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	req1 := httptest.NewRequest(http.MethodGet, "/api/v1/users/lan@example.com/0901234567", nil)
+	req1.Header.Set("X-Correlation-ID", "trace-pii-1")
+	handler.ServeHTTP(httptest.NewRecorder(), req1)
+
+	req2 := httptest.NewRequest(http.MethodGet, "/api/v1/panic", nil)
+	req2.Header.Set("X-Correlation-ID", "trace-pii-2")
+	handler.ServeHTTP(httptest.NewRecorder(), req2)
+
+	logged := buf.String()
+	for _, secret := range []string{"lan@example.com", "0901234567", "123 Le Loi"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("middleware log leaked %q: %s", secret, logged)
+		}
+	}
+	if !strings.Contains(logged, "l***@example.com") || !strings.Contains(logged, "***67") {
+		t.Fatalf("expected masked PII in logs: %s", logged)
+	}
+}

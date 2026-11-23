@@ -12,6 +12,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cache"
@@ -107,6 +108,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 }
 
 func main() {
+	redact.InstallDefaultLogger()
 	port := config.EnvOrDefault("CATALOG_PRICING_PORT", "8081")
 	pgURL := config.EnvOrDefault("DATABASE_URL_PRICING", "postgres://pricing_svc_user:pricing_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=pricing")
 	mongoURI := config.EnvOrDefault("MONGO_URI", "mongodb://mongo_admin:mongo_password@localhost:27017/commerce_lab_doc?authSource=admin")

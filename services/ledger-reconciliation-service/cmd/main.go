@@ -12,6 +12,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/domain"
@@ -76,6 +77,7 @@ func NewServer(
 }
 
 func main() {
+	redact.InstallDefaultLogger()
 	port := config.EnvOrDefault("LEDGER_RECONCILIATION_PORT", "8086")
 	pgURL := config.EnvOrDefault("DATABASE_URL_LEDGER", config.EnvOrDefault("DATABASE_URL", "postgres://ledger_svc_user:ledger_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=ledger"))
 	secrets := config.NewLoader()

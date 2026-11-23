@@ -10,6 +10,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/api-gateway/internal/proxy"
 )
@@ -60,6 +61,7 @@ func loadConfig() (Config, error) {
 }
 
 func main() {
+	redact.InstallDefaultLogger()
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("[api-gateway] %v", err)

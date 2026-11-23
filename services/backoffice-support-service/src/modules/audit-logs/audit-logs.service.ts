@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { redactObject } from '../../common/privacy/pii-redactor';
 
 export interface AuditLogEntry {
   id: string;
@@ -136,24 +137,6 @@ export class AuditLogsService {
   }
 
   maskPii(detail?: Record<string, any>): Record<string, any> | undefined {
-    if (!detail) return undefined;
-    const masked: Record<string, any> = {};
-    for (const [k, v] of Object.entries(detail)) {
-      if (typeof v === 'string') {
-        if (k.toLowerCase().includes('email') && v.includes('@')) {
-          const [name, domain] = v.split('@');
-          masked[k] = name.length > 1 ? `${name[0]}***@${domain}` : `***@${domain}`;
-        } else if (k.toLowerCase().includes('phone') && v.length >= 7) {
-          masked[k] = `${v.slice(0, 3)}****${v.slice(-3)}`;
-        } else {
-          masked[k] = v;
-        }
-      } else if (typeof v === 'object' && v !== null) {
-        masked[k] = this.maskPii(v);
-      } else {
-        masked[k] = v;
-      }
-    }
-    return masked;
+    return redactObject(detail);
   }
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/internal/attempt"
@@ -169,6 +170,7 @@ func NewServer(engine *domain.PaymentEngine, store attempt.Store, opts Options) 
 }
 
 func main() {
+	redact.InstallDefaultLogger()
 	port := config.EnvOrDefault("PAYMENT_PORT", "8084")
 	pgURL := config.EnvOrDefault("DATABASE_URL_PAYMENTS", "postgres://payment_svc_user:payment_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=payments")
 

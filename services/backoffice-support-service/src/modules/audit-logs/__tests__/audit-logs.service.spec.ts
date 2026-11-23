@@ -18,6 +18,13 @@ describe('AuditLogsService (P11-T04)', () => {
       detail: {
         email: 'lan.nguyen@example.com',
         phoneNumber: '0901234567',
+        recipient: 'Lan Nguyen',
+        shippingAddress: {
+          line1: '123 Le Loi',
+          ward: 'Ben Nghe',
+          district: 'District 1',
+          province: 'Ho Chi Minh City',
+        },
         ip: '192.168.1.1',
       },
     });
@@ -25,6 +32,13 @@ describe('AuditLogsService (P11-T04)', () => {
     expect(recorded.id).toBeDefined();
     expect(recorded.detail?.email).toBe('l***@example.com');
     expect(recorded.detail?.phoneNumber).toBe('090****567');
+    expect(recorded.detail?.recipient).toBe('[REDACTED]');
+    expect(recorded.detail?.shippingAddress).toEqual({
+      line1: '[REDACTED_ADDRESS]',
+      ward: '[REDACTED_ADDRESS]',
+      district: '[REDACTED_ADDRESS]',
+      province: '[REDACTED_ADDRESS]',
+    });
     expect(recorded.detail?.ip).toBe('192.168.1.1');
   });
 
