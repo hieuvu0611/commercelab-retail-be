@@ -17,6 +17,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/notification-service/internal/stopalert"
@@ -167,6 +168,8 @@ func NewServer(dispatcher *domain.Dispatcher, hub *stopalert.Hub, keepAlive time
 }
 
 func main() {
+	redact.InstallDefaultLogger()
+
 	port := config.EnvOrDefault("NOTIFICATION_PORT", "8089")
 	pgURL := config.EnvOrDefault("DATABASE_URL_NOTIFICATIONS", "postgres://notify_svc_user:notify_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=notifications")
 
@@ -200,6 +203,13 @@ func main() {
 		err := eventconsumer.Run(context.Background(), eventconsumer.Config{Brokers: brokers, Group: consumerGroup, Topic: outbox.TopicFor("Shipment")}, hub.HandleEvent)
 		if err != nil {
 			log.Printf("[notification-service] shipment event consumer stopped: %v", err)
+		}
+	}()
+
+	go func() {
+		err := eventconsumer.Run(context.Background(), eventconsumer.Config{Brokers: brokers, Group: "notification-service-privacy", Topic: outbox.TopicFor("User")}, dispatcher.HandlePrivacyEvent)
+		if err != nil {
+			log.Printf("[notification-service] privacy event consumer stopped: %v", err)
 		}
 	}()
 

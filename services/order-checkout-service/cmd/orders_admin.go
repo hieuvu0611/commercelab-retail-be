@@ -62,6 +62,9 @@ type staffContact struct {
 }
 
 func contactOf(a snapshot.Address) staffContact {
+	if a.Recipient == snapshot.RedactedField {
+		return staffContact{Recipient: snapshot.RedactedField, Phone: snapshot.RedactedField}
+	}
 	return staffContact{Recipient: maskName(a.Recipient), Phone: maskPhone(a.Phone), District: a.District, Province: a.Province}
 }
 

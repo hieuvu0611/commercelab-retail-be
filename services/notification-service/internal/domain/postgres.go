@@ -16,6 +16,8 @@ type InboxStore interface {
 	UnreadCount(ctx context.Context, recipientID string) (int, error)
 	MarkAsRead(ctx context.Context, recipientID, notificationID string) (bool, error)
 	MarkAllAsRead(ctx context.Context, recipientID string) (int, error)
+	EraseUser(ctx context.Context, userID string, erasedAt, retentionUntil time.Time) error
+	IsUserErased(ctx context.Context, userID string) (bool, error)
 }
 
 // PostgresStore persists notifications in the `notifications` schema.
@@ -34,6 +36,20 @@ func (s *PostgresStore) InsertIdempotent(ctx context.Context, n NotificationItem
 		return n, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	var erased bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM notifications.pii_erasure_tombstones WHERE user_id = $1)`,
+		n.RecipientID,
+	).Scan(&erased); err != nil {
+		return n, false, err
+	}
+	if erased {
+		if err := tx.Commit(ctx); err != nil {
+			return n, false, err
+		}
+		return n, true, nil
+	}
 
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO notifications.inbox_dedup_deliveries (event_id, recipient_id, channel, delivered_at)
@@ -141,6 +157,59 @@ func (s *PostgresStore) MarkAllAsRead(ctx context.Context, recipientID string) (
 		return 0, err
 	}
 	return int(tag.RowsAffected()), nil
+}
+
+func (s *PostgresStore) EraseUser(ctx context.Context, userID string, erasedAt, retentionUntil time.Time) error {
+	if userID == "" {
+		return nil
+	}
+	if erasedAt.IsZero() {
+		erasedAt = time.Now().UTC()
+	} else {
+		erasedAt = erasedAt.UTC()
+	}
+	if retentionUntil.IsZero() {
+		retentionUntil = erasedAt.AddDate(10, 0, 0)
+	} else {
+		retentionUntil = retentionUntil.UTC()
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO notifications.pii_erasure_tombstones (user_id, erased_at, retention_until)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id) DO NOTHING`,
+		userID, erasedAt, retentionUntil,
+	); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM notifications.inbox_items
+		WHERE recipient_id = $1`,
+		userID,
+	); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) IsUserErased(ctx context.Context, userID string) (bool, error) {
+	if userID == "" {
+		return false, nil
+	}
+	var erased bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS(SELECT 1 FROM notifications.pii_erasure_tombstones WHERE user_id = $1)`,
+		userID,
+	).Scan(&erased)
+	return erased, err
 }
 
 // ErrStoreUnavailable indicates no backing store operation succeeded.

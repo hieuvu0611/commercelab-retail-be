@@ -15,6 +15,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/checkout"
@@ -22,6 +23,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/paymentsync"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/peer"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/privacy"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/promotion"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/voucher"
@@ -62,6 +64,8 @@ const defaultWarehouseID = "WH-HCM-01"
 const defaultSweepInterval = "30s"
 
 func main() {
+	redact.InstallDefaultLogger()
+
 	port := config.EnvOrDefault("ORDER_CHECKOUT_PORT", "8083")
 	pgURL := config.EnvOrDefault("DATABASE_URL_ORDERS", "postgres://order_svc_user:order_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=orders")
 
@@ -85,15 +89,17 @@ func main() {
 	// Without Postgres (ALLOW_MEMORY_FALLBACK=true, dev/test only) the seeded development vouchers and an
 	// in-memory order store are used.
 	var (
-		store      voucherStore    = voucher.NewMemoryStore(voucher.DevCampaigns()...)
-		promoStore promotion.Store = promotion.NewMemoryStore(promotion.DevCampaigns()...)
-		orderStore orders.Store    = orders.NewMemoryStore()
+		store        voucherStore    = voucher.NewMemoryStore(voucher.DevCampaigns()...)
+		promoStore   promotion.Store = promotion.NewMemoryStore(promotion.DevCampaigns()...)
+		orderStore   orders.Store    = orders.NewMemoryStore()
+		privacyStore privacy.Store   = privacy.NewMemoryStore()
 	)
 	if pool != nil {
 		defer pool.Close()
 		store = voucher.NewPostgresStore(pool)
 		promoStore = promotion.NewPostgresStore(pool)
 		orderStore = orders.NewPostgresStore(pool)
+		privacyStore = privacy.NewPostgresStore(pool)
 	}
 	// Without MongoDB (ALLOW_MEMORY_FALLBACK=true, dev/test only) snapshots are kept in memory.
 	var snapshots snapshot.Store = snapshot.NewMemoryStore()
@@ -110,6 +116,7 @@ func main() {
 		}
 		snapshots = mongoSnapshots
 	}
+	snapshots = snapshot.WithErasureTombstones(snapshots, privacyStore)
 	peers := svcclient.New(svcclient.Config{MaxRetries: 2})
 	checkoutSvc := checkout.New(checkout.Deps{
 		Orders:      orderStore,
@@ -153,6 +160,15 @@ func main() {
 			Group: "order-checkout-service-payments", Topic: outbox.TopicFor("Payment")}, paymentSync.Handle)
 		if err != nil {
 			log.Printf("[order-checkout-service] payment event consumer stopped: %v", err)
+		}
+	}()
+
+	privacySync := &privacy.Handler{Tombstones: privacyStore, Snapshots: snapshots}
+	go func() {
+		err := eventconsumer.Run(ctx, eventconsumer.Config{Brokers: config.EnvOrDefault("REDPANDA_BROKERS", "localhost:19092"),
+			Group: "order-checkout-service-privacy", Topic: outbox.TopicFor("User")}, privacySync.Handle)
+		if err != nil {
+			log.Printf("[order-checkout-service] privacy event consumer stopped: %v", err)
 		}
 	}()
 
