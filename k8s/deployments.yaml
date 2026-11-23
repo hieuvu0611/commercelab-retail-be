@@ -1,0 +1,919 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: commercelab-retail
+  labels:
+    app: api-gateway
+    tier: edge
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        tier: edge
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8080"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api-gateway
+          image: commercelab/api-gateway:local
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: API_GATEWAY_PORT
+              value: "8080"
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: catalog-pricing-service
+  namespace: commercelab-retail
+  labels:
+    app: catalog-pricing-service
+    tier: internal
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: catalog-pricing-service
+  template:
+    metadata:
+      labels:
+        app: catalog-pricing-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8081"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: catalog-pricing-service
+          image: commercelab/catalog-pricing-service:local
+          ports:
+            - containerPort: 8081
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: CATALOG_PRICING_PORT
+              value: "8081"
+            - name: DATABASE_URL_PRICING
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_PRICING
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: MONGO_URI
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-warehouse-service
+  namespace: commercelab-retail
+  labels:
+    app: inventory-warehouse-service
+    tier: internal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inventory-warehouse-service
+  template:
+    metadata:
+      labels:
+        app: inventory-warehouse-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8082"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: inventory-warehouse-service
+          image: commercelab/inventory-warehouse-service:local
+          ports:
+            - containerPort: 8082
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: INVENTORY_WAREHOUSE_PORT
+              value: "8082"
+            - name: DATABASE_URL_INVENTORY
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_INVENTORY
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-checkout-service
+  namespace: commercelab-retail
+  labels:
+    app: order-checkout-service
+    tier: internal
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-checkout-service
+  template:
+    metadata:
+      labels:
+        app: order-checkout-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8083"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: order-checkout-service
+          image: commercelab/order-checkout-service:local
+          ports:
+            - containerPort: 8083
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: ORDER_CHECKOUT_PORT
+              value: "8083"
+            - name: DATABASE_URL_ORDERS
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_ORDERS
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: MONGO_URI
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8083
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8083
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-service
+  namespace: commercelab-retail
+  labels:
+    app: payment-service
+    tier: internal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment-service
+  template:
+    metadata:
+      labels:
+        app: payment-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8084"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: payment-service
+          image: commercelab/payment-service:local
+          ports:
+            - containerPort: 8084
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: PAYMENT_PORT
+              value: "8084"
+            - name: DATABASE_URL_PAYMENTS
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_PAYMENTS
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+            - name: PAYMENT_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: PAYMENT_WEBHOOK_SECRET
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8084
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8084
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fulfillment-shipping-service
+  namespace: commercelab-retail
+  labels:
+    app: fulfillment-shipping-service
+    tier: internal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fulfillment-shipping-service
+  template:
+    metadata:
+      labels:
+        app: fulfillment-shipping-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8085"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fulfillment-shipping-service
+          image: commercelab/fulfillment-shipping-service:local
+          ports:
+            - containerPort: 8085
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: FULFILLMENT_SHIPPING_PORT
+              value: "8085"
+            - name: DATABASE_URL_FULFILLMENT
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_FULFILLMENT
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: MONGO_URI
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+            - name: CARRIER_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: CARRIER_WEBHOOK_SECRET
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-reconciliation-service
+  namespace: commercelab-retail
+  labels:
+    app: ledger-reconciliation-service
+    tier: internal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ledger-reconciliation-service
+  template:
+    metadata:
+      labels:
+        app: ledger-reconciliation-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8086"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ledger-reconciliation-service
+          image: commercelab/ledger-reconciliation-service:local
+          ports:
+            - containerPort: 8086
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: LEDGER_RECONCILIATION_PORT
+              value: "8086"
+            - name: DATABASE_URL_LEDGER
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_LEDGER
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8086
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8086
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: iam-auth-service
+  namespace: commercelab-retail
+  labels:
+    app: iam-auth-service
+    tier: internal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iam-auth-service
+  template:
+    metadata:
+      labels:
+        app: iam-auth-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8087"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: iam-auth-service
+          image: commercelab/iam-auth-service:local
+          ports:
+            - containerPort: 8087
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: IAM_AUTH_PORT
+              value: "8087"
+            - name: DATABASE_URL_IAM
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_IAM
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8087
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8087
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backoffice-support-service
+  namespace: commercelab-retail
+  labels:
+    app: backoffice-support-service
+    tier: internal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backoffice-support-service
+  template:
+    metadata:
+      labels:
+        app: backoffice-support-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8088"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backoffice-support-service
+          image: commercelab/backoffice-support-service:local
+          ports:
+            - containerPort: 8088
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: BACKOFFICE_SUPPORT_PORT
+              value: "8088"
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=180"
+            - name: UV_THREADPOOL_SIZE
+              value: "2"
+            - name: DATABASE_URL_SUPPORT
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_SUPPORT
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-service
+  namespace: commercelab-retail
+  labels:
+    app: notification-service
+    tier: internal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-service
+  template:
+    metadata:
+      labels:
+        app: notification-service
+        tier: internal
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8089"
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: notification-service
+          image: commercelab/notification-service:local
+          ports:
+            - containerPort: 8089
+              name: http
+          envFrom:
+            - configMapRef:
+                name: commercelab-config
+          env:
+            - name: NOTIFICATION_PORT
+              value: "8089"
+            - name: DATABASE_URL_NOTIFICATIONS
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: DATABASE_URL_NOTIFICATIONS
+            - name: JWT_ACCESS_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_ACCESS_SECRET
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: JWT_REFRESH_SECRET
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: commercelab-secrets
+                  key: INTERNAL_SERVICE_TOKEN
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8089
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8089
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 250Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
