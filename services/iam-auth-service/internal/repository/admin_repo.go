@@ -255,7 +255,7 @@ func (r *AdminRepository) ListUsers(ctx context.Context, f ListFilter) ([]User, 
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.WarehouseScope, &u.IsActive, &u.Phone); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.Name, &u.PasswordHash, &u.Role, &u.WarehouseScope, &u.IsActive, &u.Phone, &u.DeletedAt, &u.AnonymizedAt); err != nil {
 			return nil, 0, dependency.Wrap(err)
 		}
 		users = append(users, u)

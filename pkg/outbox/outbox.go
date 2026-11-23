@@ -17,6 +17,7 @@ import (
 
 // Tables of the services that own an outbox.
 const (
+	IAMTable      = "iam.outbox_events"
 	OrdersTable   = "orders.outbox_events"
 	PaymentsTable = "payments.outbox_events"
 )

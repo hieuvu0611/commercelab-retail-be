@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
@@ -91,7 +92,10 @@ func TestLoginValidationResponse(t *testing.T) {
 
 // fakeStore is an in-memory UserStore for handler tests; production code has no in-memory users.
 type fakeStore struct {
-	byID map[string]repository.User
+	mu        sync.Mutex
+	byID      map[string]repository.User
+	tokens    *fakeTokens
+	addresses *repository.MemoryAddressStore
 }
 
 const testPassword = "Dev-Passw0rd-2026"
@@ -115,11 +119,13 @@ func newFakeStore(t *testing.T) *fakeStore {
 }
 
 func (f *fakeStore) Authenticate(_ context.Context, email, plain string) (repository.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, u := range f.byID {
 		if u.Email != normalizeEmail(email) {
 			continue
 		}
-		if ok, _ := password.Verify(plain, u.PasswordHash); ok && u.IsActive {
+		if ok, _ := password.Verify(plain, u.PasswordHash); ok && u.IsActive && u.DeletedAt == nil {
 			return u, nil
 		}
 	}
@@ -127,6 +133,8 @@ func (f *fakeStore) Authenticate(_ context.Context, email, plain string) (reposi
 }
 
 func (f *fakeStore) Register(_ context.Context, email, plain, fullName string) (repository.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, u := range f.byID {
 		if u.Email == email {
 			return repository.User{}, repository.ErrEmailTaken
@@ -142,9 +150,14 @@ func (f *fakeStore) Register(_ context.Context, email, plain, fullName string) (
 }
 
 func (f *fakeStore) UpdateProfile(_ context.Context, userID string, update repository.ProfileUpdate) (repository.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	u, ok := f.byID[userID]
 	if !ok {
 		return repository.User{}, repository.ErrUserNotFound
+	}
+	if !u.IsActive || u.DeletedAt != nil {
+		return repository.User{}, repository.ErrAccountDeleted
 	}
 	if update.FullName != nil {
 		u.Name = *update.FullName
@@ -157,9 +170,14 @@ func (f *fakeStore) UpdateProfile(_ context.Context, userID string, update repos
 }
 
 func (f *fakeStore) ChangePassword(_ context.Context, userID, current, next string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	u, ok := f.byID[userID]
 	if !ok {
 		return repository.ErrUserNotFound
+	}
+	if !u.IsActive || u.DeletedAt != nil {
+		return repository.ErrAccountDeleted
 	}
 	if ok, _ := password.Verify(current, u.PasswordHash); !ok {
 		return repository.ErrInvalidCredentials
@@ -173,7 +191,59 @@ func (f *fakeStore) ChangePassword(_ context.Context, userID, current, next stri
 	return nil
 }
 
+func (f *fakeStore) DeleteAndAnonymize(ctx context.Context, userID, currentPassword string) (repository.AccountDeletionResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	u, ok := f.byID[userID]
+	if !ok {
+		return repository.AccountDeletionResult{}, repository.ErrUserNotFound
+	}
+	if !u.IsActive || u.DeletedAt != nil {
+		return repository.AccountDeletionResult{}, repository.ErrAccountDeleted
+	}
+	if u.Role != "" && u.Role != "CUSTOMER" {
+		return repository.AccountDeletionResult{}, repository.ErrStaffCannotSelfDelete
+	}
+	for _, g := range u.Grants {
+		if g.Role != "CUSTOMER" {
+			return repository.AccountDeletionResult{}, repository.ErrStaffCannotSelfDelete
+		}
+	}
+	if ok, _ := password.Verify(currentPassword, u.PasswordHash); !ok {
+		return repository.AccountDeletionResult{}, repository.ErrInvalidCredentials
+	}
+	now := time.Now().UTC()
+	retentionUntil := now.AddDate(repository.FinancialRetentionYears, 0, 0)
+	anonEmail := repository.AnonymizedEmail(userID)
+	u.Email = anonEmail
+	u.Name = "Deleted User"
+	u.Phone = ""
+	u.PasswordHash = "!DELETED!"
+	u.IsActive = false
+	u.DeletedAt = &now
+	u.AnonymizedAt = &now
+	f.byID[userID] = u
+	if f.tokens != nil {
+		_ = f.tokens.RevokeAllForUser(ctx, userID)
+	}
+	if f.addresses != nil {
+		if list, err := f.addresses.List(ctx, userID); err == nil {
+			for _, a := range list {
+				_ = f.addresses.Delete(ctx, userID, a.ID)
+			}
+		}
+	}
+	return repository.AccountDeletionResult{
+		UserID:          userID,
+		AnonymizedEmail: anonEmail,
+		ErasedAt:        now,
+		RetentionUntil:  retentionUntil,
+	}, nil
+}
+
 func (f *fakeStore) FindByEmail(_ context.Context, email string) (repository.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, u := range f.byID {
 		if u.Email == normalizeEmail(email) {
 			return u, nil
@@ -183,6 +253,8 @@ func (f *fakeStore) FindByEmail(_ context.Context, email string) (repository.Use
 }
 
 func (f *fakeStore) FindByID(_ context.Context, id string) (repository.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if u, ok := f.byID[id]; ok {
 		return u, nil
 	}

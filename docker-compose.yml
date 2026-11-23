@@ -395,10 +395,14 @@ services:
     environment:
       <<: [*go-env, *jwt-env]
       REDIS_ADDR: redis:6379
+      REDPANDA_BROKERS: redpanda:9092
       IAM_AUTH_PORT: 8087
       DATABASE_URL_IAM: postgres://iam_svc_user:iam_secret@postgres:5432/commerce_lab?sslmode=disable&search_path=iam
       MIGRATE_ON_START: "true"
-    depends_on: *infra-healthy
+    depends_on:
+      <<: *infra-healthy
+      redpanda:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8087/health"]
       interval: 5s

@@ -16,6 +16,8 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/audit"
@@ -45,6 +47,7 @@ type UserStore interface {
 	Register(ctx context.Context, email, password, fullName string) (repository.User, error)
 	UpdateProfile(ctx context.Context, userID string, update repository.ProfileUpdate) (repository.User, error)
 	ChangePassword(ctx context.Context, userID, current, next string) error
+	DeleteAndAnonymize(ctx context.Context, userID, currentPassword string) (repository.AccountDeletionResult, error)
 }
 
 // issueSession starts a new refresh-token family for u, signs an access token and returns the profile
@@ -307,7 +310,7 @@ func NewServerFromDeps(d Deps) http.Handler {
 			dependency.WriteUnavailable(w, r, err)
 			return
 		}
-		if err != nil || !u.IsActive {
+		if err != nil || !u.IsActive || u.DeletedAt != nil {
 			_ = tokens.RevokeFamilyOf(r.Context(), repository.HashToken(req.RefreshToken))
 			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "The account does not exist or is disabled", nil)
 			return
@@ -415,6 +418,10 @@ func NewServerFromDeps(d Deps) http.Handler {
 			writeLookupError(w, r, err)
 			return
 		}
+		if !u.IsActive || u.DeletedAt != nil {
+			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "The account does not exist or is disabled", nil)
+			return
+		}
 		response.JSON(w, http.StatusOK, "Profile retrieved", profileOf(u), nil)
 	})))
 
@@ -426,6 +433,15 @@ func NewServerFromDeps(d Deps) http.Handler {
 			Phone    *string `json:"phone"`
 		}
 		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		existing, err := repo.FindByID(r.Context(), claims.UserID)
+		if err != nil {
+			writeLookupError(w, r, err)
+			return
+		}
+		if !existing.IsActive || existing.DeletedAt != nil {
+			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "The account does not exist or is disabled", nil)
 			return
 		}
 		fieldErrors := map[string][]string{}
@@ -475,6 +491,10 @@ func NewServerFromDeps(d Deps) http.Handler {
 			writeLookupError(w, r, err)
 			return
 		}
+		if !u.IsActive || u.DeletedAt != nil {
+			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "The account does not exist or is disabled", nil)
+			return
+		}
 		fieldErrors := map[string][]string{}
 		if req.CurrentPassword == "" {
 			fieldErrors["currentPassword"] = []string{"Current password is required"}
@@ -496,6 +516,9 @@ func NewServerFromDeps(d Deps) http.Handler {
 		switch {
 		case dependency.IsUnavailable(err):
 			dependency.WriteUnavailable(w, r, err)
+			return
+		case errors.Is(err, repository.ErrAccountDeleted):
+			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "The account does not exist or is disabled", nil)
 			return
 		case errors.Is(err, repository.ErrInvalidCredentials):
 			recordFailure(r, limiterKey)
@@ -521,6 +544,59 @@ func NewServerFromDeps(d Deps) http.Handler {
 		resetFailures(r, limiterKey)
 		record(r, audit.PasswordChanged, audit.OutcomeSuccess, u.ID, nil)
 		response.JSON(w, http.StatusOK, "Password changed; other sessions were signed out", profile, nil)
+	})))
+
+	mux.Handle("POST /api/v1/auth/delete-account", auth.RequireAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		claims, _ := auth.ClaimsFrom(r.Context())
+		var req struct {
+			CurrentPassword string `json:"currentPassword"`
+			Confirmation    string `json:"confirmation"`
+		}
+		if !request.DecodeJSON(w, r, &req) {
+			return
+		}
+		fieldErrors := map[string][]string{}
+		if req.CurrentPassword == "" {
+			fieldErrors["currentPassword"] = []string{"Current password is required"}
+		}
+		if req.Confirmation != "DELETE" {
+			fieldErrors["confirmation"] = []string{"Confirmation must be DELETE"}
+		}
+		if len(fieldErrors) != 0 {
+			response.Error(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "Request validation failed", fieldErrors)
+			return
+		}
+		limiterKey := ratelimit.KeyFor("delete-account", claims.UserID, clientIP(r))
+		if blockedByLimiter(w, r, limiterKey, audit.AccountDeleteFailed, claims.UserID) {
+			return
+		}
+		res, err := repo.DeleteAndAnonymize(r.Context(), claims.UserID, req.CurrentPassword)
+		switch {
+		case dependency.IsUnavailable(err):
+			dependency.WriteUnavailable(w, r, err)
+			return
+		case errors.Is(err, repository.ErrStaffCannotSelfDelete):
+			response.Error(w, r, http.StatusForbidden, "STAFF_ACCOUNT_CANNOT_SELF_DELETE", "Staff accounts cannot be self-deleted; contact an access administrator", nil)
+			return
+		case errors.Is(err, repository.ErrInvalidCredentials):
+			recordFailure(r, limiterKey)
+			record(r, audit.AccountDeleteFailed, audit.OutcomeFailure, claims.UserID, nil)
+			response.Error(w, r, http.StatusForbidden, "INVALID_CURRENT_PASSWORD", "The current password is incorrect", nil)
+			return
+		case errors.Is(err, repository.ErrAccountDeleted), errors.Is(err, repository.ErrUserNotFound):
+			response.Error(w, r, http.StatusUnauthorized, "USER_INACTIVE", "The account does not exist or is disabled", nil)
+			return
+		case err != nil:
+			response.Error(w, r, http.StatusInternalServerError, "DELETE_ACCOUNT_FAILED", "Could not delete the account", nil)
+			return
+		}
+		resetFailures(r, limiterKey)
+		response.JSON(w, http.StatusOK, "Account deleted and personal data anonymized", map[string]any{
+			"userId":         res.UserID,
+			"anonymized":     true,
+			"erasedAt":       res.ErasedAt.UTC().Format(time.RFC3339),
+			"retentionUntil": res.RetentionUntil.UTC().Format(time.RFC3339),
+		}, nil)
 	})))
 
 	if admin != nil {
@@ -556,28 +632,34 @@ func loadConfig() (Config, error) {
 }
 
 func main() {
+	redact.InstallDefaultLogger()
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("[iam-auth-service] %v", err)
 	}
 	port, dbURL := cfg.Port, cfg.DatabaseURL
+	ctx := context.Background()
 
 	if migrate.EnabledOnStart() {
-		if _, err := migrate.Up(context.Background(), dbURL, migrations.FS); err != nil {
+		if _, err := migrate.Up(ctx, dbURL, migrations.FS); err != nil {
 			log.Fatalf("[iam-auth-service] migrations failed: %v", err)
 		}
 	}
 
 	// IAM has no in-memory fallback: it never serves users that are not in Postgres,
 	// so ALLOW_MEMORY_FALLBACK does not apply here.
-	pool, err := db.ConnectPostgres(context.Background(), dbURL)
+	pool, err := db.ConnectPostgres(ctx, dbURL)
 	if err != nil {
 		log.Fatalf("[iam-auth-service] postgres is required and unavailable: %v", err)
 	}
 	defer pool.Close()
 
+	if err := outbox.Start(ctx, "iam-auth-service", pool, outbox.IAMTable); err != nil {
+		log.Fatalf("[iam-auth-service] %v", err)
+	}
+
 	// Sign-in rate limiting needs Redis; like Postgres it has no in-memory fallback.
-	redisClient, err := db.ConnectRedis(context.Background(), cfg.RedisAddr, cfg.RedisPass)
+	redisClient, err := db.ConnectRedis(ctx, cfg.RedisAddr, cfg.RedisPass)
 	if err != nil {
 		log.Fatalf("[iam-auth-service] redis is required and unavailable: %v", err)
 	}

@@ -5,6 +5,7 @@ package repository
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/password"
@@ -287,5 +289,183 @@ func TestChangePasswordChecksTheCurrentPasswordAgainstTheStoredHash(t *testing.T
 	}
 	if _, err := repo.Authenticate(ctx, u.Email, "a-long-enough-password"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("the old password must stop working, got %v", err)
+	}
+}
+
+func TestDeleteAndAnonymizeAtomicallyErasesPIIAndEmitsOutbox(t *testing.T) {
+	repo, ctx := integrationRepo(t)
+	origEmail := fmt.Sprintf("erase-%d@example.com", time.Now().UnixNano())
+	origName := "Nguyen Van Erasure"
+	origPhone := "+84901234567"
+	pass := "a-long-enough-password"
+
+	u, err := repo.Register(ctx, origEmail, pass, origName)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = repo.pool.Exec(bg, `DELETE FROM iam.outbox_events WHERE aggregate_id = $1`, u.ID)
+		_, _ = repo.pool.Exec(bg, `DELETE FROM iam.auth_audit_logs WHERE target_user_id = $1`, u.ID)
+		_, _ = repo.pool.Exec(bg, `DELETE FROM iam.users WHERE id = $1`, u.ID)
+	})
+
+	if _, err := repo.UpdateProfile(ctx, u.ID, ProfileUpdate{Phone: &origPhone}); err != nil {
+		t.Fatalf("set phone: %v", err)
+	}
+
+	addrRepo := NewAddressRepository(repo.pool)
+	if _, err := addrRepo.Create(ctx, u.ID, AddressInput{
+		Recipient: origName, Phone: origPhone, Line1: "123 Le Loi",
+		Ward: "Ben Thanh", District: "District 1", Province: "Ho Chi Minh City", IsDefault: true,
+	}); err != nil {
+		t.Fatalf("create address: %v", err)
+	}
+
+	refreshRepo := NewRefreshRepository(repo)
+	tokID, err := NewTokenID("rt-")
+	if err != nil {
+		t.Fatalf("new token id: %v", err)
+	}
+	famID, err := NewTokenID("fam-")
+	if err != nil {
+		t.Fatalf("new family id: %v", err)
+	}
+	if err := refreshRepo.Create(ctx, RefreshTokenRecord{
+		ID: tokID, UserID: u.ID, FamilyID: famID, ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}, HashToken("raw-refresh-"+u.ID)); err != nil {
+		t.Fatalf("create refresh token: %v", err)
+	}
+
+	// Wrong password fails without mutating state.
+	if _, err := repo.DeleteAndAnonymize(ctx, u.ID, "wrong-password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong password err = %v, want ErrInvalidCredentials", err)
+	}
+
+	// Staff accounts cannot be self-deleted.
+	if _, err := repo.DeleteAndAnonymize(ctx, "staff-wh-hcm", devPassword); !errors.Is(err, ErrStaffCannotSelfDelete) {
+		t.Fatalf("staff self-delete err = %v, want ErrStaffCannotSelfDelete", err)
+	}
+
+	res, err := repo.DeleteAndAnonymize(ctx, u.ID, pass)
+	if err != nil {
+		t.Fatalf("DeleteAndAnonymize: %v", err)
+	}
+	wantEmail := AnonymizedEmail(u.ID)
+	if res.UserID != u.ID || res.AnonymizedEmail != wantEmail {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	if wantRetention := res.ErasedAt.AddDate(FinancialRetentionYears, 0, 0); !res.RetentionUntil.Equal(wantRetention) {
+		t.Fatalf("retentionUntil = %s, want %s", res.RetentionUntil, wantRetention)
+	}
+
+	// Verify iam.users row is anonymized and deactivated.
+	after, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("find anonymized user: %v", err)
+	}
+	if after.Email != wantEmail || after.Name != "Deleted User" || after.Phone != "" ||
+		after.PasswordHash != "!DELETED!" || after.IsActive || after.DeletedAt == nil || after.AnonymizedAt == nil {
+		t.Fatalf("user not properly anonymized: %+v", after)
+	}
+
+	// Verify customer addresses were deleted and further writes are rejected.
+	var addrCount int
+	if err := repo.pool.QueryRow(ctx, `SELECT COUNT(*) FROM iam.customer_addresses WHERE user_id = $1`, u.ID).Scan(&addrCount); err != nil || addrCount != 0 {
+		t.Fatalf("customer_addresses count = %d (err=%v), want 0", addrCount, err)
+	}
+	if _, err := addrRepo.Create(ctx, u.ID, AddressInput{
+		Recipient: "Ghost", Phone: "+84901234567", Line1: "1 Main St",
+		Ward: "W", District: "D", Province: "P",
+	}); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("deleted user address create err = %v, want ErrUserNotFound", err)
+	}
+
+	// Verify all refresh tokens were revoked.
+	var liveTokens int
+	if err := repo.pool.QueryRow(ctx, `SELECT COUNT(*) FROM iam.refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, u.ID).Scan(&liveTokens); err != nil || liveTokens != 0 {
+		t.Fatalf("live refresh tokens = %d (err=%v), want 0", liveTokens, err)
+	}
+
+	// Verify 10-year PII erasure tombstone.
+	var tombEmail string
+	var tombErasedAt, tombRetentionUntil time.Time
+	if err := repo.pool.QueryRow(ctx, `
+		SELECT anonymized_email, erased_at, retention_until
+		FROM iam.pii_erasure_tombstones
+		WHERE user_id = $1
+	`, u.ID).Scan(&tombEmail, &tombErasedAt, &tombRetentionUntil); err != nil {
+		t.Fatalf("query tombstone: %v", err)
+	}
+	if tombEmail != wantEmail || tombRetentionUntil.Before(tombErasedAt.AddDate(9, 11, 0)) {
+		t.Fatalf("unexpected tombstone: email=%q erasedAt=%s retentionUntil=%s", tombEmail, tombErasedAt, tombRetentionUntil)
+	}
+
+	// Verify ACCOUNT_DELETED audit log exists with zero PII.
+	var actorID, outcome string
+	var auditDetail []byte
+	if err := repo.pool.QueryRow(ctx, `
+		SELECT actor_user_id, outcome, detail
+		FROM iam.auth_audit_logs
+		WHERE event = 'ACCOUNT_DELETED' AND target_user_id = $1
+		ORDER BY id DESC LIMIT 1
+	`, u.ID).Scan(&actorID, &outcome, &auditDetail); err != nil {
+		t.Fatalf("query ACCOUNT_DELETED audit log: %v", err)
+	}
+	if actorID != u.ID || outcome != "SUCCESS" {
+		t.Fatalf("audit row actor=%q outcome=%q", actorID, outcome)
+	}
+	for _, pii := range []string{origEmail, origName, origPhone} {
+		if strings.Contains(string(auditDetail), pii) {
+			t.Fatalf("audit detail leaked PII %q: %s", pii, auditDetail)
+		}
+	}
+
+	// Verify iam.outbox_events row has iam.user_pii_erased.v1 and zero PII.
+	var eventType, aggregateType, status string
+	var payloadRaw []byte
+	if err := repo.pool.QueryRow(ctx, `
+		SELECT event_type, aggregate_type, status, payload
+		FROM iam.outbox_events
+		WHERE aggregate_id = $1
+		ORDER BY id DESC LIMIT 1
+	`, u.ID).Scan(&eventType, &aggregateType, &status, &payloadRaw); err != nil {
+		t.Fatalf("query outbox event: %v", err)
+	}
+	if eventType != events.EventUserPIIErased || aggregateType != "User" || status != "PENDING" {
+		t.Fatalf("outbox row: eventType=%q aggregateType=%q status=%q", eventType, aggregateType, status)
+	}
+	for _, pii := range []string{origEmail, origName, origPhone} {
+		if strings.Contains(string(payloadRaw), pii) {
+			t.Fatalf("outbox payload leaked PII %q: %s", pii, payloadRaw)
+		}
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(payloadRaw, &payload); err != nil {
+		t.Fatalf("unmarshal outbox payload: %v", err)
+	}
+	if payload["userId"] != u.ID || payload["erasedAt"] == "" || payload["retentionUntil"] == "" {
+		t.Fatalf("unexpected outbox payload: %+v", payload)
+	}
+
+	// Verify subsequent auth operations fail and email can be re-registered.
+	if _, err := repo.Authenticate(ctx, origEmail, pass); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("authenticate after deletion err = %v, want ErrInvalidCredentials", err)
+	}
+	if err := repo.ChangePassword(ctx, u.ID, pass, "another-long-password"); !errors.Is(err, ErrAccountDeleted) {
+		t.Fatalf("change password after deletion err = %v, want ErrAccountDeleted", err)
+	}
+	if _, err := repo.DeleteAndAnonymize(ctx, u.ID, pass); !errors.Is(err, ErrAccountDeleted) {
+		t.Fatalf("second deletion err = %v, want ErrAccountDeleted", err)
+	}
+	reborn, err := repo.Register(ctx, origEmail, "reborn-long-password", "Reborn User")
+	if err != nil {
+		t.Fatalf("re-register with freed email: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = repo.pool.Exec(context.Background(), `DELETE FROM iam.users WHERE id = $1`, reborn.ID)
+	})
+	if reborn.ID == u.ID {
+		t.Fatalf("re-registered account must have a fresh ID, got %s", reborn.ID)
 	}
 }
