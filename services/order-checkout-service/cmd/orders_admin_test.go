@@ -9,6 +9,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/orders"
+	"github.com/hieuvu0611/commercelab-retail-be/services/order-checkout-service/internal/snapshot"
 )
 
 func scopedBearer(t *testing.T, user string, roles []string, warehouses ...string) string {
@@ -212,5 +213,12 @@ func TestStaffOrderListPagesAndFiltersByStatus(t *testing.T) {
 	}
 	if rec := f.get(t, staff, "/api/v1/admin/orders?status=NOPE"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad status = %d", rec.Code)
+	}
+}
+
+func TestContactOfPreservesRedactedAddressWithoutDoubleMasking(t *testing.T) {
+	got := contactOf(snapshot.RedactedAddress())
+	if got.Recipient != snapshot.RedactedField || got.Phone != snapshot.RedactedField || got.District != "" || got.Province != "" {
+		t.Fatalf("contactOf(RedactedAddress()) = %+v, want recipient=%q phone=%q empty district/province", got, snapshot.RedactedField, snapshot.RedactedField)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 )
 
@@ -105,7 +106,7 @@ func AccessLog(next http.Handler) http.Handler {
 			log.Printf(
 				"http method=%s path=%s status=%d durationMs=%.2f correlationId=%s",
 				r.Method,
-				r.URL.Path,
+				redact.Text(r.URL.Path),
 				tracked.status,
 				float64(time.Since(started).Microseconds())/1000.0,
 				CorrelationIDFrom(r.Context()),
@@ -122,7 +123,7 @@ func Recovery(next http.Handler) http.Handler {
 		tracked := &trackedWriter{ResponseWriter: w}
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				log.Printf("request panic correlationId=%s: %v", r.Header.Get("X-Correlation-ID"), recovered)
+				log.Printf("request panic correlationId=%s: %s", r.Header.Get("X-Correlation-ID"), redact.Any(recovered))
 				if tracked.committed {
 					panic(http.ErrAbortHandler)
 				}

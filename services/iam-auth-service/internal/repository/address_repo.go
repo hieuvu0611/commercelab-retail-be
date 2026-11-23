@@ -61,7 +61,7 @@ func (r *AddressRepository) inBook(ctx context.Context, userID string, fn func(t
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var locked string
-	if err := tx.QueryRow(ctx, `SELECT id FROM iam.users WHERE id = $1 FOR UPDATE`, userID).Scan(&locked); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT id FROM iam.users WHERE id = $1 AND is_active = TRUE AND deleted_at IS NULL FOR UPDATE`, userID).Scan(&locked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrUserNotFound
 		}

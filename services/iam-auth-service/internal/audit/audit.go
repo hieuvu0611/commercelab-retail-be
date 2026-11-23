@@ -6,9 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"strings"
 	"time"
 
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,6 +22,8 @@ const (
 	RefreshReuseDetected = "REFRESH_REUSE_DETECTED"
 	PasswordChanged      = "PASSWORD_CHANGED"
 	PasswordChangeFailed = "PASSWORD_CHANGE_FAILED"
+	AccountDeleted       = "ACCOUNT_DELETED"
+	AccountDeleteFailed  = "ACCOUNT_DELETE_FAILED"
 )
 
 // Outcomes.
@@ -94,28 +96,10 @@ func (p *Postgres) Record(ctx context.Context, e Event) {
 	}
 }
 
-// RedactEmail keeps the first letter of the local part and the domain: "lan@example.com" becomes
-// "l***@example.com". Anything that is not an address becomes "***"; an empty value stays empty.
 func RedactEmail(email string) string {
-	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" {
-		return ""
-	}
-	at := strings.LastIndex(email, "@")
-	if at < 1 || at == len(email)-1 {
-		return "***"
-	}
-	return email[:1] + "***" + email[at:]
+	return redact.Email(email)
 }
 
-// RedactPhone keeps only the last two digits.
 func RedactPhone(phone string) string {
-	phone = strings.TrimSpace(phone)
-	if phone == "" {
-		return ""
-	}
-	if len(phone) <= 2 {
-		return "***"
-	}
-	return "***" + phone[len(phone)-2:]
+	return redact.Phone(phone)
 }

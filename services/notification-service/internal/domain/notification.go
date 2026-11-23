@@ -3,8 +3,11 @@ package domain
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/hieuvu0611/commercelab-retail-be/contracts/events"
 )
 
 // NotificationItem represents a notification message stored in the user's inbox.
@@ -25,6 +28,7 @@ type Dispatcher struct {
 	mu          sync.Mutex
 	store       InboxStore
 	dedup       map[string]bool
+	erased      map[string]bool
 	inboxes     map[string][]NotificationItem
 	subscribers map[string][]chan NotificationItem
 }
@@ -32,6 +36,7 @@ type Dispatcher struct {
 func NewDispatcher() *Dispatcher {
 	return &Dispatcher{
 		dedup:       make(map[string]bool),
+		erased:      make(map[string]bool),
 		inboxes:     make(map[string][]NotificationItem),
 		subscribers: make(map[string][]chan NotificationItem),
 	}
@@ -62,6 +67,10 @@ func (d *Dispatcher) Dispatch(n NotificationItem) (NotificationItem, bool) {
 	}
 
 	d.mu.Lock()
+	if d.erased[n.RecipientID] {
+		d.mu.Unlock()
+		return n, true
+	}
 	dedupKey := n.EventID + "|" + n.RecipientID + "|" + n.Channel
 	if d.dedup[dedupKey] {
 		d.mu.Unlock()
@@ -75,9 +84,108 @@ func (d *Dispatcher) Dispatch(n NotificationItem) (NotificationItem, bool) {
 	return n, false
 }
 
+func (d *Dispatcher) EraseUser(ctx context.Context, userID string, erasedAt, retentionUntil time.Time) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil
+	}
+	if erasedAt.IsZero() {
+		erasedAt = time.Now().UTC()
+	} else {
+		erasedAt = erasedAt.UTC()
+	}
+	if retentionUntil.IsZero() {
+		retentionUntil = erasedAt.AddDate(10, 0, 0)
+	} else {
+		retentionUntil = retentionUntil.UTC()
+	}
+
+	if d.store != nil {
+		if err := d.store.EraseUser(ctx, userID, erasedAt, retentionUntil); err != nil {
+			return err
+		}
+	}
+
+	d.mu.Lock()
+	d.erased[userID] = true
+	delete(d.inboxes, userID)
+	if subs, ok := d.subscribers[userID]; ok {
+		for _, ch := range subs {
+			close(ch)
+		}
+		delete(d.subscribers, userID)
+	}
+	d.mu.Unlock()
+	return nil
+}
+
+func (d *Dispatcher) HandlePrivacyEvent(ctx context.Context, e events.DomainEvent) error {
+	if e.EventType != events.EventUserPIIErased {
+		return nil
+	}
+
+	userID := strings.TrimSpace(payloadString(e.Payload, "userId"))
+	if userID == "" {
+		userID = strings.TrimSpace(e.AggregateID)
+	}
+	if userID == "" {
+		log.Printf("[notification-service] skipping %s (%s): missing userId", e.EventType, e.EventID)
+		return nil
+	}
+
+	erasedAt := payloadTime(e.Payload, "erasedAt")
+	if erasedAt.IsZero() {
+		if !e.OccurredAt.IsZero() {
+			erasedAt = e.OccurredAt.UTC()
+		} else {
+			erasedAt = time.Now().UTC()
+		}
+	}
+
+	retentionUntil := payloadTime(e.Payload, "retentionUntil")
+	if retentionUntil.IsZero() {
+		retentionUntil = erasedAt.AddDate(10, 0, 0)
+	}
+
+	return d.EraseUser(ctx, userID, erasedAt, retentionUntil)
+}
+
+func payloadString(p map[string]any, key string) string {
+	if p == nil {
+		return ""
+	}
+	v, _ := p[key].(string)
+	return v
+}
+
+func payloadTime(p map[string]any, key string) time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	switch v := p[key].(type) {
+	case time.Time:
+		return v.UTC()
+	case string:
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return time.Time{}
+		}
+		if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			return t.UTC()
+		}
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
 func (d *Dispatcher) broadcast(n NotificationItem) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.erased[n.RecipientID] {
+		return
+	}
 	if subs, ok := d.subscribers[n.RecipientID]; ok {
 		for _, ch := range subs {
 			select {

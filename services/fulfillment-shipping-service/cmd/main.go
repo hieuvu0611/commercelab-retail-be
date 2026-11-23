@@ -15,6 +15,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/intake"
@@ -75,6 +76,7 @@ func NewServer(d Deps) http.Handler {
 }
 
 func main() {
+	redact.InstallDefaultLogger()
 	port := config.EnvOrDefault("FULFILLMENT_SHIPPING_PORT", "8085")
 	pgURL := config.EnvOrDefault("DATABASE_URL_FULFILLMENT", "postgres://fulfillment_svc_user:fulfillment_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=fulfillment")
 

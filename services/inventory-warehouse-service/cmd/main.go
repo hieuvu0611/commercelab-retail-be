@@ -16,6 +16,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
@@ -412,6 +413,7 @@ func loadConfig() (Config, error) {
 }
 
 func main() {
+	redact.InstallDefaultLogger()
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("[inventory-warehouse-service] %v", err)

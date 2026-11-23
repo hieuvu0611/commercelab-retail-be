@@ -1,5 +1,6 @@
 import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { redactText } from '../privacy/pii-redactor';
 
 const codes: Record<number, string> = {
   400: 'INVALID_REQUEST', 401: 'UNAUTHENTICATED', 403: 'FORBIDDEN',
@@ -17,14 +18,18 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const request = context.getRequest<Request>();
     const response = context.getResponse<Response>();
     if (response.headersSent) {
-      this.logger.error(`Response already sent; correlationId=${request.headers['x-correlation-id']}`);
+      this.logger.error(redactText(`Response already sent; correlationId=${request.headers['x-correlation-id']}`));
       response.destroy();
       return;
     }
     const status = exception instanceof HttpException ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
     const payload = exception instanceof HttpException ? exception.getResponse() : undefined;
     const body = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
-    if (status >= 500) this.logger.error(`Request failed; correlationId=${request.headers['x-correlation-id']}`, exception instanceof Error ? exception.stack : undefined);
+    if (status >= 500) {
+      const errorMessage = redactText(`Request failed; correlationId=${request.headers['x-correlation-id']}`);
+      const errorStack = exception instanceof Error && exception.stack ? redactText(exception.stack) : undefined;
+      this.logger.error(errorMessage, errorStack);
+    }
     const preserveSafe503 = status === HttpStatus.SERVICE_UNAVAILABLE && body.expose === true;
     const message = status >= 500 && !preserveSafe503
       ? (status === HttpStatus.SERVICE_UNAVAILABLE ? 'Service unavailable' : 'Internal server error')

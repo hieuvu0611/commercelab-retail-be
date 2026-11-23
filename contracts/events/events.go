@@ -34,4 +34,5 @@ const (
 	EventReturnApproved        = "support.return_approved.v1"
 	EventReconDiscrepancyFound = "ledger.reconciliation_discrepancy.v1"
 	EventExceptionCaseOpened   = "support.exception_case_opened.v1"
+	EventUserPIIErased         = "iam.user_pii_erased.v1"
 )
