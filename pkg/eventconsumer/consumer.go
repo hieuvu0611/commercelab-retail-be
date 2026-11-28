@@ -107,11 +107,22 @@ func Run(ctx context.Context, cfg Config, h Handler) error {
 		if fetches.IsClientClosed() {
 			return nil
 		}
+		var needsEnsureTopic bool
 		fetches.EachError(func(topic string, partition int32, err error) {
 			if !errors.Is(err, context.Canceled) {
 				log.Printf("[eventconsumer] fetch %s/%d: %v", topic, partition, err)
 			}
+			if errors.Is(err, kerr.UnknownTopicOrPartition) {
+				needsEnsureTopic = true
+			}
 		})
+		if needsEnsureTopic && ctx.Err() == nil {
+			tctx, tcancel := context.WithTimeout(ctx, 5*time.Second)
+			if err := ensureTopic(tctx, client, cfg.Topic); err != nil && ctx.Err() == nil {
+				log.Printf("[eventconsumer] recreate topic %s: %v", cfg.Topic, err)
+			}
+			tcancel()
+		}
 		fetches.EachRecord(func(rec *kgo.Record) {
 			if ctx.Err() != nil {
 				return
