@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cache"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cart"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
@@ -92,6 +94,8 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	cartSvc := cart.NewService(deps.Carts, deps.Pricer)
 	registerCartRoutes(mux, cartSvc)
 
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
+
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "catalog-pricing-service healthy", map[string]any{
 			"service":        "catalog-pricing-service",
@@ -109,6 +113,8 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("catalog-pricing-service", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 	port := config.EnvOrDefault("CATALOG_PRICING_PORT", "8081")
 	pgURL := config.EnvOrDefault("DATABASE_URL_PRICING", "postgres://pricing_svc_user:pricing_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=pricing")
 	mongoURI := config.EnvOrDefault("MONGO_URI", "mongodb://mongo_admin:mongo_password@localhost:27017/commerce_lab_doc?authSource=admin")

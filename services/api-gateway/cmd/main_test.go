@@ -117,3 +117,15 @@ func TestProxiedResponseHasExactlyOneSetOfCORSHeaders(t *testing.T) {
 		}
 	}
 }
+
+func TestGatewayExposesPrometheusMetricsWithoutAuth(t *testing.T) {
+	rt := proxy.NewRouter(proxy.DefaultTargetsFromEnv())
+	w := httptest.NewRecorder()
+	NewServer(rt, false).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "commercelab_service_up") {
+		t.Fatalf("expected commercelab_service_up in /metrics output: %s", w.Body.String())
+	}
+}

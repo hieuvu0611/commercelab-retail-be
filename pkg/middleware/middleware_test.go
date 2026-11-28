@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 )
 
 func TestChainRecoversPanicWithCorrelationID(t *testing.T) {
@@ -139,5 +140,46 @@ func TestAccessLogAndRecoveryRedactPII(t *testing.T) {
 	}
 	if !strings.Contains(logged, "l***@example.com") || !strings.Contains(logged, "***67") {
 		t.Fatalf("expected masked PII in logs: %s", logged)
+	}
+}
+
+func TestTraceparentPropagationAccessLogTraceIDAndMetrics(t *testing.T) {
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prevOut)
+
+	var seenTraceID string
+	handler := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenTraceID = telemetry.TraceIDFrom(r.Context())
+		w.WriteHeader(http.StatusCreated)
+	}))
+
+	incoming := "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/orders/O-77", nil)
+	req.Header.Set("traceparent", incoming)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if seenTraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Fatalf("context traceId = %q", seenTraceID)
+	}
+	respTP := rec.Header().Get("traceparent")
+	sc, ok := telemetry.ParseTraceparent(respTP)
+	if !ok || sc.TraceID != seenTraceID || sc.SpanID == "00f067aa0ba902b7" {
+		t.Fatalf("unexpected response traceparent %q", respTP)
+	}
+	if !strings.Contains(buf.String(), "traceId=4bf92f3577b34da6a3ce929d0e0e4736") {
+		t.Fatalf("expected traceId in access log, got %q", buf.String())
+	}
+	if !strings.Contains(rec.Header().Get("Access-Control-Allow-Headers"), "traceparent") {
+		t.Fatalf("expected traceparent in CORS allow headers, got %q", rec.Header().Get("Access-Control-Allow-Headers"))
+	}
+
+	buf.Reset()
+	metricsReq := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), metricsReq)
+	if buf.Len() != 0 {
+		t.Fatalf("expected healthy /metrics scrape to be skipped from access log, got %q", buf.String())
 	}
 }

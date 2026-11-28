@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
@@ -15,6 +16,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/repository"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/migrations"
@@ -31,6 +33,8 @@ func NewServer(
 		caseRepo = repository.NewCaseRepository(nil)
 	}
 	mux := http.NewServeMux()
+
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		bucket := ""
@@ -78,6 +82,8 @@ func NewServer(
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("ledger-reconciliation-service", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 	port := config.EnvOrDefault("LEDGER_RECONCILIATION_PORT", "8086")
 	pgURL := config.EnvOrDefault("DATABASE_URL_LEDGER", config.EnvOrDefault("DATABASE_URL", "postgres://ledger_svc_user:ledger_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=ledger"))
 	secrets := config.NewLoader()

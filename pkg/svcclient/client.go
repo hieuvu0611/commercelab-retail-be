@@ -16,6 +16,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 )
 
 const (
@@ -138,6 +139,9 @@ func (c *Client) once(ctx context.Context, method, url string, o Options, payloa
 	}
 	if id := middleware.CorrelationIDFrom(ctx); id != "" {
 		req.Header.Set("X-Correlation-ID", id)
+	}
+	if tp := telemetry.TraceparentFrom(ctx); tp != "" {
+		req.Header.Set("traceparent", tp)
 	}
 	if o.IdempotencyKey != "" {
 		req.Header.Set("Idempotency-Key", o.IdempotencyKey)
