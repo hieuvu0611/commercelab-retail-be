@@ -27,13 +27,14 @@ describe('PII Redactor', () => {
   });
 
   describe('redactPhone', () => {
-    it('preserves first 3 and last 3 characters for phone numbers with at least 7 characters', () => {
-      expect(redactPhone('0901234567')).toBe('090****567');
-      expect(redactPhone('+84901234567')).toBe('+84****567');
+    it('masks phone numbers to the last 2 digits matching Go pkg/redact.Phone', () => {
+      expect(redactPhone('0901234567')).toBe('***67');
+      expect(redactPhone('+84901234567')).toBe('***67');
+      expect(redactPhone('0912 345 678')).toBe('***78');
     });
 
     it('masks shorter non-empty values and preserves empty values', () => {
-      expect(redactPhone('12345')).toBe('***');
+      expect(redactPhone('12')).toBe('***');
       expect(redactPhone('')).toBe('');
       expect(redactPhone('   ')).toBe('');
     });
@@ -54,13 +55,27 @@ describe('PII Redactor', () => {
       const redacted = redactText(logLine);
 
       expect(redacted).toContain('l***@example.com');
-      expect(redacted).toContain('090****567');
-      expect(redacted).toContain('+84****678');
+      expect(redacted).toContain('***67');
+      expect(redacted).toContain('***78');
       expect(redacted).not.toContain('lan.nguyen@example.com');
       expect(redacted).not.toContain('0901234567');
       expect(redacted).not.toContain('+84912345678');
       expect(redacted).toContain('durationMs=12.34');
       expect(redacted).toContain('correlationId=req-1234567890abcdef');
+    });
+
+    it('redacts Vietnamese phone formats in spaced, dotted, dashed, bare 84, and (+84) forms', () => {
+      const variants = [
+        '0912 345 678',
+        '0912.345.678',
+        '0912-345-678',
+        '84912345678',
+        '(+84) 912345678',
+        '(+84) 912 345 678',
+      ];
+      for (const phone of variants) {
+        expect(redactText(`contact ${phone} now`)).toBe('contact ***78 now');
+      }
     });
 
     it('redacts JSON and key-value address, recipient, and secret fields', () => {
@@ -149,7 +164,7 @@ describe('PII Redactor', () => {
 
       expect(redacted).toEqual({
         email: 'l***@example.com',
-        phoneNumber: '090****567',
+        phoneNumber: '***67',
         fullName: REDACTED_VALUE,
         password: REDACTED_VALUE,
         accessToken: REDACTED_VALUE,
@@ -160,12 +175,12 @@ describe('PII Redactor', () => {
           ward: REDACTED_ADDRESS,
           district: REDACTED_ADDRESS,
           province: REDACTED_ADDRESS,
-          phone: '+84****567',
+          phone: '***67',
         },
         items: [
           {
             orderId: 'O-20261123-0001',
-            note: 'Call 091****678 or email l***@example.com',
+            note: 'Call ***78 or email l***@example.com',
           },
         ],
         addresses: [REDACTED_ADDRESS, REDACTED_ADDRESS],

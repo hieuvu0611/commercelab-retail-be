@@ -211,3 +211,71 @@ func TestDuplicateErasureEventsAreIdempotent(t *testing.T) {
 		t.Fatalf("snapshot after duplicate erasure = %+v found=%v err=%v", got, found, err)
 	}
 }
+
+type hookedSnapshotStore struct {
+	inner        snapshot.Store
+	onBeforeSave func(ctx context.Context, s snapshot.Snapshot) error
+}
+
+func (h *hookedSnapshotStore) Save(ctx context.Context, s snapshot.Snapshot) error {
+	if h.onBeforeSave != nil {
+		if err := h.onBeforeSave(ctx, s); err != nil {
+			return err
+		}
+	}
+	return h.inner.Save(ctx, s)
+}
+
+func (h *hookedSnapshotStore) Get(ctx context.Context, orderID string) (snapshot.Snapshot, bool, error) {
+	return h.inner.Get(ctx, orderID)
+}
+
+func (h *hookedSnapshotStore) RedactUserPII(ctx context.Context, userID string, erasedAt time.Time) (int64, error) {
+	return h.inner.RedactUserPII(ctx, userID, erasedAt)
+}
+
+func TestSaveRedactsSnapshotWhenErasedConcurrentlyDuringSaveWindow(t *testing.T) {
+	ctx := context.Background()
+	tombstones := NewMemoryStore()
+	rawStore := snapshot.NewMemoryStore()
+
+	erasedAt := time.Date(2026, 11, 23, 14, 0, 0, 0, time.UTC)
+	var handler *Handler
+	hooked := &hookedSnapshotStore{
+		inner: rawStore,
+		onBeforeSave: func(ctx context.Context, s snapshot.Snapshot) error {
+			return handler.Handle(ctx, events.DomainEvent{
+				EventID:       "evt-erase-concurrent",
+				EventType:     events.EventUserPIIErased,
+				AggregateType: "User",
+				AggregateID:   s.UserID,
+				OccurredAt:    erasedAt,
+				Payload: map[string]any{
+					"userId":         s.UserID,
+					"erasedAt":       erasedAt.Format(time.RFC3339),
+					"retentionUntil": erasedAt.AddDate(10, 0, 0).Format(time.RFC3339),
+				},
+			})
+		},
+	}
+	wrapped := snapshot.WithErasureTombstones(hooked, tombstones)
+	handler = &Handler{Tombstones: tombstones, Snapshots: wrapped}
+
+	if err := wrapped.Save(ctx, sampleSnapshot("O-RACE-1", "user-lan")); err != nil {
+		t.Fatalf("save with concurrent erasure: %v", err)
+	}
+
+	stored, found, err := rawStore.Get(ctx, "O-RACE-1")
+	if err != nil || !found {
+		t.Fatalf("raw get O-RACE-1: found=%v err=%v", found, err)
+	}
+	if stored.ShippingAddress != snapshot.RedactedAddress() {
+		t.Fatalf("concurrent erasure race left unredacted address in storage: %+v", stored.ShippingAddress)
+	}
+	if !stored.PIIRedacted || stored.PIIRedactedAt == nil || !stored.PIIRedactedAt.Equal(erasedAt) {
+		t.Fatalf("expected pii_redacted metadata after concurrent erasure, got redacted=%v at=%v", stored.PIIRedacted, stored.PIIRedactedAt)
+	}
+	if stored.SubtotalVND != 700000 || stored.DiscountVND != 70000 || stored.TotalPayableVND != 660000 {
+		t.Fatalf("commercial fields altered after concurrent erasure: %+v", stored)
+	}
+}

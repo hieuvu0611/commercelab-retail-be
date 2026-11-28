@@ -31,7 +31,7 @@ describe('AuditLogsService (P11-T04)', () => {
 
     expect(recorded.id).toBeDefined();
     expect(recorded.detail?.email).toBe('l***@example.com');
-    expect(recorded.detail?.phoneNumber).toBe('090****567');
+    expect(recorded.detail?.phoneNumber).toBe('***67');
     expect(recorded.detail?.recipient).toBe('[REDACTED]');
     expect(recorded.detail?.shippingAddress).toEqual({
       line1: '[REDACTED_ADDRESS]',
@@ -40,6 +40,20 @@ describe('AuditLogsService (P11-T04)', () => {
       province: '[REDACTED_ADDRESS]',
     });
     expect(recorded.detail?.ip).toBe('192.168.1.1');
+  });
+
+  it('masks spaced, dotted, dashed, bare 84, and (+84) VN phone formats in audit detail text', () => {
+    const recorded = service.record({
+      source: 'EXCEPTION_CASE',
+      event: 'NOTE_ADDED',
+      actorUserId: 'ops-1',
+      outcome: 'SUCCESS',
+      detail: {
+        note: 'Callbacks: 0912 345 678 / 0912.345.678 / 0912-345-678 / 84912345678 / (+84) 912345678',
+      },
+    });
+
+    expect(recorded.detail?.note).toBe('Callbacks: ***78 / ***78 / ***78 / ***78 / ***78');
   });
 
   it('lists audit logs with filters on actorId, source, and event', async () => {
