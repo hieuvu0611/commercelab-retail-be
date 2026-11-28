@@ -71,8 +71,8 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	proxy := httputil.NewSingleHostReverseProxy(parsedURL)
 	proxy.ModifyResponse = func(res *http.Response) error {
-		// The gateway's correlation ID is authoritative for the client response.
 		res.Header.Del("X-Correlation-ID")
+		res.Header.Del("Traceparent")
 		// The gateway answers CORS itself. Every service adds the same headers, and a browser rejects a
 		// response that carries more than one Access-Control-Allow-Origin value.
 		for _, header := range []string{

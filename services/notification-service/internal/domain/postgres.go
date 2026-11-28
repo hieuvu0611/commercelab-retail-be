@@ -37,23 +37,12 @@ func (s *PostgresStore) InsertIdempotent(ctx context.Context, n NotificationItem
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var erased bool
-	if err := tx.QueryRow(ctx, `
-		SELECT EXISTS(SELECT 1 FROM notifications.pii_erasure_tombstones WHERE user_id = $1)`,
-		n.RecipientID,
-	).Scan(&erased); err != nil {
-		return n, false, err
-	}
-	if erased {
-		if err := tx.Commit(ctx); err != nil {
-			return n, false, err
-		}
-		return n, true, nil
-	}
-
 	tag, err := tx.Exec(ctx, `
 		INSERT INTO notifications.inbox_dedup_deliveries (event_id, recipient_id, channel, delivered_at)
-		VALUES ($1, $2, $3, $4)
+		SELECT $1, $2::text, $3, $4
+		WHERE NOT EXISTS (
+			SELECT 1 FROM notifications.pii_erasure_tombstones WHERE user_id = $2::text
+		)
 		ON CONFLICT (event_id, recipient_id, channel) DO NOTHING`,
 		n.EventID, n.RecipientID, n.Channel, n.CreatedAt,
 	)
@@ -68,17 +57,25 @@ func (s *PostgresStore) InsertIdempotent(ctx context.Context, n NotificationItem
 	if err != nil || len(metaJSON) == 0 || string(metaJSON) == "null" {
 		metaJSON = []byte("{}")
 	}
-	_, err = tx.Exec(ctx, `
+	itemTag, err := tx.Exec(ctx, `
 		INSERT INTO notifications.inbox_items (
 			notification_id, event_id, recipient_id, channel, category,
 			title, message, is_read, metadata_json, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)
+		)
+		SELECT $1, $2, $3::text, $4, $5, $6, $7, $8, $9::jsonb, $10
+		WHERE NOT EXISTS (
+			SELECT 1 FROM notifications.pii_erasure_tombstones WHERE user_id = $3::text
+		)
 		ON CONFLICT (event_id, recipient_id, channel) DO NOTHING`,
 		n.NotificationID, n.EventID, n.RecipientID, n.Channel, n.Category,
 		n.Title, n.Message, n.IsRead, string(metaJSON), n.CreatedAt,
 	)
 	if err != nil {
 		return n, false, err
+	}
+	if itemTag.RowsAffected() == 0 {
+		_ = tx.Rollback(ctx)
+		return n, true, nil
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return n, false, err

@@ -2,10 +2,14 @@ export const REDACTED_VALUE = '[REDACTED]';
 export const REDACTED_ADDRESS = '[REDACTED_ADDRESS]';
 
 const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const VN_INTL_PHONE_PATTERN =
+  /(?<![A-Za-z0-9_-])((?:\(\+84\)|\+84)[\s.-]?0?[35789](?:\d{8}|\d{2}[\s.-]\d{3}[\s.-]\d{3}|\d[\s.-]\d{3,4}[\s.-]\d{3,4}|\d{1,2}[\s.-]\d{6,7}))(?![A-Za-z0-9_-])/g;
 const INTL_PHONE_PATTERN =
-  /(?<![A-Za-z0-9_-])(\+[1-9]\d{0,2}[\s.-]?(?:\(\d{1,4}\)|\d{1,4})(?:[\s.-]?\d{2,4}){2,4})(?![A-Za-z0-9_-])/g;
-const VN_PHONE_PATTERN =
-  /(?<![A-Za-z0-9_-])(0(?:3|5|7|8|9)\d(?:[\s.-]?\d{3,4}){2})(?![A-Za-z0-9_-])/g;
+  /(?<![A-Za-z0-9_-])((?:\(\+[1-9]\d{0,2}\)|\+[1-9]\d{0,2})[\s.-]?(?:\(\d{1,4}\)|\d{1,4})(?:[\s.-]?\d{2,4}){2,4})(?![A-Za-z0-9_-])/g;
+const VN_LOCAL_PHONE_PATTERN =
+  /(?<![A-Za-z0-9_-])(0[35789](?:\d{8,9}|\d{2}[\s.-]\d{3}[\s.-]\d{3}|\d[\s.-]\d{3,4}[\s.-]\d{3,4}|\d{1,2}[\s.-]\d{6,7}))(?![A-Za-z0-9_-])/g;
+const VN_BARE84_PHONE_PATTERN =
+  /(?<![A-Za-z0-9_-])(84[\s.-]?[35789](?:\d{8}|\d{2}[\s.-]\d{3}[\s.-]\d{3}|\d[\s.-]\d{3,4}[\s.-]\d{3,4}|\d{1,2}[\s.-]\d{6,7}))(?![A-Za-z0-9_-])/g;
 const BEARER_TOKEN_PATTERN = /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi;
 
 const JSON_OBJECT_ADDRESS_PATTERN =
@@ -16,7 +20,7 @@ const SENSITIVE_FIELD_NAMES =
   'line1|line2|street|ward|district|province|recipient|recipientName|recipient_name|fullName|full_name|' +
   'phone|phoneNumber|phone_number|' +
   'password|currentPassword|current_password|newPassword|new_password|' +
-  'token|accessToken|access_token|refreshToken|refresh_token|authorization|secret';
+  'token|accessToken|access_token|refreshToken|refresh_token|idToken|id_token|authorization|secret';
 
 const JSON_STRING_SENSITIVE_PATTERN = new RegExp(
   `"(?:${SENSITIVE_FIELD_NAMES})"\\s*:\\s*"(?:[^"\\\\]|\\\\.)*"`,
@@ -87,10 +91,10 @@ export function redactEmail(email: string): string {
 export function redactPhone(phone: string): string {
   const trimmed = phone.trim();
   if (!trimmed) return '';
-  if (trimmed.length >= 7) {
-    return `${trimmed.slice(0, 3)}****${trimmed.slice(-3)}`;
+  if (trimmed.length <= 2) {
+    return '***';
   }
-  return '***';
+  return `***${trimmed.slice(-2)}`;
 }
 
 export function redactAddress(address: string): string {
@@ -131,15 +135,27 @@ export function redactText(text: string): string {
 
   out = out.replace(EMAIL_PATTERN, (match) => redactEmail(match));
 
+  out = out.replace(VN_INTL_PHONE_PATTERN, (match) => {
+    const digits = digitsOnly(match);
+    if (digits.length < 9 || digits.length > 15) return match;
+    return redactPhone(digits);
+  });
+
   out = out.replace(INTL_PHONE_PATTERN, (match) => {
     const digits = digitsOnly(match);
     if (digits.length < 9 || digits.length > 15) return match;
-    return redactPhone(`+${digits}`);
+    return redactPhone(digits);
   });
 
-  out = out.replace(VN_PHONE_PATTERN, (match) => {
+  out = out.replace(VN_LOCAL_PHONE_PATTERN, (match) => {
     const digits = digitsOnly(match);
     if (digits.length < 9 || digits.length > 11) return match;
+    return redactPhone(digits);
+  });
+
+  out = out.replace(VN_BARE84_PHONE_PATTERN, (match) => {
+    const digits = digitsOnly(match);
+    if (digits.length !== 11) return match;
     return redactPhone(digits);
   });
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
@@ -18,6 +19,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/intake"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/inventory"
 	"github.com/hieuvu0611/commercelab-retail-be/services/fulfillment-shipping-service/internal/shipment"
@@ -61,6 +63,7 @@ func (d Deps) now() time.Time {
 // NewServer builds the HTTP handler of the fulfillment service.
 func NewServer(d Deps) http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "fulfillment-shipping-service healthy", map[string]any{
 			"service":        "fulfillment-shipping-service",
@@ -77,6 +80,8 @@ func NewServer(d Deps) http.Handler {
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("fulfillment-shipping-service", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 	port := config.EnvOrDefault("FULFILLMENT_SHIPPING_PORT", "8085")
 	pgURL := config.EnvOrDefault("DATABASE_URL_FULFILLMENT", "postgres://fulfillment_svc_user:fulfillment_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=fulfillment")
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/svcclient"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/internal/attempt"
 	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/internal/codsync"
 	"github.com/hieuvu0611/commercelab-retail-be/services/payment-service/internal/domain"
@@ -38,6 +40,8 @@ const minWebhookSecretBytes = 32
 // NewServer builds the payment service handler.
 func NewServer(engine *domain.PaymentEngine, store attempt.Store, opts Options) http.Handler {
 	mux := http.NewServeMux()
+
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "payment-service healthy", map[string]any{
@@ -171,6 +175,8 @@ func NewServer(engine *domain.PaymentEngine, store attempt.Store, opts Options) 
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("payment-service", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 	port := config.EnvOrDefault("PAYMENT_PORT", "8084")
 	pgURL := config.EnvOrDefault("DATABASE_URL_PAYMENTS", "postgres://payment_svc_user:payment_secret@localhost:5432/commerce_lab?sslmode=disable&search_path=payments")
 
@@ -206,6 +212,7 @@ func main() {
 			log.Fatalf("[payment-service] %v", err)
 		}
 	}
+	registerPaymentSLOMetrics(telemetry.DefaultRegistry(), newPGXSLODB(pool))
 	refundEvery, err := time.ParseDuration(config.EnvOrDefault("PAYMENT_REFUND_INTERVAL", defaultRefundInterval))
 	if err != nil || refundEvery < 500*time.Millisecond {
 		log.Fatalf("[payment-service] PAYMENT_REFUND_INTERVAL must be a duration of at least 500ms: %v", err)

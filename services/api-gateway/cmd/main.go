@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
@@ -12,11 +13,14 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/api-gateway/internal/proxy"
 )
 
 func NewServer(proxyRouter *proxy.Router, redisConnected bool) http.Handler {
 	mux := http.NewServeMux()
+
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "api-gateway healthy", map[string]any{
@@ -62,6 +66,8 @@ func loadConfig() (Config, error) {
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("api-gateway", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("[api-gateway] %v", err)

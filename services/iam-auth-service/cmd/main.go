@@ -6,6 +6,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/audit"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/ratelimit"
 	"github.com/hieuvu0611/commercelab-retail-be/services/iam-auth-service/internal/repository"
@@ -194,6 +196,8 @@ func NewServerFromDeps(d Deps) http.Handler {
 		}
 	}
 	mux := http.NewServeMux()
+
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "iam-auth-service healthy", map[string]any{
@@ -633,6 +637,8 @@ func loadConfig() (Config, error) {
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("iam-auth-service", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("[iam-auth-service] %v", err)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/telemetry"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/migrations"
@@ -41,6 +43,8 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 		opt(&options)
 	}
 	mux := http.NewServeMux()
+
+	mux.Handle("GET /metrics", telemetry.DefaultRegistry().Handler())
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		response.JSON(w, http.StatusOK, "inventory-warehouse-service healthy", map[string]any{
@@ -423,6 +427,8 @@ func loadConfig() (Config, error) {
 
 func main() {
 	redact.InstallDefaultLogger()
+	tracer := telemetry.Configure("inventory-warehouse-service", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	defer func() { _ = tracer.Shutdown(context.Background()) }()
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("[inventory-warehouse-service] %v", err)
