@@ -320,3 +320,50 @@ func TestPaymentsCloseAttemptForCancelSendsTheReason(t *testing.T) {
 		t.Fatalf("an unknown attempt counts as closed: %v", err)
 	}
 }
+
+func TestStockHandoverSendsInternalTokenAndPayload(t *testing.T) {
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("0123456789abcdef0123456789abcdef")
+	var got map[string]string
+	var hdr http.Header
+	var path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, hdr = r.URL.Path, r.Header.Clone()
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+	if err := NewStock(srv.URL, client()).Handover(context.Background(), "ord-pos-1", "WH-HCM-01"); err != nil {
+		t.Fatal(err)
+	}
+	if path != "/api/v1/inventory/internal/shipments/handover" || hdr.Get(internalauth.Header) == "" || hdr.Get("Idempotency-Key") != "handover-ord-pos-1" || got["orderId"] != "ord-pos-1" || got["warehouseId"] != "WH-HCM-01" {
+		t.Fatalf("path=%s headers=%v body=%v", path, hdr, got)
+	}
+}
+
+func TestCatalogPricesLookupAndInvalidSKU(t *testing.T) {
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure("0123456789abcdef0123456789abcdef")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(internalauth.Header) == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/api/v1/internal/skus/SKU-OK/price" {
+			_, _ = w.Write([]byte(`{"data":{"skuId":"SKU-OK","skuName":"City Backpack","unitPriceVnd":300000}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"SKU_NOT_FOUND","status":404}`))
+	}))
+	defer srv.Close()
+	c := NewCatalogPrices(srv.URL, client())
+	priced, err := c.GetSKUPrice(context.Background(), "SKU-OK")
+	if err != nil || priced.SkuID != "SKU-OK" || priced.Name != "City Backpack" || priced.UnitPriceVND != 300000 {
+		t.Fatalf("priced=%+v err=%v", priced, err)
+	}
+	if _, err := c.GetSKUPrice(context.Background(), "SKU-MISSING"); !errors.Is(err, checkout.ErrInvalidSKU) {
+		t.Fatalf("missing sku err=%v, want ErrInvalidSKU", err)
+	}
+}

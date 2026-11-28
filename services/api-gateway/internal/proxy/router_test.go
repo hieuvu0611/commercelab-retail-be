@@ -22,6 +22,8 @@ func TestResolveTargetRoutesEveryPublicPrefixToItsService(t *testing.T) {
 		{"/api/v1/admin/users", "iam"},
 		{"/api/v1/admin/orders", "order"},
 		{"/api/v1/admin/orders/O-1", "order"},
+		{"/api/v1/admin/pos", "order"},
+		{"/api/v1/admin/pos/sales", "order"},
 		{"/api/v1/orders/O-1", "order"},
 		{"/api/v1/orders/O-1/tracking", "fulfillment"},
 		{"/api/v1/admin/shipments/SHP-O-1/confirm-stop", "fulfillment"}, // the warehouse confirms a stop (P7-T02)

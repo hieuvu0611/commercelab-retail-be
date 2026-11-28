@@ -70,6 +70,9 @@ func (s *MemoryStore) Create(_ context.Context, key, hash string, o Order, ev ..
 	}
 	now := s.now()
 	o.Version, o.CreatedAt, o.UpdatedAt = 1, now, now
+	if o.Channel == "" {
+		o.Channel = ChannelOnline
+	}
 	if o.Status == "" {
 		o.Status = StatusPending
 	}
@@ -145,6 +148,9 @@ func (s *MemoryStore) Query(_ context.Context, f Filter) ([]Order, int, error) {
 
 func matches(o Order, f Filter) bool {
 	if f.UserID != "" && o.UserID != f.UserID || f.FailureCode != "" && o.FailureCode != f.FailureCode {
+		return false
+	}
+	if f.Channel != "" && o.Channel != f.Channel {
 		return false
 	}
 	if !f.UpdatedBefore.IsZero() && o.UpdatedAt.After(f.UpdatedBefore) {

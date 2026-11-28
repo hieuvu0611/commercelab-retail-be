@@ -12,9 +12,12 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/request"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/cart"
 	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/domain"
+	"github.com/hieuvu0611/commercelab-retail-be/services/catalog-pricing-service/internal/repository"
 )
 
 // RoleMarketing may set prices.
@@ -32,6 +35,25 @@ func registerPriceRoutes(mux *http.ServeMux, svc *domain.PriceService) {
 	mux.Handle("GET /api/v1/admin/prices", marketing(api.list))
 	mux.Handle("PUT /api/v1/admin/skus/{skuId}/price", marketing(api.set))
 	mux.Handle("GET /api/v1/admin/skus/{skuId}/price", marketing(api.get))
+}
+
+func registerInternalSKUPriceRoute(mux *http.ServeMux, pricer cart.Pricer) {
+	mux.Handle("GET /api/v1/internal/skus/{skuId}/price", internalauth.Require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sp, err := pricer.GetSkuPrice(r.Context(), r.PathValue("skuId"))
+		switch {
+		case errors.Is(err, repository.ErrSkuNotFound):
+			response.Error(w, r, http.StatusNotFound, "SKU_NOT_FOUND", "SKU not found", nil)
+		case errors.Is(err, repository.ErrSkuNotOrderable):
+			response.Error(w, r, http.StatusUnprocessableEntity, "SKU_NOT_ORDERABLE", "SKU is not orderable", nil)
+		case dependency.IsUnavailable(err):
+			dependency.WriteUnavailable(w, r, err)
+		case err != nil:
+			log.Printf("[catalog] internal sku price lookup failed: %v", err)
+			response.Error(w, r, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error", nil)
+		default:
+			response.JSON(w, http.StatusOK, "SKU price", sp, nil)
+		}
+	})))
 }
 
 func (a *priceAPI) set(w http.ResponseWriter, r *http.Request) {

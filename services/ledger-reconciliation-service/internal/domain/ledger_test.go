@@ -148,3 +148,39 @@ func TestNewCODDeliveryAndSettlementEntries(t *testing.T) {
 		}
 	})
 }
+
+func TestNewPOSSaleCompletedEntry(t *testing.T) {
+	t.Run("POS_CASH debits 1111 and credits 5110", func(t *testing.T) {
+		entry, err := NewPOSSaleCompletedEntry("JE-POS-1", "ord-pos-1", "WH-HCM-01", "POS_CASH", 300_000, "cashier-1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := ValidateJournalEntry(entry); err != nil {
+			t.Fatalf("expected balanced entry: %v", err)
+		}
+		if len(entry.Postings) != 2 || entry.Postings[0].AccountCode != "1111" || entry.Postings[0].Direction != DirectionDebit ||
+			entry.Postings[1].AccountCode != "5110" || entry.Postings[1].Direction != DirectionCredit {
+			t.Fatalf("unexpected postings: %+v", entry.Postings)
+		}
+	})
+
+	t.Run("POS_CARD debits 1120 and credits 5110", func(t *testing.T) {
+		entry, err := NewPOSSaleCompletedEntry("JE-POS-2", "ord-pos-2", "WH-HN-01", "POS_CARD", 450_000, "cashier-2")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := ValidateJournalEntry(entry); err != nil {
+			t.Fatalf("expected balanced entry: %v", err)
+		}
+		if len(entry.Postings) != 2 || entry.Postings[0].AccountCode != "1120" || entry.Postings[0].Direction != DirectionDebit ||
+			entry.Postings[1].AccountCode != "5110" || entry.Postings[1].Direction != DirectionCredit {
+			t.Fatalf("unexpected postings: %+v", entry.Postings)
+		}
+	})
+
+	t.Run("unsupported payment method is rejected", func(t *testing.T) {
+		if _, err := NewPOSSaleCompletedEntry("JE-POS-3", "ord-pos-3", "WH-HCM-01", "COD", 100_000, "cashier-1"); err == nil {
+			t.Fatal("expected error for unsupported payment method")
+		}
+	})
+}

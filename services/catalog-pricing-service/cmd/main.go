@@ -89,6 +89,7 @@ func NewServerWithDeps(repo *repository.CatalogPricingRepository, pgConnected, m
 	if deps.Pricer == nil {
 		deps.Pricer = repo
 	}
+	registerInternalSKUPriceRoute(mux, deps.Pricer)
 	cartSvc := cart.NewService(deps.Carts, deps.Pricer)
 	registerCartRoutes(mux, cartSvc)
 

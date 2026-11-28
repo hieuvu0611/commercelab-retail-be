@@ -10,11 +10,14 @@ import (
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/config"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/db"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/dependency"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/eventconsumer"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/middleware"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/migrate"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/outbox"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/redact"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/response"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/s3"
+	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/consumer"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/domain"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/internal/repository"
 	"github.com/hieuvu0611/commercelab-retail-be/services/ledger-reconciliation-service/migrations"
@@ -106,6 +109,19 @@ func main() {
 	repo := repository.NewLedgerRepository(pgPool)
 	settleRepo := repository.NewSettlementRepository(pgPool)
 	caseRepo := repository.NewCaseRepository(pgPool)
+
+	posConsumer := &consumer.POSHandler{Repo: repo}
+	go func() {
+		err := eventconsumer.Run(ctx, eventconsumer.Config{
+			Brokers: config.EnvOrDefault("REDPANDA_BROKERS", "localhost:19092"),
+			Group:   "ledger-reconciliation-service-pos",
+			Topic:   outbox.TopicFor("Order"),
+		}, posConsumer.Handle)
+		if err != nil {
+			log.Printf("[ledger-reconciliation-service] POS event consumer stopped: %v", err)
+		}
+	}()
+
 	server := NewServer(repo, settleRepo, caseRepo, s3Client, pgPool != nil)
 
 	log.Printf("[ledger-reconciliation-service] listening on :%s (schema: ledger, S3 bucket: %s)", port, s3Client.Bucket)

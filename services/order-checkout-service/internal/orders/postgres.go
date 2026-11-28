@@ -21,7 +21,8 @@ type PostgresStore struct {
 func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{pool: pool} }
 
 const orderColumns = `order_id, user_id, quote_id, address_id, warehouse_id, COALESCE(voucher_code, ''), applied_promotions_json, status, payment_method, payment_status,
-	failure_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, refund_pending_vnd, refunded_amount_vnd, version, expires_at, created_at, updated_at`
+	failure_code, subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, refund_pending_vnd, refunded_amount_vnd, version, expires_at, created_at, updated_at,
+	channel, receipt_number, cash_received_vnd, change_due_vnd, customer_note`
 
 func orderScanDest(o *Order, promoRaw *[]byte) []any {
 	return []any{
@@ -30,6 +31,7 @@ func orderScanDest(o *Order, promoRaw *[]byte) []any {
 		&o.SubtotalVND, &o.DiscountVND, &o.ShippingFeeVND, &o.TotalPayableVND,
 		&o.CapturedVND, &o.RefundPendingVND, &o.RefundedVND,
 		&o.Version, &o.ExpiresAt, &o.CreatedAt, &o.UpdatedAt,
+		&o.Channel, &o.ReceiptNumber, &o.CashReceivedVND, &o.ChangeDueVND, &o.CustomerNote,
 	}
 }
 
@@ -131,7 +133,7 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, e
 		return existing, true, nil
 	}
 
-	status, payment, method := o.Status, o.PaymentStatus, o.PaymentMethod
+	status, payment, method, channel := o.Status, o.PaymentStatus, o.PaymentMethod, o.Channel
 	if status == "" {
 		status = StatusPending
 	}
@@ -140,6 +142,9 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, e
 	}
 	if method == "" {
 		method = "PREPAID"
+	}
+	if channel == "" {
+		channel = ChannelOnline
 	}
 	if method == "COD" {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('cod:' || $1))`, o.UserID); err != nil {
@@ -160,10 +165,12 @@ func (s *PostgresStore) Create(ctx context.Context, key, hash string, o Order, e
 		promoJSON = []byte("[]")
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO orders.orders (order_id, user_id, quote_id, address_id, warehouse_id, voucher_code, applied_promotions_json, status, payment_method, payment_status,
-			subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, expires_at)
-		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15)`,
+			subtotal_vnd, discount_vnd, shipping_fee_vnd, total_payable_vnd, captured_amount_vnd, expires_at,
+			channel, receipt_number, cash_received_vnd, change_due_vnd, customer_note)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
 		o.OrderID, o.UserID, o.QuoteID, o.AddressID, o.WarehouseID, o.VoucherCode, string(promoJSON), status, method, payment,
-		o.SubtotalVND, o.DiscountVND, o.ShippingFeeVND, o.TotalPayableVND, o.ExpiresAt); err != nil {
+		o.SubtotalVND, o.DiscountVND, o.ShippingFeeVND, o.TotalPayableVND, o.CapturedVND, o.ExpiresAt,
+		channel, o.ReceiptNumber, o.CashReceivedVND, o.ChangeDueVND, o.CustomerNote); err != nil {
 		return Order{}, false, dependency.Wrap(err)
 	}
 	for _, it := range o.Items {
@@ -236,14 +243,15 @@ func (s *PostgresStore) Query(ctx context.Context, f Filter) ([]Order, int, erro
 	}
 	const where = `WHERE ($1 = '' OR user_id = $1) AND (cardinality($2::text[]) = 0 OR status = ANY($2)) AND ($3 = '' OR failure_code = $3)
 		AND ($4::timestamptz IS NULL OR updated_at <= $4) AND ($5::timestamptz IS NULL OR updated_at >= $5)
-		AND (cardinality($6::text[]) = 0 OR warehouse_id = ANY($6) OR EXISTS (SELECT 1 FROM orders.order_parcels op WHERE op.order_id = o.order_id AND op.warehouse_id = ANY($6)))`
+		AND (cardinality($6::text[]) = 0 OR warehouse_id = ANY($6) OR EXISTS (SELECT 1 FROM orders.order_parcels op WHERE op.order_id = o.order_id AND op.warehouse_id = ANY($6)))
+		AND ($7 = '' OR channel = $7)`
 	var total int
-	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders o `+where, f.UserID, statuses, f.FailureCode, before, after, warehouses).Scan(&total); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders.orders o `+where, f.UserID, statuses, f.FailureCode, before, after, warehouses, f.Channel).Scan(&total); err != nil {
 		return nil, 0, dependency.Wrap(err)
 	}
 	rows, err := s.pool.Query(ctx, `SELECT `+orderColumns+`, (SELECT COALESCE(SUM(quantity), 0) FROM orders.order_items i WHERE i.order_id = o.order_id)
-		FROM orders.orders o `+where+` ORDER BY created_at DESC, order_id DESC LIMIT $7 OFFSET $8`,
-		f.UserID, statuses, f.FailureCode, before, after, warehouses, PageLimit(f.Limit), max(f.Offset, 0))
+		FROM orders.orders o `+where+` ORDER BY created_at DESC, order_id DESC LIMIT $8 OFFSET $9`,
+		f.UserID, statuses, f.FailureCode, before, after, warehouses, f.Channel, PageLimit(f.Limit), max(f.Offset, 0))
 	if err != nil {
 		return nil, 0, dependency.Wrap(err)
 	}

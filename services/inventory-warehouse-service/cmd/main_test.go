@@ -11,6 +11,7 @@ import (
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth/authtest"
+	"github.com/hieuvu0611/commercelab-retail-be/pkg/internalauth"
 	"github.com/hieuvu0611/commercelab-retail-be/services/inventory-warehouse-service/internal/repository"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -302,5 +303,56 @@ func TestRepeatedHandoverDecrementsOnceAndTheBodyWarehouseMustMatchTheReservatio
 	_ = json.Unmarshal(rec.Body.Bytes(), &st)
 	if st.Data["onHand"].(float64) != 8 || st.Data["committed"].(float64) != 0 {
 		t.Fatalf("stock after two handovers = %+v, want on hand 8 and committed 0", st.Data)
+	}
+}
+
+func TestInternalHandoverRequiresInternalTokenAndMatchesWarehouse(t *testing.T) {
+	authtest.Configure(t)
+	t.Cleanup(internalauth.Reset)
+	_ = internalauth.Configure(testInternalToken)
+	repo := repository.NewInventoryRepository(nil)
+	srv := NewServer(repo, false)
+
+	postInternal := func(path, body, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			req.Header.Set(internalauth.Header, token)
+		}
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := postInternal("/api/v1/inventory/reservations", `{"orderId":"O-POS-1","warehouseId":"WH-HCM-01","lines":[{"skuId":"SKU-BALO-BLACK-20L","quantity":2}]}`, testInternalToken); rec.Code != http.StatusCreated {
+		t.Fatalf("reserve = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := postInternal("/api/v1/inventory/reservations/O-POS-1/commit", "", testInternalToken); rec.Code != http.StatusOK {
+		t.Fatalf("commit = %d %s", rec.Code, rec.Body.String())
+	}
+
+	const path = "/api/v1/inventory/internal/shipments/handover"
+	if rec := postInternal(path, `{"orderId":"O-POS-1","warehouseId":"WH-HCM-01"}`, ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("missing internal token = %d, want 401", rec.Code)
+	}
+	if rec := postInternal(path, `{"orderId":"O-POS-1","warehouseId":"WH-HCM-01"}`, "wrong-token"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong internal token = %d, want 401", rec.Code)
+	}
+	if rec := postInternal(path, `{"orderId":"O-POS-1"}`, testInternalToken); rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing warehouseId = %d, want 400", rec.Code)
+	}
+	if rec := postInternal(path, `{"orderId":"O-POS-1","warehouseId":"WH-HN-01"}`, testInternalToken); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "WAREHOUSE_MISMATCH") {
+		t.Fatalf("mismatched warehouse = %d %s, want 409 WAREHOUSE_MISMATCH", rec.Code, rec.Body.String())
+	}
+
+	for i := 0; i < 2; i++ {
+		if rec := postInternal(path, `{"orderId":"O-POS-1","warehouseId":"WH-HCM-01"}`, testInternalToken); rec.Code != http.StatusOK {
+			t.Fatalf("internal handover #%d = %d %s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	st, _, _ := repo.GetStock(t.Context(), "WH-HCM-01", "SKU-BALO-BLACK-20L")
+	if st.OnHand != 8 || st.Committed != 0 || st.Available() != 8 {
+		t.Fatalf("expected onHand=8 committed=0 available=8, got %+v", st)
 	}
 }

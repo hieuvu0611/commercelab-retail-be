@@ -46,6 +46,7 @@ func (r *LedgerRepository) seedDefaultAccounts() {
 	now := time.Now().UTC()
 	defaults := []domain.Account{
 		{AccountCode: "1110", AccountName: "Cash in Bank (Settlement Account)", AccountType: domain.AccountAsset, BalanceVND: 0, CreatedAt: now},
+		{AccountCode: "1111", AccountName: "Store Cash on Hand (POS Register)", AccountType: domain.AccountAsset, BalanceVND: 0, CreatedAt: now},
 		{AccountCode: "1120", AccountName: "Payment Gateway Receivable (VNPay / Stripe)", AccountType: domain.AccountAsset, BalanceVND: 0, CreatedAt: now},
 		{AccountCode: "1388", AccountName: "Reconciliation Discrepancies Receivable", AccountType: domain.AccountAsset, BalanceVND: 0, CreatedAt: now},
 		{AccountCode: "3388", AccountName: "Customer Refund Obligations", AccountType: domain.AccountLiability, BalanceVND: 0, CreatedAt: now},

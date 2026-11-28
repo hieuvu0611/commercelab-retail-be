@@ -170,6 +170,7 @@ type Carts interface {
 type Deps struct {
 	Orders      orders.Store
 	Quotes      Quotes
+	Catalog     CatalogPricer
 	Stock       Stock
 	Payments    Payments
 	Vouchers    voucher.Reserver
@@ -187,13 +188,19 @@ type Principal struct{ UserID, Bearer string }
 // Service places orders.
 type Service struct {
 	Deps
-	locks orderLocks
-	now   func() time.Time
-	newID func() string
+	locks    orderLocks
+	now      func() time.Time
+	newID    func() string
+	newPOSID func() string
 }
 
 func New(d Deps) *Service {
-	return &Service{Deps: d, now: func() time.Time { return time.Now().UTC() }, newID: randomOrderID}
+	return &Service{
+		Deps:     d,
+		now:      func() time.Time { return time.Now().UTC() },
+		newID:    randomOrderID,
+		newPOSID: randomPOSOrderID,
+	}
 }
 
 // WithClock replaces the clock (tests).

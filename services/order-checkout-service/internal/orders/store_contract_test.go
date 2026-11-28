@@ -306,3 +306,38 @@ func TestHashIntentDependsOnUserAndQuote(t *testing.T) {
 		t.Fatal("hash must change with the quote and the user")
 	}
 }
+
+func runPOSChannelContract(t *testing.T, newStore func(t *testing.T) Store, uniq func(string) string) {
+	ctx := context.Background()
+	s := newStore(t)
+	cashier := uniq("cashier")
+	posID := uniq("ord-pos")
+	onlineID := uniq("O")
+
+	posOrder := Order{
+		OrderID: posID, UserID: cashier, Channel: ChannelPOS, ReceiptNumber: "POS-HCM-TEST01",
+		WarehouseID: "WH-HCM-01", Status: StatusDeliveryComplete, PaymentMethod: "POS_CASH", PaymentStatus: PaymentCollected,
+		SubtotalVND: 300000, TotalPayableVND: 300000, CapturedVND: 300000, CashReceivedVND: 500000, ChangeDueVND: 200000,
+		CustomerNote: "Walk-in",
+		Items:        []Item{{SkuID: "SKU-A", SkuName: "Backpack", Quantity: 1, UnitPriceVND: 300000, AllocatedUnitPaidVND: 300000}},
+	}
+	stored, replayed, err := s.Create(ctx, uniq("k-pos"), HashIntent(cashier, "pos-1"), posOrder)
+	if err != nil || replayed {
+		t.Fatalf("create POS order = %v replayed=%v", err, replayed)
+	}
+	if stored.Channel != ChannelPOS || stored.ReceiptNumber != "POS-HCM-TEST01" || stored.CashReceivedVND != 500000 || stored.ChangeDueVND != 200000 || stored.CustomerNote != "Walk-in" {
+		t.Fatalf("unexpected POS order fields: %+v", stored)
+	}
+	if _, _, err := s.Create(ctx, uniq("k-onl"), HashIntent(cashier, "Q-1"), sampleOrder(onlineID, cashier, "Q-1")); err != nil {
+		t.Fatal(err)
+	}
+	posList, total, err := s.Query(ctx, Filter{UserID: cashier, Channel: ChannelPOS, WarehouseIDs: []string{"WH-HCM-01"}})
+	if err != nil || total != 1 || len(posList) != 1 || posList[0].OrderID != posID || posList[0].ItemCount != 1 {
+		t.Fatalf("POS query = %+v total=%d err=%v", posList, total, err)
+	}
+}
+
+func TestMemoryStorePOSChannel(t *testing.T) {
+	var n int
+	runPOSChannelContract(t, func(*testing.T) Store { return NewMemoryStore() }, func(p string) string { n++; return fmt.Sprintf("%s-%d", p, n) })
+}

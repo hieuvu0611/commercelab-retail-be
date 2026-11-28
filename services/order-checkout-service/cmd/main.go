@@ -118,9 +118,11 @@ func main() {
 	}
 	snapshots = snapshot.WithErasureTombstones(snapshots, privacyStore)
 	peers := svcclient.New(svcclient.Config{MaxRetries: 2})
+	catalogURL := config.EnvOrDefault("CATALOG_SERVICE_URL", "http://localhost:8081")
 	checkoutSvc := checkout.New(checkout.Deps{
 		Orders:      orderStore,
-		Quotes:      peer.NewQuotes(config.EnvOrDefault("CATALOG_SERVICE_URL", "http://localhost:8081"), peers),
+		Quotes:      peer.NewQuotes(catalogURL, peers),
+		Catalog:     peer.NewCatalogPrices(catalogURL, peers),
 		Stock:       peer.NewStock(config.EnvOrDefault("INVENTORY_SERVICE_URL", "http://localhost:8082"), peers),
 		Payments:    peer.NewPayments(config.EnvOrDefault("PAYMENT_SERVICE_URL", "http://localhost:8084"), peers),
 		Vouchers:    store,
@@ -128,7 +130,7 @@ func main() {
 		Addresses:   peer.NewAddresses(config.EnvOrDefault("IAM_SERVICE_URL", "http://localhost:8087"), peers),
 		Snapshots:   snapshots,
 		Fulfillment: peer.NewFulfillment(config.EnvOrDefault("FULFILLMENT_SERVICE_URL", "http://localhost:8085"), peers),
-		Carts:       peer.NewCarts(config.EnvOrDefault("CATALOG_SERVICE_URL", "http://localhost:8081"), peers),
+		Carts:       peer.NewCarts(catalogURL, peers),
 		WarehouseID: config.EnvOrDefault("ORDER_WAREHOUSE_ID", defaultWarehouseID),
 	})
 
