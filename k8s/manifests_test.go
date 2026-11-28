@@ -151,6 +151,7 @@ func TestCorePlatformManifestsAndKustomization(t *testing.T) {
 		hasLimitRange    bool
 		hasConfigMap     bool
 		hasDefaultDeny   bool
+		hasInfraEgress   bool
 		hpaTargets       = make(map[string]bool)
 	)
 
@@ -172,6 +173,9 @@ func TestCorePlatformManifestsAndKustomization(t *testing.T) {
 			case "NetworkPolicy":
 				if doc.name == "default-deny-ingress" && strings.Contains(doc.raw, "podSelector: {}") && strings.Contains(doc.raw, "- Ingress") {
 					hasDefaultDeny = true
+				}
+				if doc.name == "allow-infra-and-observability-egress" && strings.Contains(doc.raw, "commercelab-infra") && strings.Contains(doc.raw, "port: 5432") {
+					hasInfraEgress = true
 				}
 			case "HorizontalPodAutoscaler":
 				if doc.apiVersion != "autoscaling/v2" {
@@ -197,6 +201,9 @@ func TestCorePlatformManifestsAndKustomization(t *testing.T) {
 	}
 	if !hasDefaultDeny {
 		t.Errorf("missing default-deny-ingress NetworkPolicy")
+	}
+	if !hasInfraEgress {
+		t.Errorf("missing allow-infra-and-observability-egress NetworkPolicy")
 	}
 	for _, target := range []string{"api-gateway", "catalog-pricing-service", "order-checkout-service"} {
 		if !hpaTargets[target] {
