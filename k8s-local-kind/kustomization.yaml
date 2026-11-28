@@ -1,0 +1,92 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: commercelab-retail
+resources:
+  - ../k8s
+
+patches:
+  - patch: |-
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: commercelab-config
+        namespace: commercelab-retail
+      data:
+        PAYMENT_SIMULATOR_ENABLED: "true"
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: api-gateway
+        namespace: commercelab-retail
+      spec:
+        replicas: 1
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: catalog-pricing-service
+        namespace: commercelab-retail
+      spec:
+        replicas: 1
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: order-checkout-service
+        namespace: commercelab-retail
+      spec:
+        replicas: 1
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: api-gateway-hpa
+        namespace: commercelab-retail
+      spec:
+        minReplicas: 1
+        maxReplicas: 2
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: catalog-pricing-service-hpa
+        namespace: commercelab-retail
+      spec:
+        minReplicas: 1
+        maxReplicas: 2
+  - patch: |-
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: order-checkout-service-hpa
+        namespace: commercelab-retail
+      spec:
+        minReplicas: 1
+        maxReplicas: 2
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: api-gateway
+        namespace: commercelab-retail
+      spec:
+        type: NodePort
+        ports:
+          - name: http
+            port: 8080
+            targetPort: 8080
+            nodePort: 30080
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: backoffice-support-service
+        namespace: commercelab-retail
+      spec:
+        type: NodePort
+        ports:
+          - name: http
+            port: 8088
+            targetPort: 8088
+            nodePort: 30088

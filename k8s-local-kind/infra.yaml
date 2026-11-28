@@ -1,0 +1,281 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: commercelab-infra
+  labels:
+    kubernetes.io/metadata.name: commercelab-infra
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: commercelab-infra
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - shared_buffers=64MB
+            - -c
+            - effective_cache_size=128MB
+            - -c
+            - work_mem=2MB
+            - -c
+            - max_connections=100
+          env:
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              value: postgres_password
+            - name: POSTGRES_DB
+              value: commerce_lab
+            - name: TZ
+              value: UTC
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: pg-init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-d", "commerce_lab"]
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+      volumes:
+        - name: pg-init
+          configMap:
+            name: commercelab-pg-init
+        - name: pg-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: commercelab-infra
+spec:
+  type: NodePort
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      nodePort: 30432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: commercelab-infra
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:7.0
+          imagePullPolicy: IfNotPresent
+          args: ["--wiredTigerCacheSizeGB", "0.25"]
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              value: mongo_admin
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              value: mongo_password
+            - name: MONGO_INITDB_DATABASE
+              value: commerce_lab_doc
+          ports:
+            - containerPort: 27017
+          volumeMounts:
+            - name: mongo-init
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            - name: mongo-data
+              mountPath: /data/db
+          readinessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 8
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: mongo-init
+          configMap:
+            name: commercelab-mongo-init
+        - name: mongo-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: commercelab-infra
+spec:
+  type: NodePort
+  selector:
+    app: mongodb
+  ports:
+    - name: mongodb
+      port: 27017
+      targetPort: 27017
+      nodePort: 30017
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: commercelab-infra
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          imagePullPolicy: IfNotPresent
+          args: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+          ports:
+            - containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 192Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: commercelab-infra
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redpanda
+  namespace: commercelab-infra
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: redpanda
+  template:
+    metadata:
+      labels:
+        app: redpanda
+    spec:
+      initContainers:
+        - name: fix-redpanda-perms
+          image: redis:7.2-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "chown -R 101:101 /var/lib/redpanda/data"]
+          volumeMounts:
+            - name: redpanda-data
+              mountPath: /var/lib/redpanda/data
+      containers:
+        - name: redpanda
+          image: docker.redpanda.com/redpandadata/redpanda:v24.1.4
+          imagePullPolicy: IfNotPresent
+          args:
+            - redpanda
+            - start
+            - --smp
+            - "1"
+            - --memory
+            - 200M
+            - --reserve-memory
+            - 0M
+            - --overprovisioned
+            - --kafka-addr
+            - internal://0.0.0.0:9092
+            - --advertise-kafka-addr
+            - internal://redpanda.commercelab-infra.svc.cluster.local:9092
+          ports:
+            - containerPort: 9092
+          volumeMounts:
+            - name: redpanda-data
+              mountPath: /var/lib/redpanda/data
+          readinessProbe:
+            exec:
+              command: ["rpk", "cluster", "info", "--brokers", "localhost:9092"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 384Mi
+      volumes:
+        - name: redpanda-data
+          hostPath:
+            path: /var/lib/commercelab-redpanda-data
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redpanda
+  namespace: commercelab-infra
+spec:
+  selector:
+    app: redpanda
+  ports:
+    - name: kafka
+      port: 9092
+      targetPort: 9092

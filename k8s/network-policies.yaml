@@ -31,6 +31,77 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  name: allow-intra-namespace-egress
+  namespace: commercelab-retail
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8082
+        - protocol: TCP
+          port: 8083
+        - protocol: TCP
+          port: 8084
+        - protocol: TCP
+          port: 8085
+        - protocol: TCP
+          port: 8086
+        - protocol: TCP
+          port: 8087
+        - protocol: TCP
+          port: 8088
+        - protocol: TCP
+          port: 8089
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-infra-and-observability-egress
+  namespace: commercelab-retail
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: commercelab-infra
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 27017
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 9092
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 9200
+        - protocol: TCP
+          port: 8123
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
+      ports:
+        - protocol: TCP
+          port: 4318
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
   name: allow-api-gateway-ingress
   namespace: commercelab-retail
 spec:
