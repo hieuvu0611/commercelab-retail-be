@@ -54,4 +54,5 @@ func TestPostgresStoreContract(t *testing.T) {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM orders.outbox_events WHERE aggregate_id LIKE '%'||$1||'%'`, run)
 	})
 	runQueryContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
+	runPOSChannelContract(t, func(*testing.T) Store { return NewPostgresStore(pool) }, uniq)
 }

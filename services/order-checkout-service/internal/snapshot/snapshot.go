@@ -48,6 +48,9 @@ func RedactedAddress() Address {
 type Snapshot struct {
 	OrderID         string     `json:"orderId" bson:"order_id"`
 	UserID          string     `json:"-" bson:"user_id"`
+	Channel         string     `json:"channel,omitempty" bson:"channel,omitempty"`
+	WarehouseID     string     `json:"warehouseId,omitempty" bson:"warehouse_id,omitempty"`
+	ReceiptNumber   string     `json:"receiptNumber,omitempty" bson:"receipt_number,omitempty"`
 	QuoteID         string     `json:"quoteId" bson:"quote_id"`
 	VoucherCode     string     `json:"voucherCode,omitempty" bson:"voucher_code,omitempty"`
 	Lines           []Line     `json:"lines" bson:"lines"`

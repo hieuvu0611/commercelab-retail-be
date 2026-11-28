@@ -27,6 +27,7 @@ func registerOrderRoutes(mux *http.ServeMux, svc *checkout.Service) {
 	mux.Handle("POST /api/v1/orders/{orderId}/cancel", auth.RequireAuth(auth.RequireRole("CUSTOMER")(http.HandlerFunc(cancelOrder(svc)))))
 	registerPaymentOutcomeRoute(mux, svc)
 	registerOrderReadRoutes(mux, svc)
+	registerPOSRoutes(mux, svc)
 }
 
 // orderView is the order as the customer sees it.

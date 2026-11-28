@@ -14,8 +14,12 @@ import (
 
 // Initial states of a new order. Later states belong to the saga (P5-T02).
 const (
-	StatusPending = "PENDING"
-	PaymentUnpaid = "UNPAID"
+	StatusPending          = "PENDING"
+	StatusDeliveryComplete = "DELIVERY_COMPLETE"
+	PaymentUnpaid          = "UNPAID"
+	PaymentCollected       = "COLLECTED"
+	ChannelOnline          = "ONLINE"
+	ChannelPOS             = "POS"
 )
 
 var (
@@ -63,34 +67,40 @@ type AppliedPromotion struct {
 type Order struct {
 	OrderID           string             `json:"orderId"`
 	UserID            string             `json:"-"`
+	Channel           string             `json:"channel,omitempty"`
+	ReceiptNumber     string             `json:"receiptNumber,omitempty"`
 	QuoteID           string             `json:"quoteId"`
 	AddressID         string             `json:"addressId"`
 	WarehouseID       string             `json:"warehouseId,omitempty"`
 	VoucherCode       string             `json:"voucherCode,omitempty"`
 	AppliedPromotions []AppliedPromotion `json:"appliedPromotions,omitempty"`
-	Status           string     `json:"status"`
-	PaymentMethod    string     `json:"paymentMethod,omitempty"`
-	PaymentStatus    string     `json:"paymentStatus"`
-	FailureCode      string     `json:"failureCode,omitempty"`
-	SubtotalVND      int64      `json:"subtotalVnd"`
-	DiscountVND      int64      `json:"discountVnd"`
-	ShippingFeeVND   int64      `json:"shippingFeeVnd"`
-	TotalPayableVND  int64      `json:"totalPayableVnd"`
-	CapturedVND      int64      `json:"capturedAmountVnd"`
-	RefundPendingVND int64      `json:"refundPendingVnd"`
-	RefundedVND      int64      `json:"refundedAmountVnd"`
-	ItemCount        int64      `json:"itemCount,omitempty"` // set by Query, which does not load items
-	Items            []Item     `json:"items"`
-	Parcels          []Parcel   `json:"parcels,omitempty"`
-	Version          int64      `json:"version"`
-	ExpiresAt        *time.Time `json:"expiresAt,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	UpdatedAt        time.Time  `json:"updatedAt"`
+	Status            string             `json:"status"`
+	PaymentMethod     string             `json:"paymentMethod,omitempty"`
+	PaymentStatus     string             `json:"paymentStatus"`
+	FailureCode       string             `json:"failureCode,omitempty"`
+	SubtotalVND       int64              `json:"subtotalVnd"`
+	DiscountVND       int64              `json:"discountVnd"`
+	ShippingFeeVND    int64              `json:"shippingFeeVnd"`
+	TotalPayableVND   int64              `json:"totalPayableVnd"`
+	CapturedVND       int64              `json:"capturedAmountVnd"`
+	RefundPendingVND  int64              `json:"refundPendingVnd"`
+	RefundedVND       int64              `json:"refundedAmountVnd"`
+	CashReceivedVND   int64              `json:"cashReceivedVnd,omitempty"`
+	ChangeDueVND      int64              `json:"changeDueVnd,omitempty"`
+	CustomerNote      string             `json:"customerNote,omitempty"`
+	ItemCount         int64              `json:"itemCount,omitempty"` // set by Query, which does not load items
+	Items             []Item             `json:"items"`
+	Parcels           []Parcel           `json:"parcels,omitempty"`
+	Version           int64              `json:"version"`
+	ExpiresAt         *time.Time         `json:"expiresAt,omitempty"`
+	CreatedAt         time.Time          `json:"createdAt"`
+	UpdatedAt         time.Time          `json:"updatedAt"`
 }
 
 // Filter selects orders for Query. Zero values mean "any".
 type Filter struct {
 	UserID        string
+	Channel       string
 	Statuses      []string
 	FailureCode   string
 	WarehouseIDs  []string  // only orders of these warehouses (a warehouse manager's scope)

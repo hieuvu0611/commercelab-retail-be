@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hieuvu0611/commercelab-retail-be/pkg/auth"
@@ -192,24 +193,22 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 	// SC02, I08, SC12: the warehouse hands the parcel to the courier. Only warehouse staff and managers may do it,
 	// and only in a warehouse their token covers. The warehouse is the one the reservation was made in;
 	// it never comes from a client-supplied header or a hard-coded value.
-	handover := func(w http.ResponseWriter, r *http.Request) {
+	executeHandover := func(w http.ResponseWriter, r *http.Request, requireStaffScope, requireBodyWarehouse bool) {
 		var req struct {
 			OrderID string `json:"orderId"`
-			// WarehouseID is optional; when the caller names the warehouse (fulfillment sends the shipment's),
-			// it must be the one the stock was reserved in.
+			// WarehouseID is optional for staff handover (inferred from reservation); when provided,
+			// it must match the warehouse the stock was reserved in.
 			WarehouseID string `json:"warehouseId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.OrderID == "" {
 			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "orderId is required for handover", nil)
 			return
 		}
-		reservation, err := repo.GetReservationForWarehouse(r.Context(), req.OrderID, req.WarehouseID)
-		if errors.Is(err, repository.ErrReservationNotFound) && req.WarehouseID != "" {
-			if other, otherErr := repo.GetReservation(r.Context(), req.OrderID); otherErr == nil && other != nil {
-				response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
-				return
-			}
+		if requireBodyWarehouse && strings.TrimSpace(req.WarehouseID) == "" {
+			response.Error(w, r, http.StatusBadRequest, "INVALID_PAYLOAD", "warehouseId is required for internal handover", nil)
+			return
 		}
+		reservation, err := repo.GetReservationForWarehouse(r.Context(), req.OrderID, req.WarehouseID)
 		if errors.Is(err, repository.ErrReservationNotFound) && req.WarehouseID != "" {
 			if other, otherErr := repo.GetReservation(r.Context(), req.OrderID); otherErr == nil && other != nil {
 				response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
@@ -224,10 +223,12 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 			response.Error(w, r, http.StatusConflict, "HANDOVER_FAILED", err.Error(), nil)
 			return
 		}
-		claims, _ := auth.ClaimsFrom(r.Context())
-		if !auth.CanAccessWarehouse(claims, reservation.WarehouseID) {
-			auth.ForbiddenWarehouse(w, r)
-			return
+		if requireStaffScope {
+			claims, _ := auth.ClaimsFrom(r.Context())
+			if !auth.CanAccessWarehouse(claims, reservation.WarehouseID) {
+				auth.ForbiddenWarehouse(w, r)
+				return
+			}
 		}
 		if req.WarehouseID != "" && req.WarehouseID != reservation.WarehouseID {
 			response.Error(w, r, http.StatusConflict, "WAREHOUSE_MISMATCH", "The order's stock is reserved in a different warehouse", nil)
@@ -244,8 +245,16 @@ func NewServer(repo *repository.InventoryRepository, pgConnected bool, opts ...S
 		}
 		response.JSON(w, http.StatusOK, "Bàn giao vận chuyển và trừ tồn thực tế thành công (SC02)", rec, nil)
 	}
+	handover := func(w http.ResponseWriter, r *http.Request) {
+		executeHandover(w, r, true, false)
+	}
+	internalHandover := func(w http.ResponseWriter, r *http.Request) {
+		executeHandover(w, r, false, true)
+	}
 	mux.Handle("POST /api/v1/inventory/shipments/handover",
 		auth.RequireAuth(auth.RequireRole("WAREHOUSE_STAFF", "WAREHOUSE_MGR")(http.HandlerFunc(handover))))
+	mux.Handle("POST /api/v1/inventory/internal/shipments/handover",
+		internalauth.Require(http.HandlerFunc(internalHandover)))
 
 	// SC06: the warehouse confirms it stopped a parcel for a cancellation. Staff only, in the warehouse the stock
 	// is reserved in. It and the handover are mutually exclusive on the reservation, so only one of them wins.

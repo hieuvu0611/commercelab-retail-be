@@ -324,3 +324,47 @@ func NewCODSettlementMatchedEntry(
 	}
 	return entry, nil
 }
+
+func NewPOSSaleCompletedEntry(entryID, orderID, warehouseID, paymentMethod string, amountVND int64, actor string) (JournalEntry, error) {
+	if amountVND <= 0 {
+		return JournalEntry{}, fmt.Errorf("POS sale amount must be positive, got %d", amountVND)
+	}
+	var debitAccount string
+	switch paymentMethod {
+	case "POS_CASH":
+		debitAccount = "1111"
+	case "POS_CARD":
+		debitAccount = "1120"
+	default:
+		return JournalEntry{}, fmt.Errorf("unsupported POS payment method: %s", paymentMethod)
+	}
+	if actor == "" {
+		actor = "pos-consumer"
+	}
+	now := time.Now().UTC()
+	entry := JournalEntry{
+		EntryID:     entryID,
+		EventType:   "POS_SALE_COMPLETED",
+		ReferenceID: orderID,
+		Description: fmt.Sprintf("POS sale completed for order %s at %s (%s)", orderID, warehouseID, paymentMethod),
+		PostedAt:    now,
+		CreatedBy:   actor,
+		CreatedAt:   now,
+		Postings: []Posting{
+			{
+				AccountCode: debitAccount,
+				Direction:   DirectionDebit,
+				AmountVND:   amountVND,
+			},
+			{
+				AccountCode: "5110",
+				Direction:   DirectionCredit,
+				AmountVND:   amountVND,
+			},
+		},
+	}
+	if err := ValidateJournalEntry(entry); err != nil {
+		return JournalEntry{}, err
+	}
+	return entry, nil
+}

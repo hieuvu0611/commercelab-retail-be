@@ -100,7 +100,7 @@ func (rt *Router) resolveTarget(path string) string {
 		return rt.targets.Inventory
 	case strings.HasPrefix(path, "/api/v1/admin/shipments") || strings.HasPrefix(path, "/api/v1/admin/fulfillment-cases") || (strings.HasPrefix(path, "/api/v1/admin/orders/") && strings.HasSuffix(path, "/shipments")):
 		return rt.targets.Fulfillment
-	case strings.HasPrefix(path, "/api/v1/admin/vouchers") || strings.HasPrefix(path, "/api/v1/admin/promotions") || strings.HasPrefix(path, "/api/v1/admin/orders"):
+	case strings.HasPrefix(path, "/api/v1/admin/vouchers") || strings.HasPrefix(path, "/api/v1/admin/promotions") || strings.HasPrefix(path, "/api/v1/admin/orders") || strings.HasPrefix(path, "/api/v1/admin/pos"):
 		return rt.targets.Order
 	case strings.HasPrefix(path, "/api/v1/admin/ledger"):
 		return rt.targets.Ledger

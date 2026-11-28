@@ -313,6 +313,47 @@ func (s *Stock) ReleaseCommitted(ctx context.Context, orderID string) error {
 	return err
 }
 
+func (s *Stock) Handover(ctx context.Context, orderID, warehouseID string) error {
+	body := map[string]string{"orderId": orderID, "warehouseId": warehouseID}
+	_, err := s.client.Do(ctx, http.MethodPost, s.base+"/api/v1/inventory/internal/shipments/handover",
+		svcclient.Options{Internal: true, IdempotencyKey: "handover-" + orderID}, body, nil)
+	return err
+}
+
+type CatalogPrices struct {
+	base   string
+	client *svcclient.Client
+}
+
+func NewCatalogPrices(catalogURL string, c *svcclient.Client) *CatalogPrices {
+	return &CatalogPrices{base: trim(catalogURL), client: c}
+}
+
+func (p *CatalogPrices) GetSKUPrice(ctx context.Context, skuID string) (checkout.SKUPricing, error) {
+	var out struct {
+		SkuID        string `json:"skuId"`
+		SkuName      string `json:"skuName"`
+		UnitPriceVND int64  `json:"unitPriceVnd"`
+	}
+	_, err := p.client.Do(ctx, http.MethodGet, p.base+"/api/v1/internal/skus/"+url.PathEscape(skuID)+"/price",
+		svcclient.Options{Internal: true}, nil, &out)
+	var apiErr *svcclient.APIError
+	if errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusUnprocessableEntity) {
+		return checkout.SKUPricing{}, checkout.ErrInvalidSKU
+	}
+	if err != nil {
+		return checkout.SKUPricing{}, err
+	}
+	if out.UnitPriceVND <= 0 {
+		return checkout.SKUPricing{}, checkout.ErrInvalidSKU
+	}
+	return checkout.SKUPricing{
+		SkuID:        out.SkuID,
+		Name:         out.SkuName,
+		UnitPriceVND: out.UnitPriceVND,
+	}, nil
+}
+
 // Fulfillment calls the fulfillment service's internal stop route.
 type Fulfillment struct {
 	base   string
